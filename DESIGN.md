@@ -1318,7 +1318,7 @@ target length), - FilmCraft adapter with capability discovery,
 idempotent project creation and clip placement, checkpoints and command
 logs, basic audio and still-image support, - save/reopen verification
 and preview render, - deterministic QC, media manifest, interchange
-export (native or read-back fallback, §15.3), handoff report, and the
+export (native; the read-back fallback of §15.3 moved to Phase 7), handoff report, and the
 user-run Resolve verification script (§15.4), - `status`/`resume`.
 
 **Exit criterion:** `trip-vlog draft --planner baseline` turns the
@@ -1351,6 +1351,33 @@ fixture round-trip, - explicit compatibility report.
 
 Deliver: - natural-language revision parser, - localized plan diffs, -
 versioned project updates, - rerender and change summary.
+
+### Phase 7 --- Deferred hardening and polish
+
+Items deferred from earlier phases. None blocks a usable draft; each
+ships with tests like any other phase. Deliver:
+
+-   **Read-back interchange fallback (§15.3):** generate OTIO / FCP7 XML
+    from the timeline read back from FilmCraft when its native export
+    is missing or lossy, with the cross-check diff in the handoff
+    report. Not needed so far: FilmCraft 0.13's native FCP7 XML
+    passed every check in Resolve.
+-   **Plan re-seal helper:** a command that re-validates a hand-edited
+    `edit_plan.json` / outline and recomputes its seal (hash), so
+    manual edits are accepted explicitly instead of failing the hash
+    check.
+-   **Failed-assembly cleanup:** when a FilmCraft build fails midway,
+    mark the partial `_vNNN.fcproj` as failed in the journal and keep
+    it out of `resume`/handoff, without deleting user data.
+-   **Portrait and mixed-aspect framing:** scale-to-fit portrait clips
+    and stills in a landscape sequence (and the reverse), if FilmCraft
+    supports it and the result is verified.
+-   **Audio ducking:** lower music under natural sound or speech
+    (§13.3), verified in the read-back and the preview.
+-   **Captions and subtitles from transcripts (§13.4):** captions only
+    from transcript text, never paraphrased, exported in a form the
+    handoff can carry (e.g. an SRT alongside the timeline) and verified
+    in Resolve.
 
 ## 21. Suggested repository structure
 
