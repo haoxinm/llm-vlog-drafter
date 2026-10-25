@@ -105,7 +105,7 @@ class MediaConfig(_Model):
     fine_sampling_fps: float = Field(4.0, gt=0, le=60)
     fine_sampling_enabled: bool = False
     segment_window_seconds: float = Field(6.0, gt=0, le=120)
-    transcribe_speech: bool = True
+    transcribe_speech: bool | None = None  # DEPRECATED alias of speech.enabled; folded into it at load time (see Config._speech_alias)
     local_only: bool = False       # true: every LLM endpoint used for text and vision must be loopback (see `llm.endpoints`)
     # Phase 1 additions
     ffprobe_path: str | None = None
@@ -125,6 +125,8 @@ class MediaConfig(_Model):
     vision_batch_max_images: int = Field(16, ge=1, le=100)       # images per request (segments are never split across requests)
     vision_send_filenames: bool = True                          # send the file's base name (wrapped as untrusted data), never its folders
     photo_duplicate_distance: int = Field(6, ge=0, le=32)        # max Hamming distance of 64-bit dHashes to call two photos near-duplicates
+    # Phase 3c audio features (loudness, clipping, wind-likelihood per asset/segment; see README "Speech transcription")
+    audio_features: bool = True
 
     @model_validator(mode="after")
     def _check(self) -> "MediaConfig":
@@ -270,6 +272,141 @@ class LLMConfig(_Model):
         return name, self.endpoints[name]
 
 
+SPEECH_BACKENDS = ("none", "openai_transcriptions", "command")
+SPEECH_RESPONSE_FORMATS = ("verbose_json", "json", "text", "srt", "vtt")
+SPEECH_RESERVED_PARAMS = frozenset({"file", "model", "language", "response_format", "timestamp_granularities[]", "timestamp_granularities"})
+DEFAULT_SPEECH_PATH = "/v1/audio/transcriptions"
+
+
+class SpeechEndpointConfig(_Model):
+    """HTTP transcription endpoint (multipart upload, OpenAI-style `/v1/audio/transcriptions`). Credentials by env-var NAME only.
+
+    The request shape follows the public OpenAI documentation and is what OpenAI-compatible servers (faster-whisper-server,
+    whisper.cpp server, LocalAI, ...) implement; verify it against your server with `trip-vlog llm-check --speech`.
+    """
+
+    base_url: str = "https://api.openai.com"
+    path: str | None = None              # null -> /v1/audio/transcriptions
+    model: str | None = None
+    model_env: str | None = Field("TRIP_VLOG_SPEECH_MODEL", pattern=_ENV_NAME_RE)
+    api_key_env: str | None = Field("OPENAI_API_KEY", pattern=_ENV_NAME_RE)   # null -> no auth (local servers)
+    headers: dict[str, str] = {}         # values may reference env vars as ${VAR}; never logged
+    timeout_seconds: float = Field(300.0, gt=0, le=7200)
+    max_retries: int = Field(2, ge=0, le=10)
+    response_format: Literal["verbose_json", "json", "text", "srt", "vtt"] = "verbose_json"
+    timestamp_granularities: list[Literal["segment", "word"]] = ["segment"]  # sent only with verbose_json; [] omits the field
+    params: dict[str, Any] = {}          # extra multipart fields (e.g. temperature, prompt); scalars or lists
+    allow_insecure_http: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _no_literal_keys(cls, data: Any) -> Any:
+        return EndpointConfig._no_literal_keys.__func__(cls, data)  # type: ignore[attr-defined]
+
+    @field_validator("model")
+    @classmethod
+    def _model_not_blank(cls, v: str | None) -> str | None:
+        return EndpointConfig._model_not_blank.__func__(cls, v)  # type: ignore[attr-defined]
+
+    @field_validator("path")
+    @classmethod
+    def _path(cls, v: str | None) -> str | None:
+        return EndpointConfig._path.__func__(cls, v)  # type: ignore[attr-defined]
+
+    @field_validator("headers")
+    @classmethod
+    def _headers(cls, v: dict[str, str]) -> dict[str, str]:
+        return EndpointConfig._headers.__func__(cls, v)  # type: ignore[attr-defined]
+
+    @field_validator("params")
+    @classmethod
+    def _params(cls, v: dict[str, Any]) -> dict[str, Any]:
+        bad = sorted(SPEECH_RESERVED_PARAMS & set(v))
+        if bad:
+            raise ValueError(f"params must not set fields that have their own option: {', '.join(bad)}")
+        for k, x in v.items():
+            if not isinstance(k, str) or not k or any(c in k for c in '"\r\n'):
+                raise ValueError(f"invalid parameter name {k!r}")
+            if x is None or isinstance(x, (dict, set)):
+                raise ValueError(f"params.{k} must be a scalar or a list of scalars")
+        return v
+
+    @model_validator(mode="after")
+    def _finish(self) -> "SpeechEndpointConfig":
+        parts = urlsplit(self.base_url or "")
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise ValueError(f"base_url must be an http(s) URL with a host, got {self.base_url!r}")
+        if parts.username or parts.password:
+            raise ValueError("base_url must not contain credentials")
+        if parts.scheme == "http" and not self.is_local and not self.allow_insecure_http:
+            raise ValueError(f"base_url {self.base_url!r} uses plain http to a non-loopback host; use https or set allow_insecure_http: true")
+        return self
+
+    @property
+    def host(self) -> str:
+        return urlsplit(self.base_url or "").hostname or ""
+
+    @property
+    def is_local(self) -> bool:
+        return is_loopback_host(self.host)
+
+    @property
+    def url(self) -> str:
+        return self.base_url.rstrip("/") + (self.path or DEFAULT_SPEECH_PATH)
+
+
+class SpeechCommandConfig(_Model):
+    """A local executable that writes a transcript file. No shell is involved: `args` is a list, placeholders are substituted
+    inside each element: {input} (audio file), {output_dir} (empty temp dir), {output_base} (= {output_dir}/transcript, for tools
+    that take a prefix without extension) and {language} (the configured language or "auto")."""
+
+    executable: str | None = None
+    args: list[str] = []
+    output_format: Literal["srt", "vtt", "json"] = "srt"
+    timeout_seconds: float = Field(3600.0, gt=0, le=86400)
+
+    @model_validator(mode="after")
+    def _placeholders(self) -> "SpeechCommandConfig":
+        if self.args:
+            joined = "\n".join(self.args)
+            if "{input}" not in joined:
+                raise ValueError("args must contain the {input} placeholder")
+            if "{output_dir}" not in joined and "{output_base}" not in joined:
+                raise ValueError("args must contain {output_dir} (or {output_base}) so the transcript file can be found")
+        return self
+
+
+class SpeechConfig(_Model):
+    """Optional speech transcription (DESIGN §7.3, §22). Off in effect until a backend is chosen: the default backend is `none`."""
+
+    enabled: bool = True                 # single source of truth; media.transcribe_speech is a deprecated alias
+    backend: Literal["none", "openai_transcriptions", "command"] = "none"
+    language: str | None = Field(None, pattern=r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$")   # null -> let the backend detect it
+    endpoint: SpeechEndpointConfig = Field(default_factory=SpeechEndpointConfig)
+    command: SpeechCommandConfig = Field(default_factory=SpeechCommandConfig)
+    min_speech_seconds: float = Field(1.0, ge=0, le=3600)   # skip assets with less non-silent audio than this
+    audio_format: Literal["wav", "flac"] = "wav"            # temporary 16 kHz mono file handed to the backend
+    keep_audio: bool = False                                # keep the extracted files under media_index/audio/ (else deleted after use)
+    chunk_seconds: float = Field(600.0, ge=30, le=3600)     # HTTP backend: longer audio is uploaded in chunks of this length
+    context_max_chars: int = Field(1200, ge=0, le=20000)    # transcript text per segment shown to the vision model (0 disables)
+
+    @model_validator(mode="after")
+    def _backend_ready(self) -> "SpeechConfig":
+        if self.backend == "command" and not (self.command.executable or "").strip():
+            raise ValueError("speech.backend is 'command' but speech.command.executable is not set")
+        if self.backend == "command" and not self.command.args:
+            raise ValueError("speech.backend is 'command' but speech.command.args is empty (it must contain {input} and {output_dir})")
+        return self
+
+    @property
+    def active(self) -> bool:
+        return self.enabled and self.backend != "none"
+
+    @property
+    def is_local(self) -> bool:
+        return self.backend != "openai_transcriptions" or self.endpoint.is_local
+
+
 class WorkflowConfig(_Model):
     approval: Literal["stop_after_outline", "auto_approve"] = "stop_after_outline"
     planner: Literal["baseline", "llm"] = "baseline"  # "llm" arrives in Phase 3/4 and is rejected until then
@@ -339,6 +476,7 @@ class Config(_Model):
     editorial: EditorialConfig = EditorialConfig()
     media: MediaConfig = MediaConfig()
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    speech: SpeechConfig = Field(default_factory=SpeechConfig)
     workflow: WorkflowConfig = WorkflowConfig()
     filmcraft: FilmCraftConfig = FilmCraftConfig()
     qc: QcConfig = QcConfig()
@@ -357,7 +495,26 @@ class Config(_Model):
         return data
 
     @model_validator(mode="after")
+    def _speech_alias(self) -> "Config":
+        """`media.transcribe_speech` (older name) is folded into `speech.enabled`, which is the single source of truth.
+        Both set to different values is an error; afterwards the alias is cleared so the effective config shows one value."""
+        alias = self.media.transcribe_speech
+        if alias is not None:
+            if "enabled" in self.speech.model_fields_set and self.speech.enabled != alias:
+                raise ValueError(
+                    f"media.transcribe_speech ({str(alias).lower()}) conflicts with speech.enabled ({str(self.speech.enabled).lower()}); "
+                    "media.transcribe_speech is deprecated: remove it and use speech.enabled only")
+            self.speech.__dict__["enabled"] = alias
+            self.speech.__dict__["__pydantic_fields_set__"] = self.speech.model_fields_set | {"enabled"}
+            self.media.__dict__["transcribe_speech"] = None
+        return self
+
+    @model_validator(mode="after")
     def _local_only(self) -> "Config":
+        if self.media.local_only and self.speech.active and not self.speech.is_local:
+            raise ValueError(
+                f"media.local_only is true but speech.endpoint host {self.speech.endpoint.host!r} is not a loopback address "
+                "(127.x, ::1, localhost); point speech.endpoint at a local server, use speech.backend: command, or turn local_only off")
         if self.media.local_only:
             for purpose in ("text", "vision"):
                 name, ep = self.llm.endpoint_for(purpose)
