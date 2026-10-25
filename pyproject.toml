@@ -18,6 +18,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+# optional: Anthropic SDK for the default LLM provider (pip install -e ".[llm]")
+llm = ["anthropic>=2.3"]
 # optional: lets the handoff step reload timeline.otio with the OpenTimelineIO library as an extra check
 otio = ["opentimelineio>=0.17"]
 

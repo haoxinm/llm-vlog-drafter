@@ -81,6 +81,21 @@ class EditorialConfig(_Model):
     avoid_excessive_transitions: bool = True
 
 
+def _workspace_relative(v: str, what: str) -> str:
+    norm = v.replace("\\", "/")
+    p = PurePosixPath(norm)
+    if not norm.strip() or p.is_absolute() or re.match(r"^[A-Za-z]:", norm) or norm.startswith("//"):
+        raise ValueError(f"{what} must be a non-empty path relative to the workspace: {v!r}")
+    parts = [x for x in p.parts if x != "."]
+    if not parts or ".." in parts:
+        raise ValueError(f"{what} must stay inside the workspace (no '..'): {v!r}")
+    for part in parts:
+        problem = check_portable_component(part)
+        if problem:
+            raise ValueError(f"{what} {v!r} {problem}")
+    return "/".join(parts)
+
+
 class MediaConfig(_Model):
     recursive: bool = True
     follow_symlinks: bool = False
@@ -93,8 +108,16 @@ class MediaConfig(_Model):
     transcribe_speech: bool = True
     vision_provider: str = Field("anthropic", pattern=_PROVIDER_RE)
     llm_provider: str = Field("anthropic", pattern=_PROVIDER_RE)
-    llm_model: str | None = None
+    llm_model: str | None = None   # wins over env TRIP_VLOG_LLM_MODEL when set; no built-in default (DESIGN §4.1)
     local_only: bool = False
+    # Phase 3a LLM gateway (credentials are NEVER configured here: the SDK reads them from the environment)
+    llm_max_retries: int = Field(2, ge=0, le=10)             # SDK transport retries (429/5xx/connection)
+    llm_schema_retries: int = Field(2, ge=0, le=5)           # re-asks with validation errors after a schema failure
+    llm_timeout_seconds: float = Field(600.0, gt=0, le=3600)
+    llm_image_max_side: int = Field(1568, ge=256, le=8000)   # longest side of frames sent to the provider
+    llm_image_quality: int = Field(85, ge=30, le=100)        # JPEG quality of those frames
+    llm_cache_dir: str = "cache/llm"                         # response cache; relative to the workspace, must stay inside it
+    llm_fixture_dir: str | None = None                       # record/replay store; default: llm_cache_dir (env TRIP_VLOG_LLM_FIXTURE_DIR)
     # Phase 1 additions
     ffprobe_path: str | None = None
     ffmpeg_path: str | None = None
@@ -107,6 +130,18 @@ class MediaConfig(_Model):
     scene_threshold: float = Field(0.30, gt=0, lt=1)           # ffmpeg scene-cut score
     silence_threshold_db: float = Field(-35.0, ge=-120, le=0)  # audio below this level counts as silence
     still_duration_seconds: float = Field(3.0, gt=0, le=600)   # default on-screen time of a photo
+
+    @field_validator("llm_model")
+    @classmethod
+    def _model_not_blank(cls, v: str | None) -> str | None:
+        if v is not None and not v.strip():
+            raise ValueError("llm_model must not be blank (use null to fall back to TRIP_VLOG_LLM_MODEL)")
+        return v.strip() if v is not None else v
+
+    @field_validator("llm_cache_dir")
+    @classmethod
+    def _cache_dir_inside_workspace(cls, v: str) -> str:
+        return _workspace_relative(v, "llm_cache_dir")
 
     @model_validator(mode="after")
     def _check(self) -> "MediaConfig":

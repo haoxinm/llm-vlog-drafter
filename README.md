@@ -168,6 +168,44 @@ It is not part of `draft`; the plain FCP7 XML import remains the supported path 
 File names, thumbnails and GPS are personal data. GPS is stored in `catalog.sqlite` but omitted from `assets.jsonl` unless `media.export_gps: true`.
 Nothing in Phase 1 or 2 contacts the network; FilmCraft runs locally and is confined to the workspace for writes and to the media folder + workspace for reads.
 
+## LLM provider
+
+Phase 3a adds the provider-neutral LLM gateway in `src/trip_vlog/llm/`. No CLI command uses it yet (vision labeling and transcription come next);
+the baseline `draft` flow still never contacts the network.
+
+```sh
+pip install -e ".[llm]"                  # installs the optional official `anthropic` SDK (imported lazily)
+export ANTHROPIC_API_KEY=...             # macOS / Linux
+```
+
+```powershell
+pip install -e ".[llm]"
+$env:ANTHROPIC_API_KEY="..."             # Windows PowerShell (current session only)
+```
+
+- **Credentials** are read by the SDK from the environment only. They are never accepted from `project.yaml`, never logged and never stored.
+- **Model id** is never hard-coded. It comes from `media.llm_model` if set, otherwise from the `TRIP_VLOG_LLM_MODEL` environment variable (config wins, so a
+  project pins its model; the env var is a per-machine default). With neither, the Anthropic provider fails with a clear message.
+- **Providers**: `media.vision_provider` (frames) and `media.llm_provider` (text) accept `anthropic` or `replay`. `media.local_only: true` rejects cloud providers.
+- **Settings** under `media`: `llm_max_retries` (SDK transport retries, 2), `llm_schema_retries` (re-asks with validation errors, 2), `llm_timeout_seconds`,
+  `llm_image_max_side` (1568), `llm_image_quality` (85), `llm_cache_dir` (`cache/llm`, relative to the workspace), `llm_fixture_dir` (record/replay store; default = cache dir).
+- **Structured output**: every request carries a JSON schema. The provider is sent a sanitized copy (no `minimum`/`maxLength`/..., `additionalProperties: false`),
+  and the gateway validates the full original client-side; on failure it retries by sending back the validation errors (no extra media).
+  Refusals and `max_tokens` truncation raise typed errors (`LLMRefusalError`, `LLMTruncatedError`); output is never silently cut.
+- **Response cache**: results are stored per request fingerprint in `<workspace>/cache/llm/<fingerprint>.json`. The fingerprint is a SHA-256 over the prompt
+  template id + version, system text, schema, text parts, the hash of each image as actually sent, model id, `max_tokens` and effort (no paths), so a changed
+  frame, prompt version, schema or model is a miss and everything else is a hit with no API call.
+- **Record / replay** (tests and CI use replay only, no key needed): `TRIP_VLOG_LLM_MODE=replay` returns stored responses and raises `ReplayMissError`
+  (naming the fingerprint and template) on a miss. `TRIP_VLOG_LLM_MODE=record` calls the real provider and also saves each validated response to the fixture dir
+  (`media.llm_fixture_dir` or `TRIP_VLOG_LLM_FIXTURE_DIR`; tests use `tests/fixtures/llm/`). The default mode is `off`. The `replay` provider name always replays.
+  Replay must use the same model string as the recording, since the model is part of the fingerprint.
+- **Prompts** live in `src/trip_vlog/prompts/<id>.v<N>.md` with `id`/`version` front matter that must match the file name; the version is logged and fingerprinted.
+  Text derived from media (file names, EXIF, transcripts) is wrapped by `llm.untrusted_section(...)` as inert data blocks.
+- **Cost and privacy**: with a cloud provider, the sampled frames, prompts and any transcripts you include are sent to that provider. Frames are downscaled,
+  re-encoded as JPEG and stripped of EXIF/GPS before upload; original files are never modified. Each call logs prompt id/version, model, token usage (input, output,
+  cache read/creation), latency, attempts and request id to `logs/run.jsonl` (stage `llm`), never keys or image bytes. Use `local_only` or `replay` to avoid any upload.
+  The response cache holds model output and the text sent (not image bytes); treat the workspace as private.
+
 ## Platform notes
 
 Windows 10/11 and macOS 13+ are first-class targets, Linux is for development and CI. The code uses `pathlib` only, argument-list subprocesses (no shell),
@@ -177,7 +215,7 @@ with Python 3.11 and 3.13. Only Linux has been exercised locally so far; treat W
 
 ## Known limitations
 
-- **Phase 3+ is not implemented:** no vision labeling, transcription, LLM outline/selection planning, critic or natural-language revisions. The baseline planner
+- **Phase 3 is only partly implemented (the LLM gateway exists, see "LLM provider"):** no vision labeling, transcription, LLM outline/selection planning, critic or natural-language revisions. The baseline planner
   is chronological with fixed clip lengths, stills at a default duration, no music or narration, hard cuts, and no titles.
 - Resolve import is unverified by this tool (see above). Titles are not carried by any interchange format; audio fades appear as dissolves in OTIO;
   FCPXML drops non-V1 transitions; EDL carries one video track. Only the FilmCraft 0.13.0 / Linux combination has been run; Windows and macOS are unverified until CI has run.
