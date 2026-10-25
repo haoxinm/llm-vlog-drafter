@@ -1,0 +1,108 @@
+name: filmcraft-integration
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  FILMCRAFT_COMMIT: 693c41be5a93241e7c502e24d09a946c8a06944e
+
+jobs:
+  integration:
+    name: filmcraft / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout FilmCraft (pinned)
+        uses: actions/checkout@v4
+        with:
+          repository: storytold/filmcraft
+          ref: 693c41be5a93241e7c502e24d09a946c8a06944e
+          path: filmcraft
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            filmcraft/target
+          key: cargo-${{ runner.os }}-${{ env.FILMCRAFT_COMMIT }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Build filmcraft-cli
+        working-directory: filmcraft
+        run: cargo build --release -p filmcraft-cli
+
+      - name: Locate filmcraft-cli
+        run: |
+          exe="filmcraft-cli"
+          if [ "$RUNNER_OS" = "Windows" ]; then exe="filmcraft-cli.exe"; fi
+          cli="$GITHUB_WORKSPACE/filmcraft/target/release/$exe"
+          test -f "$cli"
+          echo "FILMCRAFT_CLI=$cli" >> "$GITHUB_ENV"
+          "$cli" --version || true
+
+      - name: Install FFmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install FFmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
+
+      - name: Install FFmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg -y --no-progress
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]" opentimelineio
+
+      - name: Show tool versions
+        run: |
+          ffmpeg -version | head -n 1
+          python --version
+          echo "FILMCRAFT_CLI=$FILMCRAFT_CLI"
+
+      - name: Integration tests
+        run: python -m pytest -m integration -v
+
+      - name: Generate spike fixtures
+        run: python tests/fixtures/make_fixtures.py
+
+      - name: Phase 0 spike (capability snapshot + interchange exports)
+        run: >
+          python spike/phase0_filmcraft_spike.py
+          --filmcraft-cli "$FILMCRAFT_CLI"
+          --filmcraft-src filmcraft
+
+      - name: Upload capability snapshot and interchange files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: filmcraft-spike-${{ runner.os }}
+          path: |
+            spike/out/capability_snapshot.json
+            spike/out/interchange
+          if-no-files-found: warn
