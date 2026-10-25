@@ -244,10 +244,22 @@ media:
   fine_sampling_enabled: false
   segment_window_seconds: 6.0    # max length of a deterministic candidate segment
   transcribe_speech: true
-  vision_provider: "anthropic"   # anthropic | replay | <other adapter>
-  llm_provider: "anthropic"      # anthropic | replay | <other adapter>
-  llm_model: null                # set via config or env; never hard-coded
-  local_only: false
+  local_only: false              # every LLM endpoint used must be loopback (§22)
+
+llm:
+  mode: "live"                   # live | record | replay
+  text: "main"                   # endpoint profile for text/planning calls
+  vision: "main"                 # endpoint profile for vision calls
+  endpoints:
+    main:
+      api: "anthropic_messages"  # anthropic_messages | openai_chat | openai_responses
+      base_url: "https://api.anthropic.com"   # http://127.0.0.1:<port> = local LLM
+      path: null                 # null = API default (/v1/messages, /v1/chat/completions, /v1/responses)
+      model: null                # or env named by model_env; never hard-coded
+      api_key_env: "ANTHROPIC_API_KEY"        # env var name; null = no auth
+      timeout_seconds: 120
+      structured_output: "native" # native | json_prompt | none
+      params: {}                 # passed through verbatim (temperature, top_p, seed, ...)
 
 workflow:
   approval: "stop_after_outline" # stop_after_outline | auto_approve
@@ -1428,16 +1440,27 @@ Prefer boring, replaceable tools:
     extraction, and output diagnostics---not as a second timeline
     renderer.
 -   **SQLite + JSON artifacts** for cache/catalog persistence.
--   **A provider-neutral LLM gateway** supporting schema-constrained
-    output and vision input, shipping with:
-    -   a default concrete provider (Anthropic Claude API via the
-        official SDK; model ID from config/env, never hard-coded), and
+-   **A provider-neutral LLM gateway** over plain HTTP (no vendor
+    SDK), supporting schema-constrained output and vision input. It
+    speaks three API schemas, so it works with Anthropic, OpenAI and
+    any provider or local server compatible with either:
+    `anthropic_messages`, `openai_chat` (Chat Completions) and
+    `openai_responses`. Each named endpoint configures address, path,
+    timeout, retries, auth header from an environment variable, extra
+    headers, the model ID (config or env, never hard-coded), the
+    structured-output mode (native JSON-schema parameter, or the schema
+    in the prompt for servers without one) and pass-through request
+    parameters such as `temperature`. Output is always validated
+    client-side against the schema. A loopback `base_url`
+    (`127.0.0.1`, `localhost`, `::1`) marks a local LLM; `local_only`
+    requires every endpoint in use to be local. Plain `http://` to a
+    remote host is refused unless explicitly allowed. It ships with:
     -   a **record/replay provider**: in `record` mode it stores each
-        request fingerprint (prompt version + schema + inputs hash) and
-        the validated response under `tests/fixtures/llm/`; in `replay`
-        mode it returns stored responses and fails loudly on a cache
-        miss. Tests and CI use replay only, so they are deterministic
-        and need no API key.
+        request fingerprint (prompt version + schema + inputs hash +
+        model) and the validated response under `tests/fixtures/llm/`;
+        in `replay` mode it returns stored responses and fails loudly
+        on a cache miss. Tests and CI use replay only, so they are
+        deterministic and need no API key.
 -   **Speech recognition** as an optional adapter, selected according to
     privacy and quality requirements.
 -   **FilmCraft CLI/MCP** as the primary editing interface.
