@@ -51,33 +51,69 @@ class FakeTimeline:
 
 
 class FakeProject:
-    def __init__(self, name, timeline):
+    def __init__(self, name, timeline, none_with_options=False):
         self.name, self.timeline, self.settings = name, timeline, {}
+        self.imports: list[tuple] = []
+        self.none_with_options = none_with_options
+        self.seen_names: set[str] = set()
 
     def GetName(self): return self.name
     def SetSetting(self, k, v): self.settings[k] = v; return True
     def GetMediaPool(self): return self
-    def ImportTimelineFromFile(self, path, opts): self.last = (path, opts); return self.timeline
+
+    def ImportTimelineFromFile(self, path, opts=None):
+        self.imports.append((path, opts))
+        if self.none_with_options and opts is not None:
+            return None
+        if opts and opts.get("timelineName") in self.seen_names:
+            return None  # Resolve silently returns None for a reused timeline name
+        if opts:
+            self.seen_names.add(opts["timelineName"])
+        return self.timeline
+
     def SetCurrentTimeline(self, tl): return True
 
 
 class FakePM:
-    def __init__(self, timeline, prev="UserProject"):
-        self.timeline, self.projects, self.cur = timeline, {prev: FakeProject(prev, None)}, prev
+    """Models: the loaded project cannot be deleted; DeleteProject only sees the current folder."""
+    def __init__(self, timeline, prev="UserProject", folder="Sub", none_with_options=False):
+        self.timeline, self.none_with_options = timeline, none_with_options
+        self.folders = {"root": {}, "Sub": {}}
+        self.cur_folder = folder
+        self.prev = prev
+        if prev:
+            self.folders[folder][prev] = FakeProject(prev, None)
+        self.cur = prev
         self.deleted: list[str] = []
+        self.calls: list[str] = []
+        self.created: FakeProject | None = None
 
-    def GetCurrentProject(self): return self.projects[self.cur]
+    def GetCurrentProject(self):
+        return self.folders[self.cur_folder].get(self.cur) if self.cur else FakeProject("Untitled Project", None)
+    def GetCurrentFolder(self): return self.cur_folder
+    def GotoRootFolder(self): self.calls.append("GotoRootFolder"); self.cur_folder = "root"; return True
+    def OpenFolder(self, n):
+        self.calls.append(f"OpenFolder({n})")
+        if n in self.folders: self.cur_folder = n; return True
+        return False
+    def GetProjectListInCurrentFolder(self): return list(self.folders[self.cur_folder])
     def CreateProject(self, n):
-        self.projects[n] = FakeProject(n, self.timeline); self.cur = n; return self.projects[n]
-    def CloseProject(self, p): return True
-    def LoadProject(self, n): self.cur = n; return self.projects[n]
+        p = FakeProject(n, self.timeline, self.none_with_options)
+        self.folders[self.cur_folder][n] = p; self.cur = n; self.created = p; return p
+    def CloseProject(self, p): self.calls.append("CloseProject"); return True  # stays "current" until another loads
+    def LoadProject(self, n):
+        self.calls.append(f"LoadProject({n})")
+        if n in self.folders[self.cur_folder]: self.cur = n; return self.folders[self.cur_folder][n]
+        return None
     def DeleteProject(self, n):
-        if n == "UserProject": raise AssertionError("must never delete user project")
-        self.deleted.append(n); self.projects.pop(n); return True
+        self.calls.append(f"DeleteProject({n})")
+        if n == self.prev: raise AssertionError("must never delete user project")
+        if n == self.cur or n not in self.folders[self.cur_folder]: return False
+        self.deleted.append(n); self.folders[self.cur_folder].pop(n); return True
 
 
 class FakeResolve:
-    def __init__(self, timeline): self.pm = FakePM(timeline)
+    def __init__(self, timeline, **kw): self.pm = FakePM(timeline, **kw)
     def GetProjectManager(self): return self.pm
     def GetVersionString(self): return "19.1.0"
     def GetProductName(self): return "DaVinci Resolve Studio"
@@ -349,18 +385,230 @@ def test_dump_is_defensive():
 
 
 # ---------------------------------------------------------------- end to end with fake Resolve
+def write_otio(d: Path, doc=None, name="phase0.otio") -> Path:
+    p = d / name
+    p.write_text(json.dumps(doc if doc is not None else {}))
+    return p
+
+
 def test_run_import_end_to_end_and_cleanup(media, tmp_path):
     resolve = FakeResolve(make_actual_timeline(media))
-    f = tmp_path / "t.otio"; f.write_text("{}")
-    res = rv.run_import(resolve, [f], make_expected(media), keep_project=False)
-    assert res["formats"]["otio"]["passed"]
+    f = write_otio(tmp_path)
+    res = rv.run_import(resolve, [f], make_expected(media), keep_project=False, work_dir=tmp_path / "w")
+    assert res["formats"]["otio[original]"]["passed"]
     pm = resolve.pm
-    assert len(pm.deleted) == 1 and pm.deleted[0] == res["scratch_project"] and pm.cur == "UserProject"
-    assert "UserProject" in pm.projects
-    proj_settings = None
-    assert res["scratch_deleted"] is True
+    assert pm.deleted == [res["scratch_project"]] and pm.cur == "UserProject" and pm.cur_folder == "Sub"
+    assert "UserProject" in pm.folders["Sub"]
+    assert res["scratch_deleted"] is True and res["cleanup_steps"]
     table = rv.markdown_table(res["formats"])
     assert "| clip_order |" in table and "PASS" in table
+
+
+def test_absolute_paths_options_and_diagnostics(media, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "rel").mkdir()
+    x = tmp_path / "rel" / "t.xml"; x.write_text("<xmeml/>")
+    resolve = FakeResolve(make_actual_timeline(media))
+    res = rv.run_import(resolve, [Path("rel/t.xml")], make_expected(media), keep_project=True, stamp="S1")
+    path, opts = resolve.pm.created.imports[0]
+    assert Path(path).is_absolute() and path == str(x.resolve())
+    assert opts["importSourceClips"] is True and opts["sourceClipsPath"] == str(media) and Path(opts["sourceClipsPath"]).is_absolute()
+    e = res["formats"]["fcp7xml"]
+    assert e["attempts"] == [{"options": opts, "result": "FakeTimeline"}]
+    d = e["diagnostics"]
+    assert d["path_passed"] == path and d["exists"] is True and d["size_bytes"] == 8 and d["resolve_return_type"] == "FakeTimeline"
+
+
+def test_source_clips_dir_common_parent():
+    e = {"tracks": [{"clips": [{"source_path": "C:/Users/me/a/x.mp4"}, {"source_path": "C:/Users/me/b/y.mp4"}, {"source_path": None}]}]}
+    assert rv.source_clips_dir(e) == r"C:\Users\me"
+    e = {"tracks": [{"clips": [{"source_path": "/m/a/x.mp4"}, {"source_path": "/m/a/y.mp4"}]}]}
+    assert rv.source_clips_dir(e) == "/m/a"
+    assert rv.source_clips_dir({"tracks": []}) is None
+
+
+def test_unique_timeline_names_per_run_and_label(media, tmp_path):
+    f = write_otio(tmp_path, relative_otio())
+    names = []
+    for stamp in ("A", "B"):
+        resolve = FakeResolve(make_actual_timeline(media))
+        res = rv.run_import(resolve, [f], make_expected(media), keep_project=True, stamp=stamp, work_dir=tmp_path / "w")
+        names += [i[1]["timelineName"] for i in resolve.pm.created.imports]
+        assert all(e["attempts"][0]["result"] == "FakeTimeline" for e in res["formats"].values())
+    assert len(names) == len(set(names)) == 8 and all("A" in n or "B" in n for n in names)
+
+
+def test_retry_without_options(media, tmp_path):
+    resolve = FakeResolve(make_actual_timeline(media), none_with_options=True)
+    f = tmp_path / "t.xml"; f.write_text("<x/>")
+    res = rv.run_import(resolve, [f], make_expected(media), keep_project=True)
+    e = res["formats"]["fcp7xml"]
+    assert [a["result"] for a in e["attempts"]] == [None, "FakeTimeline"]
+    assert e["attempts"][0]["options"]["importSourceClips"] is True and e["attempts"][1]["options"] is None
+    assert resolve.pm.created.imports[1] == (str(f.resolve()), None)
+    assert e["checks"][0]["status"] == "pass" and "retry" in e["checks"][0]["detail"]
+
+
+def test_import_failure_both_attempts_none(media, tmp_path):
+    resolve = FakeResolve(None)
+    f = tmp_path / "t.xml"; f.write_text("<x/>")
+    res = rv.run_import(resolve, [f], make_expected(media), keep_project=True)
+    e = res["formats"]["fcp7xml"]
+    assert e["passed"] is False and e["checks"][0]["status"] == "fail" and len(e["attempts"]) == 2
+    assert e["diagnostics"]["resolve_return_type"] == "NoneType" and resolve.pm.deleted == []
+
+
+def test_risky_formats_skipped_by_default(media, tmp_path):
+    files = [tmp_path / n for n in ("p.fcpxml", "p.edl", "p.aaf", "p.xml")]
+    for p in files: p.write_text("x")
+    resolve = FakeResolve(make_actual_timeline(media))
+    res = rv.run_import(resolve, files, make_expected(media), keep_project=True)
+    assert [i[0] for i in resolve.pm.created.imports] == [str(files[3].resolve())]
+    for k in ("fcpxml", "edl", "aaf"):
+        e = res["formats"][k]
+        assert e["skipped"] and e["checks"][0]["status"] == "info" and "--include-risky-formats" in e["checks"][0]["detail"]
+        assert e["passed"] is False
+
+
+def test_risky_formats_run_last_when_included(media, tmp_path):
+    names = ["p.fcpxml", "p.edl", "p.aaf", "p.xml", "p.otio"]
+    files = [tmp_path / n for n in names]
+    for p in files: p.write_text("{}")
+    resolve = FakeResolve(make_actual_timeline(media))
+    rv.run_import(resolve, files, make_expected(media), keep_project=True, include_risky=True)
+    order = [Path(i[0]).name for i in resolve.pm.created.imports]
+    assert order == ["p.xml", "p.otio", "p.edl", "p.aaf", "p.fcpxml"]
+
+
+# ---------------------------------------------------------------- OTIO variants
+def relative_otio():
+    d = synthetic_otio()
+    d["tracks"]["children"][0]["children"][0]["media_references"]["DEFAULT_MEDIA"]["target_url"] = "../../../tests/fixtures/generated/x.mp4"
+    return d
+
+
+def test_variant_formats_windows_and_posix():
+    n = "C:/Users/me/My Media/x.mp4"
+    assert rv.format_media_ref(n, "bare") == r"C:\Users\me\My Media\x.mp4"
+    assert rv.format_media_ref(n, "slash") == n
+    assert rv.format_media_ref(n, "file_url") == "file:///C:/Users/me/My%20Media/x.mp4"
+    assert rv.format_media_ref("//srv/share/x.mp4", "bare") == r"\\srv\share\x.mp4"
+    assert rv.format_media_ref("//srv/share/x.mp4", "file_url") == "file://srv/share/x.mp4"
+    p = "/Users/me/My Media/x.mp4"
+    assert rv.format_media_ref(p, "bare") == p and rv.format_media_ref(p, "slash") == p
+    assert rv.format_media_ref(p, "file_url") == "file:///Users/me/My%20Media/x.mp4"
+
+
+@pytest.mark.parametrize("base,expect", [
+    ("C:/Users/me/spike/out/interchange", "C:/Users/me/tests/fixtures/generated/x.mp4"),
+    ("/home/me/spike/out/interchange", "/home/me/tests/fixtures/generated/x.mp4"),
+])
+def test_rewrite_only_relative_targets(base, expect):
+    doc = relative_otio()
+    before = json.dumps(doc, sort_keys=True)
+    n = rv.rewrite_otio_media(doc, base, "slash")
+    # relative a.mp4 (../media) rewritten too; absolute file:// b.png and Missing/None refs untouched
+    refs = doc["tracks"]["children"][0]["children"]
+    assert n == 2  # x.mp4 (V1) and ../media/a.mp4 (A1)
+    urls = [refs[0]["media_references"]["DEFAULT_MEDIA"]["target_url"], refs[3]["media_references"]["DEFAULT_MEDIA"]["target_url"]]
+    assert urls[0] == expect and urls[1] == "file:///C:/Users/me/My%20Media/b.png"
+    # everything except those target_urls is identical
+    after = json.loads(json.dumps(doc))
+    after["tracks"]["children"][0]["children"][0]["media_references"]["DEFAULT_MEDIA"]["target_url"] = "../../../tests/fixtures/generated/x.mp4"
+    after["tracks"]["children"][2]["children"][0]["media_references"]["DEFAULT_MEDIA"]["target_url"] = "../media/a.mp4"
+    assert json.dumps(after, sort_keys=True) == before
+
+
+def test_make_otio_variants_files(tmp_path):
+    src = tmp_path / "spike" / "out" / "interchange"; src.mkdir(parents=True)
+    f = write_otio(src, relative_otio())
+    work = tmp_path / "work"
+    out, notes = rv.make_otio_variants(f, work)
+    assert set(out) == {"bare", "slash", "file_url"} and all(p.parent.parent == work for p in out.values())
+    base = f.resolve().parent
+    exp = rv.normalize_path("../../../tests/fixtures/generated/x.mp4", base, windows=False)
+    got = {k: json.loads(p.read_text())["tracks"]["children"][0]["children"][0]["media_references"]["DEFAULT_MEDIA"]["target_url"] for k, p in out.items()}
+    assert got["slash"] == exp and got["file_url"] == "file://" + exp and got["bare"] == exp
+    assert json.loads(f.read_text()) == relative_otio()  # original untouched
+    # absolute-only OTIO -> no variants
+    doc = synthetic_otio()
+    for c in (doc["tracks"]["children"][0]["children"][0], doc["tracks"]["children"][2]["children"][0]):
+        c["media_references"]["DEFAULT_MEDIA"]["target_url"] = "/abs/a.mp4"
+    g = write_otio(tmp_path, doc, "abs.otio")
+    out, notes = rv.make_otio_variants(g, tmp_path / "w2")
+    assert out == {} and any("no relative" in n for n in notes)
+
+
+def test_run_import_otio_variant_labels(media, tmp_path):
+    f = write_otio(tmp_path, relative_otio())
+    resolve = FakeResolve(make_actual_timeline(media))
+    res = rv.run_import(resolve, [f], make_expected(media), keep_project=True, work_dir=tmp_path / "w")
+    assert list(res["formats"]) == ["otio[original]", "otio[bare]", "otio[slash]", "otio[file_url]"]
+    assert Path(res["formats"]["otio[bare]"]["file"]).parent.parent == (tmp_path / "w").resolve()
+
+
+def test_read_otio_expected_relative_path_resolved_absolute(tmp_path, monkeypatch):
+    d = tmp_path / "spike" / "out" / "interchange"; d.mkdir(parents=True)
+    write_otio(d, relative_otio())
+    monkeypatch.chdir(tmp_path)
+    e = rv.read_otio_expected(Path("spike/out/interchange/phase0.otio"))  # relative path argument
+    want = rv.normalize_path(str(d.parent / "media" / "a.mp4"), windows=False)
+    assert e["tracks"][2]["clips"][0]["source_path"] == want
+    got = e["tracks"][0]["clips"][0]["source_path"]
+    assert got == rv.normalize_path(str((d / "../../../tests/fixtures/generated/x.mp4").resolve()), windows=False)
+    assert got.startswith("/") or got[1:3] == ":/"
+
+
+# ---------------------------------------------------------------- cleanup
+def test_cleanup_sequence_only_scratch_deleted(media, tmp_path):
+    resolve = FakeResolve(make_actual_timeline(media))
+    resolve.pm.cur_folder = "Sub"
+    f = tmp_path / "t.xml"; f.write_text("<x/>")
+    res = rv.run_import(resolve, [f], make_expected(media), keep_project=False)
+    pm = resolve.pm
+    scratch = res["scratch_project"]
+    close_i = pm.calls.index("CloseProject")
+    assert pm.calls.index("LoadProject(UserProject)") > close_i
+    assert pm.calls.index(f"DeleteProject({scratch})") > pm.calls.index("LoadProject(UserProject)")
+    assert [c for c in pm.calls if c.startswith("DeleteProject")] == [f"DeleteProject({scratch})"]
+    assert res["scratch_deleted"] and pm.cur == "UserProject"
+    steps = [s["step"] for s in res["cleanup_steps"]]
+    assert steps[:2] == ["close scratch project", "reload previous project"] and steps[-1] == "delete scratch project"
+    assert all("result" in s for s in res["cleanup_steps"])
+
+
+def test_cleanup_navigates_back_to_creation_folder(media, tmp_path):
+    resolve = FakeResolve(make_actual_timeline(media))
+    pm = resolve.pm
+    f = tmp_path / "t.xml"; f.write_text("<x/>")
+    orig_close = pm.CloseProject
+    def close_and_move(p):
+        pm.cur_folder = "root"; return orig_close(p)  # Resolve left us in another folder
+    pm.CloseProject = close_and_move
+    # make the previous project reachable regardless of folder
+    pm.folders["root"]["UserProject"] = pm.folders["Sub"]["UserProject"]
+    res = rv.run_import(resolve, [f], make_expected(media), keep_project=False)
+    assert res["creation_folder"] == "Sub" and "OpenFolder(Sub)" in pm.calls
+    assert res["scratch_deleted"] and pm.deleted == [res["scratch_project"]] and pm.cur_folder == "Sub"
+
+
+def test_cleanup_without_previous_project_loads_other_then_deletes(media, tmp_path):
+    resolve = FakeResolve(make_actual_timeline(media), prev=None)
+    pm = resolve.pm
+    pm.folders["Sub"]["Other"] = FakeProject("Other", None)
+    f = tmp_path / "t.xml"; f.write_text("<x/>")
+    res = rv.run_import(resolve, [f], make_expected(media), keep_project=False)
+    assert res["scratch_deleted"] and pm.deleted == [res["scratch_project"]]
+    assert "LoadProject(Other)" in pm.calls and "LoadProject(Untitled Project)" not in pm.calls
+
+
+def test_cleanup_failure_reports_manual_steps(media, tmp_path):
+    resolve = FakeResolve(make_actual_timeline(media), prev=None)  # nothing else to load -> cannot delete
+    f = tmp_path / "t.xml"; f.write_text("<x/>")
+    res = rv.run_import(resolve, [f], make_expected(media), keep_project=False)
+    assert res["scratch_deleted"] is False and resolve.pm.deleted == []
+    note = next(n for n in res["notes"] if "could not delete" in n)
+    assert res["scratch_project"] in note and "Project Manager" in note and "Nothing else was deleted" in note
 
 
 def test_keep_project_and_import_failure(media, tmp_path):

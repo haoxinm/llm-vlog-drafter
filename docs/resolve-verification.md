@@ -44,7 +44,7 @@ python tools\resolve_verify.py --handoff "D:\Trips\Iceland\resolve_handoff"
 ```
 
 Other options: `--timeline FILE` (repeatable), `--expected FILE`, `--output PATH` (default `<handoff>/resolve_verification.json`,
-else the current directory), `--keep-project`. If the env vars point elsewhere (non-default install), set them first, e.g.
+else the current directory), `--keep-project`, `--include-risky-formats`. If the env vars point elsewhere (non-default install), set them first, e.g.
 `export RESOLVE_SCRIPT_API=...` / `$env:RESOLVE_SCRIPT_LIB="..."`.
 
 Exit codes: `0` at least one format passed all required checks; `1` none did; `2` bad inputs; `3` scripting unavailable (manual required).
@@ -70,6 +70,33 @@ file by a built-in stdlib OTIO reader (no `opentimelineio` needed). Relative `ta
 Frames are integers at `fps`; `record_end_frame` is exclusive. `kind` is `video` or `audio`. A clip with `"source_path": null`
 (a title or graphic) is optional and reported as info only. Paths may be plain, Windows (`C:\...`) or `file://` forms.
 
+### Which formats are tried
+
+By default only FCP7 `.xml` and then `.otio` are imported. FCPXML, EDL and AAF were observed to crash (FCPXML), freeze (EDL) or fail
+(AAF "cannot be opened for reading") on Resolve 21.1, so they are reported as `info: skipped` unless you pass `--include-risky-formats`.
+Even then they run last (EDL, AAF, FCPXML very last) and the script warns you to save your work first; if Resolve dies, the safe formats
+were already imported but the report is only written at the end, so prefer running the default first.
+
+Every path handed to Resolve is absolute with native separators (Resolve runs in another process, so relative paths silently fail).
+Each import uses unique timeline names (`verify_<run stamp>_<format>`; reusing a name makes Resolve return None silently) and the options
+`importSourceClips=True` plus `sourceClipsPath` = the folder that holds the expected media. If Resolve returns None, the script retries once
+with just the path (no options); both attempts are recorded under `attempts` in the JSON.
+
+### OTIO media-path variants
+
+The spike's `phase0.otio` has relative `target_url`s, which Resolve does not link. Before importing an `.otio` the script writes up to three
+copies under `<output folder>/resolve_verify_work_<stamp>/otio_<variant>/` in which only relative (or otherwise unresolvable) `target_url`s are
+rewritten to absolute media references; everything else is unchanged. Each is imported and checked separately:
+
+| Column | `target_url` form | Example |
+|---|---|---|
+| `otio[original]` | unchanged | `../../../tests/fixtures/generated/x.mp4` |
+| `otio[bare]` | native path (what Resolve itself exports) | `C:\Users\me\repo\tests\fixtures\generated\x.mp4` |
+| `otio[slash]` | forward slashes | `C:/Users/me/repo/tests/fixtures/generated/x.mp4` |
+| `otio[file_url]` | percent-encoded URL | `file:///C:/Users/me/repo/tests/fixtures/generated/x.mp4` |
+
+The run shows which form Resolve links (media_online passes). If an OTIO already has only absolute references, no variants are made.
+
 ## What each check means
 
 Required checks decide the exit code (a format passes when all of them pass); others are reported but do not fail the run.
@@ -92,7 +119,13 @@ Required checks decide the exit code (a format passes when all of them pass); ot
 
 ## Sending results back
 
-Send `resolve_verification.json` (contains Resolve product, version, OS, per-format per-check results, the raw dump of each imported
+Send `resolve_verification.json` and the console table. Per format it records the absolute path passed, whether the file exists, its size, the
+type Resolve returned, and the `attempts` list. Cleanup details are in `cleanup_steps`. If every import returned None, also open Resolve's
+**Workspace > Console** right after the run and copy what it printed (it often names the import error). If the scratch project could not be
+deleted, the script prints its exact name (`tripvlog_verify_<stamp>`) and manual steps: open the Project Manager, make sure another project is
+open, right-click the scratch project > Delete. The script deletes only the project it created.
+
+The JSON also contains the Resolve product, version, OS, per-format per-check results, the raw dump of each imported
 timeline) and the console table, plus screenshots of the Edit page for any format with a failed or `info` check. When `status` is
 `manual_required`, fill in the checklist below and send that with your Resolve version/edition (Help > About).
 

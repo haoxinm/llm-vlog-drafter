@@ -8,7 +8,8 @@ dump the imported timeline and compare it with an expected timeline.
 
 Examples
     python tools/resolve_verify.py --handoff path/to/resolve_handoff
-    python tools/resolve_verify.py --spike-out spike/out
+    python tools/resolve_verify.py --spike-out spike/out   # fcp7 xml + otio (4 path variants) only
+    python tools/resolve_verify.py --spike-out spike/out --include-risky-formats   # also EDL/AAF/FCPXML, last
     python tools/resolve_verify.py --timeline x.otio --timeline x.xml --expected expected_timeline.json
 
 Exit codes: 0 = at least one format passed every required check; 1 = none did;
@@ -33,11 +34,13 @@ import argparse
 import json
 import os
 import platform
+import posixpath
 import re
 import sys
+import tempfile
 import time
 import urllib.parse
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 TOL_FRAMES = 1
@@ -45,6 +48,13 @@ SCHEMA_VERSION = 1
 REQUIRED_CHECKS = ("import", "fps", "duration", "clip_order", "record_inout", "source_in", "media_online")
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif", ".webp", ".heic", ".exr", ".dpx"}
 FORMAT_BY_SUFFIX = {".otio": "otio", ".xml": "fcp7xml", ".fcpxml": "fcpxml", ".edl": "edl", ".aaf": "aaf"}
+# Import order. Formats observed to crash/freeze/fail on Resolve 21.1 are "risky": skipped unless
+# --include-risky-formats, and then run last (fcpxml absolutely last, it crashes Resolve).
+SAFE_FORMATS = ("fcp7xml", "otio")
+RISKY_ORDER = ("edl", "aaf", "fcpxml")
+OTIO_VARIANTS = ("bare", "slash", "file_url")
+SKIP_RISKY_MSG = ("skipped \u2014 observed to crash/freeze/fail on Resolve 21.1; pass --include-risky-formats to try")
+SCRATCH_DEFAULT_NAMES = (None, "", "Untitled Project")
 
 
 # --------------------------------------------------------------------------- discovery
@@ -208,7 +218,8 @@ def read_otio_expected(path: str | os.PathLike) -> dict:
     """Parse an .otio (JSON) file into the expected-timeline dict. No OTIO library needed."""
     p = Path(path)
     doc = json.loads(p.read_text(encoding="utf-8"))
-    return otio_to_expected(doc, base_dir=p.parent)
+    # Resolve relative target_urls against the .otio file's ABSOLUTE directory (cwd-independent).
+    return otio_to_expected(doc, base_dir=p.resolve().parent)
 
 
 def otio_to_expected(doc: dict, base_dir: str | os.PathLike | None = None) -> dict:
@@ -295,7 +306,7 @@ def load_expected_json(path: str | os.PathLike) -> dict:
             raise ValueError(f"expected timeline JSON lacks '{k}'")
     exp.setdefault("markers", [])
     exp.setdefault("transitions", None)
-    base = Path(path).parent
+    base = Path(path).resolve().parent
     for t in exp["tracks"]:
         for c in t.get("clips", []):
             if c.get("source_path"):
@@ -523,22 +534,175 @@ def format_passed(checks: list[dict]) -> bool:
     return all(c["status"] == "pass" for c in checks if c["required"])
 
 
+# --------------------------------------------------------------------------- OTIO path variants
+def _is_abs_ref(raw: str) -> bool:
+    n = normalize_path(raw, None, windows=False)
+    return bool(re.match(r"^[A-Za-z]:/", n)) or n.startswith("/")
+
+
+def format_media_ref(norm: str, style: str) -> str:
+    """Render a normalized absolute path (forward slashes) as bare / slash / file_url."""
+    win = bool(re.match(r"^[A-Za-z]:/", norm)) or norm.startswith("//")
+    if style == "slash":
+        return norm
+    if style == "bare":
+        return str(PureWindowsPath(norm)) if win else norm
+    if style == "file_url":
+        if norm.startswith("//"):
+            return "file:" + urllib.parse.quote(norm, safe="/")
+        if win:
+            return "file:///" + urllib.parse.quote(norm, safe="/:")
+        return "file://" + urllib.parse.quote(norm, safe="/")
+    raise ValueError(f"unknown OTIO variant style: {style}")
+
+
+def rewrite_otio_media(node: Any, base_dir: str | os.PathLike, style: str) -> int:
+    """In place: rewrite ExternalReference.target_url values that are relative (or not an absolute
+    path/URL) to absolute references in the given style. Everything else is untouched. Returns count."""
+    n = 0
+    if isinstance(node, dict):
+        url = node.get("target_url")
+        if _schema(node) == "ExternalReference" and isinstance(url, str) and url.strip() and not _is_abs_ref(url):
+            node["target_url"] = format_media_ref(normalize_path(url, base_dir, windows=False), style)
+            n += 1
+        for v in node.values():
+            n += rewrite_otio_media(v, base_dir, style)
+    elif isinstance(node, list):
+        for v in node:
+            n += rewrite_otio_media(v, base_dir, style)
+    return n
+
+
+def make_otio_variants(otio_path: Path, work_dir: Path) -> tuple[dict[str, Path], list[str]]:
+    """Write up to three absolute-media variants of an .otio under work_dir. Returns ({style: path}, notes)."""
+    notes: list[str] = []
+    out: dict[str, Path] = {}
+    try:
+        text = otio_path.read_text(encoding="utf-8")
+        json.loads(text)
+    except (OSError, ValueError) as e:
+        return out, [f"OTIO variants skipped: cannot read {otio_path.name} as JSON ({e})"]
+    base = otio_path.resolve().parent
+    for style in OTIO_VARIANTS:
+        doc = json.loads(text)
+        n = rewrite_otio_media(doc, base, style)
+        if n == 0:
+            notes.append("OTIO variants skipped: no relative/unresolvable target_url to rewrite")
+            return {}, notes
+        d = work_dir / f"otio_{style}"
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / otio_path.name
+        p.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        out[style] = p
+        notes.append(f"otio[{style}]: rewrote {n} target_url value(s) -> {p}")
+    return out, notes
+
+
+def source_clips_dir(expected: dict) -> str | None:
+    """Absolute directory holding the expected media (common parent if several), native separators."""
+    dirs = []
+    for t in expected.get("tracks", []):
+        for c in t.get("clips", []):
+            sp = c.get("source_path")
+            if sp:
+                n = normalize_path(sp, None, windows=False)
+                if _is_abs_ref(n):
+                    dirs.append(posixpath.dirname(n))
+    if not dirs:
+        return None
+    uniq = sorted(set(dirs))
+    try:
+        d = uniq[0] if len(uniq) == 1 else posixpath.commonpath(uniq)
+    except ValueError:
+        return None
+    if not d or d in ("/", "."):
+        return None
+    return format_media_ref(d, "bare")
+
+
+def _slug(s: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "_", s).strip("_")
+
+
+def build_import_plan(files: list[Path], include_risky: bool, work_dir: Path) -> tuple[list[dict], list[str]]:
+    """Ordered list of import jobs: fcp7xml, otio (original + variants), then risky formats if enabled
+    (edl, aaf, fcpxml last). Risky formats not enabled appear as skipped jobs."""
+    jobs: list[dict] = []
+    notes: list[str] = []
+    for f in files:
+        fmt = FORMAT_BY_SUFFIX.get(f.suffix.lower(), f.suffix.lower().lstrip("."))
+        risky = fmt not in SAFE_FORMATS
+        if fmt == "otio":
+            jobs.append({"fmt": fmt, "label": "otio[original]", "file": f, "risky": False})
+            variants, vnotes = make_otio_variants(f, work_dir)
+            notes += vnotes
+            for style in OTIO_VARIANTS:
+                if style in variants:
+                    jobs.append({"fmt": fmt, "label": f"otio[{style}]", "file": variants[style], "risky": False})
+        else:
+            jobs.append({"fmt": fmt, "label": fmt, "file": f, "risky": risky})
+
+    def rank(j: dict) -> tuple[int, int]:
+        if j["fmt"] in SAFE_FORMATS:
+            return (0, SAFE_FORMATS.index(j["fmt"]))
+        return (1, RISKY_ORDER.index(j["fmt"]) if j["fmt"] in RISKY_ORDER else -1)
+
+    jobs.sort(key=rank)  # stable: otio variants keep original, bare, slash, file_url order
+    for j in jobs:
+        j["skip"] = bool(j["risky"] and not include_risky)
+    return jobs, notes
+
+
 # --------------------------------------------------------------------------- Resolve session
-def run_import(resolve: Any, files: list[Path], expected: dict, keep_project: bool, scratch_prefix: str = "tripvlog_verify") -> dict:
+def _type_name(v: Any) -> str:
+    return type(v).__name__
+
+
+def import_with_retry(mp: Any, abs_path: str, options: dict) -> tuple[Any, list[dict]]:
+    """Try ImportTimelineFromFile with options, then once more with the bare path. Records both attempts."""
+    attempts: list[dict] = []
+    tl = None
+    for opts in (options, None):
+        errs: list[str] = []
+        args = (abs_path, opts) if opts is not None else (abs_path,)
+        tl = _safe(_m(mp, "ImportTimelineFromFile"), *args, errors=errs, label="ImportTimelineFromFile")
+        att: dict[str, Any] = {"options": opts, "result": None if tl is None else _type_name(tl)}
+        if errs:
+            att["errors"] = errs
+        attempts.append(att)
+        if tl is not None:
+            break
+    return tl, attempts
+
+
+def run_import(resolve: Any, files: list[Path], expected: dict, keep_project: bool,
+               scratch_prefix: str = "tripvlog_verify", include_risky: bool = False,
+               work_dir: Path | None = None, stamp: str | None = None) -> dict:
     """Create a scratch project, import each file, dump + compare. Returns the report fragment."""
     pm = _safe(_m(resolve, "GetProjectManager"))
     result: dict[str, Any] = {"formats": {}, "scratch_project": None, "scratch_kept": keep_project, "notes": []}
     if pm is None:
         result["notes"].append("GetProjectManager() returned None")
         return result
+    stamp = stamp or f"{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
+    if work_dir is None:
+        work_dir = Path(tempfile.mkdtemp(prefix="resolve_verify_"))
+    work_dir = Path(work_dir).resolve()
+    plan, pnotes = build_import_plan([Path(f) for f in files], include_risky, work_dir)
+    result["notes"] += pnotes
+    result["import_order"] = [j["label"] + (" (skipped)" if j["skip"] else "") for j in plan]
+    media_dir = source_clips_dir(expected)
+    result["source_clips_path"] = media_dir
     prev = _safe(_m(pm, "GetCurrentProject"))
     prev_name = _safe(_m(prev, "GetName")) if prev is not None else None
-    name = f"{scratch_prefix}_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
+    folder = _safe(_m(pm, "GetCurrentFolder"))
+    name = f"{scratch_prefix}_{stamp}"
     project = _safe(_m(pm, "CreateProject"), name)
     if project is None:
         result["notes"].append(f"CreateProject('{name}') failed (name clash, or a project is open with unsaved state)")
         return result
     result["scratch_project"] = name
+    result["creation_folder"] = folder
     try:
         fps = expected.get("fps")
         sets = {"timelineFrameRate": f"{float(fps):g}" if fps else None,
@@ -550,41 +714,98 @@ def run_import(resolve: Any, files: list[Path], expected: dict, keep_project: bo
                 if not ok:
                     result["notes"].append(f"SetSetting({k},{v}) returned {ok!r}")
         mp = _safe(_m(project, "GetMediaPool"))
-        for f in files:
-            fmt = FORMAT_BY_SUFFIX.get(f.suffix.lower(), f.suffix.lower().lstrip("."))
-            entry: dict[str, Any] = {"file": str(f), "format": fmt}
-            tl_name = f"verify_{fmt}"
-            tl = None
-            if mp is not None:
-                tl = _safe(_m(mp, "ImportTimelineFromFile"), str(f), {"timelineName": tl_name, "importSourceClips": True})
+        for job in plan:
+            f: Path = job["file"]
+            fmt, label = job["fmt"], job["label"]
+            abs_path = str(f.resolve())  # Resolve runs in another process/cwd: always absolute, native separators
+            entry: dict[str, Any] = {"file": abs_path, "format": fmt}
+            if job["skip"]:
+                entry["skipped"] = True
+                entry["actual"] = None
+                entry["checks"] = [_r("import", "info", SKIP_RISKY_MSG, required=False)]
+                entry["passed"] = False
+                result["formats"][label if label not in result["formats"] else f"{label}:{f.name}"] = entry
+                continue
+            exists = os.path.exists(abs_path)
+            entry["diagnostics"] = {"path_passed": abs_path, "exists": exists,
+                                    "size_bytes": os.path.getsize(abs_path) if exists else None}
+            tl_name = f"verify_{stamp}_{_slug(label)}"
+            opts: dict[str, Any] = {"timelineName": tl_name, "importSourceClips": True}
+            if media_dir:
+                opts["sourceClipsPath"] = media_dir
+            tl, attempts = (None, []) if mp is None else import_with_retry(mp, abs_path, opts)
+            entry["attempts"] = attempts
+            entry["diagnostics"]["resolve_return_type"] = _type_name(tl)
             if tl is None:
                 entry["actual"] = None
                 entry["checks"] = [_r("import", "fail", "ImportTimelineFromFile returned None (unsupported format in this Resolve version, "
-                                      "parse error, or import dialog blocked)")]
+                                      "parse error, or import dialog blocked); see Workspace > Console in Resolve")]
             else:
                 _safe(_m(project, "SetCurrentTimeline"), tl)
                 actual = dump_timeline(tl)
                 entry["actual"] = actual
-                entry["checks"] = [_r("import", "pass", f"imported as '{actual.get('name')}'")] + compare_timeline(expected, actual)
+                entry["checks"] = [_r("import", "pass", f"imported as '{actual.get('name')}'"
+                                      + ("" if len(attempts) == 1 else " (only the no-options retry worked)"))] + compare_timeline(expected, actual)
             entry["passed"] = format_passed(entry["checks"])
-            result["formats"][fmt if fmt not in result["formats"] else f"{fmt}:{f.name}"] = entry
+            result["formats"][label if label not in result["formats"] else f"{label}:{f.name}"] = entry
     finally:
         if not keep_project:
-            _cleanup(pm, project, name, prev_name, result)
+            _cleanup(pm, project, name, prev_name, folder, result)
         elif prev_name:
             result["notes"].append(f"scratch project '{name}' kept; your previous project '{prev_name}' was not reopened")
     return result
 
 
-def _cleanup(pm: Any, project: Any, name: str, prev_name: str | None, result: dict) -> None:
-    """Delete ONLY the scratch project created by this run (name captured above)."""
-    _safe(_m(pm, "CloseProject"), project)
-    if prev_name:
-        _safe(_m(pm, "LoadProject"), prev_name)
-    deleted = _safe(_m(pm, "DeleteProject"), name)
+def _cleanup(pm: Any, project: Any, name: str, prev_name: str | None, folder: Any, result: dict) -> None:
+    """Delete ONLY the scratch project created by this run (`name`). Resolve cannot delete the loaded
+    project, and DeleteProject acts on the Project Manager's current folder, so: close, reload the user's
+    previous project, return to the creation folder, then delete. Every step is recorded."""
+    steps: list[dict] = result.setdefault("cleanup_steps", [])
+
+    def step(label: str, fn_name: str, *a) -> Any:
+        errs: list[str] = []
+        r = _safe(_m(pm, fn_name), *a, errors=errs, label=fn_name)
+        steps.append({"step": label, "call": f"{fn_name}({', '.join(repr(x) if not hasattr(x, 'GetName') else '<project>' for x in a)})",
+                      "result": r if isinstance(r, (bool, int, float, str, type(None))) else _type_name(r),
+                      **({"errors": errs} if errs else {})})
+        return r
+
+    step("close scratch project", "CloseProject", project)
+    loaded_prev = False
+    if prev_name not in SCRATCH_DEFAULT_NAMES and prev_name != name:
+        loaded_prev = bool(step("reload previous project", "LoadProject", prev_name))
+    else:
+        steps.append({"step": "reload previous project", "call": None, "result": "skipped (no named previous project)"})
+
+    def go_to_folder() -> None:
+        if not folder:
+            steps.append({"step": "return to creation folder", "call": None, "result": "skipped (folder unknown)"})
+            return
+        cur = step("read current folder", "GetCurrentFolder")
+        if cur == folder:
+            steps.append({"step": "return to creation folder", "call": None, "result": "already there"})
+            return
+        if not step("open creation folder", "OpenFolder", folder):
+            step("go to root folder", "GotoRootFolder")
+            step("open creation folder (from root)", "OpenFolder", folder)
+
+    go_to_folder()
+    deleted = step("delete scratch project", "DeleteProject", name)
+    if not deleted and not loaded_prev:
+        # The scratch project may still count as current. Load some OTHER existing project (never the
+        # scratch one), then retry the delete once.
+        listed = step("list projects in folder", "GetProjectListInCurrentFolder")
+        others = [p for p in (listed if isinstance(listed, list) else []) if isinstance(p, str) and p != name]
+        if others:
+            step("load another project so the scratch one is not current", "LoadProject", others[0])
+            go_to_folder()
+            deleted = step("delete scratch project (retry)", "DeleteProject", name)
     result["scratch_deleted"] = bool(deleted)
     if not deleted:
-        result["notes"].append(f"could not delete scratch project '{name}'; delete it manually in the Project Manager")
+        result["notes"].append(
+            f"could not delete scratch project '{name}'. Delete it manually: in Resolve open the Project Manager "
+            f"(Home icon), make sure another project is open, find '{name}' in the folder it was created in "
+            f"({folder or 'the current folder'}), right-click > Delete. Nothing else was deleted.")
 
 
 # --------------------------------------------------------------------------- manual fallback
@@ -683,6 +904,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--expected", help="expected_timeline.json")
     ap.add_argument("--output", help="where to write resolve_verification.json (default: the handoff dir, else cwd)")
     ap.add_argument("--keep-project", action="store_true", help="do not delete the scratch Resolve project afterwards")
+    ap.add_argument("--include-risky-formats", action="store_true",
+                    help="also try FCPXML/EDL/AAF (observed to crash/freeze/fail on Resolve 21.1); run last. Save your work first")
     return ap
 
 
@@ -734,16 +957,37 @@ def main(argv: list[str] | None = None) -> int:
     }
     print(f"Resolve: {report['resolve']['product']} {report['resolve']['version']}")
     print("WARNING: a scratch project is created, which closes the currently open project. Save your work first.")
-    res = run_import(resolve, files, expected, args.keep_project)
+    if args.include_risky_formats:
+        print("WARNING: --include-risky-formats: FCPXML/EDL/AAF are observed to crash or freeze Resolve 21.1. "
+              "They run LAST (FCPXML very last). SAVE YOUR WORK NOW; the report is written only if Resolve survives.")
+    stamp = f"{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
+    res = run_import(resolve, files, expected, args.keep_project, include_risky=args.include_risky_formats,
+                     work_dir=out_path.parent / f"resolve_verify_work_{stamp}", stamp=stamp)
     report.update(res)
+    report["include_risky_formats"] = bool(args.include_risky_formats)
     ok = any(f["passed"] for f in res["formats"].values())
     report["status"] = "pass" if ok else "fail"
     report["required_checks"] = list(REQUIRED_CHECKS)
     write_report(out_path, report)
     print()
     print(markdown_table(res["formats"]))
+    print()
+    for label, e in res["formats"].items():
+        d = e.get("diagnostics")
+        if d:
+            tries = ", ".join("opts=" + ("yes" if a["options"] else "none") + f"->{a['result']}" for a in e.get("attempts", []))
+            print(f"[{label}] path={d['path_passed']} exists={d['exists']} size={d['size_bytes']} "
+                  f"returned={d['resolve_return_type']} attempts: {tries}")
+        elif e.get("skipped"):
+            print(f"[{label}] info: {SKIP_RISKY_MSG}")
     for n in res["notes"]:
         print(f"note: {n}")
+    imports_ok = [e for e in res["formats"].values() if not e.get("skipped")]
+    if imports_ok and all(e["actual"] is None for e in imports_ok):
+        print("\nEvery import returned None. Open Resolve's Console (Workspace > Console) right after running; it often shows "
+              "the import error. Please copy what it prints and send it back with resolve_verification.json.")
+    else:
+        print("\nTip: Resolve's Console (Workspace > Console) may show import errors; copy them if anything failed.")
     print(f"\nResult: {report['status'].upper()}  (report: {out_path})")
     return 0 if ok else 1
 
