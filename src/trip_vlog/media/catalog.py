@@ -218,6 +218,59 @@ class Catalog:
         return [r["relative_path"] for r in self.conn.execute(
             "SELECT relative_path FROM assets WHERE present=1 AND analysis_status='stale' ORDER BY relative_path")]
 
+    # -- segments and moments (Phase 2) ------------------------------------------------------
+    def replace_segments(self, asset_id: str, content_version: str | None, segments: list[dict[str, Any]]) -> None:
+        """Replace all segments of an asset. Each dict needs segment_id, start_seconds, end_seconds (None for stills)
+        and may carry any other JSON-able fields (stored in data_json)."""
+        with self.conn:
+            self.conn.execute("DELETE FROM segments WHERE asset_id=?", (asset_id,))
+            for s in segments:
+                self.conn.execute(
+                    "INSERT INTO segments(segment_id, asset_id, start_seconds, end_seconds, content_version, data_json) VALUES (?,?,?,?,?,?)",
+                    (s["segment_id"], asset_id, s.get("start_seconds"), s.get("end_seconds"), content_version,
+                     json.dumps(s, sort_keys=True, ensure_ascii=False)))
+
+    def list_segments(self, asset_id: str | None = None) -> list[sqlite3.Row]:
+        q = "SELECT * FROM segments" + (" WHERE asset_id=?" if asset_id else "")
+        q += " ORDER BY asset_id, start_seconds, segment_id"
+        return self.conn.execute(q, (asset_id,) if asset_id else ()).fetchall()
+
+    def replace_moments(self, asset_id: str, content_version: str | None, moments: list[dict[str, Any]]) -> None:
+        """Make `moments` the baseline moments of an asset. Moments enriched by later phases (data 'source' other than
+        'baseline') are never overwritten or removed here."""
+        keep = {m["moment_id"] for m in moments}
+        with self.conn:
+            for r in self.conn.execute("SELECT moment_id, data_json FROM moments WHERE asset_id=?", (asset_id,)).fetchall():
+                data = json.loads(r["data_json"] or "{}")
+                if data.get("source", "baseline") == "baseline" and r["moment_id"] not in keep:
+                    self.conn.execute("DELETE FROM moments WHERE moment_id=?", (r["moment_id"],))
+            for m in moments:
+                old = self.conn.execute("SELECT data_json FROM moments WHERE moment_id=?", (m["moment_id"],)).fetchone()
+                if old is not None and json.loads(old["data_json"] or "{}").get("source", "baseline") != "baseline":
+                    continue
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO moments(moment_id, asset_id, segment_id, source_in_seconds, source_out_seconds, content_version, data_json)"
+                    " VALUES (?,?,?,?,?,?,?)",
+                    (m["moment_id"], asset_id, m.get("segment_id"), m.get("source_in_seconds"), m.get("source_out_seconds"),
+                     content_version, json.dumps(m, sort_keys=True, ensure_ascii=False)))
+
+    def list_moments(self, asset_id: str | None = None) -> list[sqlite3.Row]:
+        q = "SELECT * FROM moments" + (" WHERE asset_id=?" if asset_id else "")
+        q += " ORDER BY asset_id, source_in_seconds, moment_id"
+        return self.conn.execute(q, (asset_id,) if asset_id else ()).fetchall()
+
+    def get_moment(self, moment_id: str) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM moments WHERE moment_id=?", (moment_id,)).fetchone()
+
+    def export_moments_jsonl(self, path: Path) -> int:
+        """moments.jsonl: read-only export (DESIGN §6.3), ordered by relative path then source_in."""
+        rows = self.conn.execute(
+            "SELECT m.data_json FROM moments m JOIN assets a ON a.asset_id=m.asset_id "
+            "ORDER BY a.relative_path, m.source_in_seconds, m.moment_id").fetchall()
+        text = "".join(json.dumps(json.loads(r["data_json"]), ensure_ascii=False, sort_keys=True) + "\n" for r in rows)
+        atomic_write_text(path, text)
+        return len(rows)
+
     # -- export ----------------------------------------------------------------------------
     @staticmethod
     def asset_export(row: sqlite3.Row, include_gps: bool = False) -> dict[str, Any]:

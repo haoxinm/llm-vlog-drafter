@@ -1,0 +1,198 @@
+{
+  "$defs": {
+    "SelectionClip": {
+      "additionalProperties": false,
+      "properties": {
+        "anchor": {
+          "enum": [
+            "start",
+            "center",
+            "end",
+            "best"
+          ],
+          "title": "Anchor",
+          "type": "string"
+        },
+        "audio_policy": {
+          "enum": [
+            "natural_sound",
+            "ambient_low",
+            "muted"
+          ],
+          "title": "Audio Policy",
+          "type": "string"
+        },
+        "clip_instance_id": {
+          "pattern": "^[A-Za-z0-9_.-]{1,80}$",
+          "title": "Clip Instance Id",
+          "type": "string"
+        },
+        "intentional_repeat_reason": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Intentional Repeat Reason"
+        },
+        "moment_id": {
+          "pattern": "^[A-Za-z0-9_.-]{1,80}$",
+          "title": "Moment Id",
+          "type": "string"
+        },
+        "rationale": {
+          "maxLength": 2000,
+          "title": "Rationale",
+          "type": "string"
+        },
+        "target_duration_seconds": {
+          "exclusiveMinimum": 0,
+          "maximum": 3600,
+          "title": "Target Duration Seconds",
+          "type": "number"
+        },
+        "track_role": {
+          "enum": [
+            "primary_video",
+            "overlay",
+            "natural_audio",
+            "music",
+            "narration"
+          ],
+          "title": "Track Role",
+          "type": "string"
+        },
+        "transition_in": {
+          "$ref": "#/$defs/SelectionTransition"
+        }
+      },
+      "required": [
+        "clip_instance_id",
+        "moment_id",
+        "target_duration_seconds",
+        "anchor",
+        "track_role",
+        "audio_policy",
+        "transition_in",
+        "rationale"
+      ],
+      "title": "SelectionClip",
+      "type": "object"
+    },
+    "SelectionScene": {
+      "additionalProperties": false,
+      "properties": {
+        "clips": {
+          "items": {
+            "$ref": "#/$defs/SelectionClip"
+          },
+          "maxItems": 500,
+          "minItems": 1,
+          "title": "Clips",
+          "type": "array"
+        },
+        "purpose": {
+          "maxLength": 500,
+          "title": "Purpose",
+          "type": "string"
+        },
+        "scene_id": {
+          "pattern": "^[A-Za-z0-9_.-]{1,80}$",
+          "title": "Scene Id",
+          "type": "string"
+        },
+        "target_duration_seconds": {
+          "exclusiveMinimum": 0,
+          "maximum": 7200,
+          "title": "Target Duration Seconds",
+          "type": "number"
+        },
+        "title": {
+          "maxLength": 200,
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "scene_id",
+        "title",
+        "purpose",
+        "target_duration_seconds",
+        "clips"
+      ],
+      "title": "SelectionScene",
+      "type": "object"
+    },
+    "SelectionTransition": {
+      "additionalProperties": false,
+      "properties": {
+        "duration_seconds": {
+          "maximum": 5,
+          "minimum": 0,
+          "title": "Duration Seconds",
+          "type": "number"
+        },
+        "type": {
+          "enum": [
+            "cut",
+            "dissolve"
+          ],
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "duration_seconds"
+      ],
+      "title": "SelectionTransition",
+      "type": "object"
+    }
+  },
+  "$id": "urn:trip-vlog:schema:selection_plan:1.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "LLM-facing selection plan: moment IDs, target durations, anchors. No source timestamps.",
+  "properties": {
+    "planner": {
+      "pattern": "^[A-Za-z0-9_.-]{1,40}$",
+      "title": "Planner",
+      "type": "string"
+    },
+    "scenes": {
+      "items": {
+        "$ref": "#/$defs/SelectionScene"
+      },
+      "maxItems": 200,
+      "minItems": 1,
+      "title": "Scenes",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "uncertainties": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 100,
+      "title": "Uncertainties",
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "planner",
+    "scenes",
+    "uncertainties"
+  ],
+  "title": "SelectionPlan",
+  "type": "object"
+}
