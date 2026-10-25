@@ -14,7 +14,8 @@ path-based asset IDs with content-fingerprint versions (§6.1); SQLite as
 the single catalog store (§5.1, §6); default LLM provider plus
 record/replay provider (§22, §19); explicit approval stop after the
 outline (§9.5); handoff fallback from FilmCraft read-back state and a
-user-run Resolve verification script (§15).
+user-run Resolve verification script (§15); Windows and macOS as
+first-class platforms (§22.1).
 
 ------------------------------------------------------------------------
 
@@ -1356,6 +1357,58 @@ Prefer boring, replaceable tools:
 -   **FilmCraft CLI/MCP** as the primary editing interface.
 -   **Pytest** for unit and integration tests.
 
+### 22.1 Platform support
+
+**Windows 10/11 (x64) and macOS 13+ (Apple Silicon and Intel) are
+first-class, required targets.** Linux is supported for development and
+CI. A feature is not done until it works on both Windows and macOS.
+
+-   **Paths:** use `pathlib` everywhere; never build paths by string
+    concatenation or assume `/`. Normalize relative paths for IDs to
+    POSIX separators and Unicode NFC (macOS file names often arrive as
+    NFD). Do not change case for IDs; detect case-only collisions on
+    case-insensitive volumes (default on Windows and macOS) and report
+    them. Support Windows long paths (`\\?\` prefix where required) and
+    drive letters/UNC paths in manifests. Treat paths written into
+    interchange files per the target's expected URL/path form (e.g.
+    `file:///C:/...` vs `file:///Users/...`) and test both.
+-   **Executables:** discover FilmCraft, FFmpeg/FFprobe, and optional
+    ASR tools per platform: `PATH`, configured paths, and standard
+    install locations (`.exe` on Windows; `/Applications/*.app/Contents/
+    MacOS/` and Homebrew prefixes `/opt/homebrew`, `/usr/local` on
+    macOS). Record resolved paths and versions in the capability
+    snapshot.
+-   **Processes:** launch subprocesses with argument lists, never via a
+    shell; no POSIX-only constructs (`fork`, signals other than
+    terminate, `/dev/null` literals). MCP stdio sessions must handle
+    Windows pipe behavior and CRLF-safe framing; terminate child
+    processes reliably on both platforms (process groups on macOS, job
+    objects or `CREATE_NEW_PROCESS_GROUP` on Windows).
+-   **Files:** write JSON/JSONL/CSV as UTF-8 with `\n` newlines
+    explicitly; use atomic replace (`os.replace`) for checkpoints;
+    tolerate Windows file locking (retry briefly, never delete originals);
+    avoid characters invalid on Windows in generated file names
+    (`<>:"/\|?*`, trailing dots/spaces, reserved names like `CON`).
+-   **Time and metadata:** do not rely on file creation time semantics
+    that differ by OS; prefer embedded capture metadata, then mtime.
+-   **DaVinci Resolve:** the verification script (§15.4) locates the
+    scripting API at the documented per-OS locations (Windows
+    `%PROGRAMDATA%\Blackmagic Design\DaVinci Resolve\Support\Developer\
+    Scripting`, macOS `/Library/Application Support/Blackmagic Design/
+    DaVinci Resolve/Developer/Scripting`), honoring
+    `RESOLVE_SCRIPT_API`/`RESOLVE_SCRIPT_LIB` if set.
+-   **Packaging:** pure-Python package installable with `pipx`/`uv` on
+    both OSes; no compiled extensions required for the core. Document
+    FFmpeg and FilmCraft installation per OS in the README.
+-   **CI:** run unit tests and fixture integration tests (with
+    FilmCraft where its builds are available) on `windows-latest`,
+    `macos-latest`, and `ubuntu-latest`. Record per-OS FilmCraft
+    capability differences in the capability snapshot and the
+    compatibility report; never assume a capability verified on one OS
+    exists on another.
+-   Phase 0 results gathered on one OS must be re-verified on Windows
+    and macOS (in CI or by the user) before being relied on there.
+
 Do not lock the architecture to one LLM vendor or agent framework. The
 workflow should work with any model that meets the vision,
 structured-output, context, and privacy requirements.
@@ -1376,6 +1429,8 @@ The implementation is successful when:
 -   The Resolve handoff is tested and its limitations are honestly
     reported.
 -   Original files remain unchanged.
+-   The tool installs and passes its test suite on both Windows and
+    macOS.
 -   The user can request targeted changes in natural language.
 -   Provider/model and editor versions are recorded for reproducibility.
 
