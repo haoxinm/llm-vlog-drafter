@@ -22,6 +22,10 @@ python -m venv .venv
 
 It is pure Python, so `pipx install .` or `uv tool install .` also work.
 
+If `trip-vlog` is "not recognized" (common on Windows when pip installs outside a venv, into a `Scripts` folder
+that is not on `PATH`), run it through Python instead: `python -m trip_vlog <command> ...` takes the same
+arguments. Or activate the venv first (PowerShell: `.venv\Scripts\Activate.ps1`), which puts `trip-vlog` on `PATH`.
+
 ### FFmpeg per OS
 
 | OS | Install |
