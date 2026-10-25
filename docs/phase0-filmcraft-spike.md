@@ -1,7 +1,7 @@
 # Phase 0 -- FilmCraft compatibility spike
 
 Status: **exit criterion met for the headless MCP interface** (create, import, place, trim, move, tracks, transition, title,
-marker, save, reopen, render all executed and read back). **DaVinci Resolve import: pending -- requires the user's Resolve
+marker, save, reopen, render all executed and read back). **DaVinci Resolve import: tested manually by the user on Resolve 21.1 (see Section 8.1): FCP7 XML imports cleanly; OTIO imports with missing media; FCPXML/EDL/AAF fail.** Originally: pending -- required the user's Resolve
 installation** (Resolve is proprietary GUI software that needs a GPU and cannot run in this sandbox; no Resolve compatibility is
 claimed anywhere in this document).
 
@@ -79,7 +79,7 @@ Status: **verified** = executed and read back; **failed** = ran but wrong; **n/a
 | Music ducking / keyframed automation | not tested | `effects.setParam` with keyframes exists in docs/catalog; nothing run |
 | Captions from transcript | not tested | `captions.*` / transcript commands exist in catalog; nothing run |
 | Desktop bridge / UI automation | not tested | needs GUI |
-| Resolve import | **pending -- requires user's Resolve installation** | see Section 8 |
+| Resolve import | **user-tested on Resolve 21.1**: FCP7 XML ok; OTIO imports, 5 media not found; AAF unreadable; FCPXML crashes Resolve; EDL freezes Resolve | see Section 8.1 |
 
 ## 4. Time representation, project file
 
@@ -151,6 +151,20 @@ Expected timeline: 1920x1080 30 fps, 195 frames (6 s 15 f); V1 landscape (src 0:
 3. Record per format (otio, xml, fcpxml, edl, aaf): imports without error? Timeline length/fps; clip order and in/out (compare against the expected list); media online or needs relink (note whether relative paths in OTIO/EDL resolved); V1/V2/A1/A2 track structure; dissolve present and length; audio level (-6 dB) and fade; title (expect offline/missing or empty); portrait clip size/scale; marker position and name; audio sync by playing the first 4 s against `preview.mp4`.
 4. Save screenshots of the Edit page and the import log for each format, and send them back with the Resolve version/edition.
 5. Pass criterion for the pipeline: one format imports with correct order/in/out/duration/fps and online media; transitions and markers are bonus; titles are expected to fail.
+
+
+### 8.1 Results reported by the user (DaVinci Resolve 21.1, manual import of the spike exports)
+
+| Format | Result |
+|---|---|
+| FCP7 XML (`phase0.xml`) | Imports with no issue |
+| OTIO (`phase0.otio`) | Imports, but Resolve reports 5 media files not found (likely cause: the relative `target_url` values described in Section 7 item 2; the spike does not rewrite them, the pipeline adapter does -- not yet re-verified in Resolve) |
+| FCPXML (`phase0.fcpxml`) | Crashed Resolve |
+| EDL (`phase0.edl`) | Froze Resolve |
+| AAF (`phase0.aaf`) | "Cannot be opened for reading" |
+
+Decision: FCP7 XML is the primary handoff format, OTIO secondary; FCPXML, EDL and AAF are not exported by default.
+Detailed per-check fidelity (clip order, in/out, transitions, markers, audio levels) was not reported yet; `tools/resolve_verify.py` automates it.
 
 ## 9. Windows and macOS (DESIGN.md 22.1)
 
