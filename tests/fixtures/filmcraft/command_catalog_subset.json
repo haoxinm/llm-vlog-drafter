@@ -1,0 +1,116 @@
+[
+ {
+  "id": "file.newProject",
+  "label": "Project\u2026",
+  "enabled": true,
+  "params": "{\"name\":str}"
+ },
+ {
+  "id": "file.saveAs",
+  "label": "Save As\u2026",
+  "enabled": true,
+  "params": "{\"path\":str}"
+ },
+ {
+  "id": "file.save",
+  "label": "Save",
+  "enabled": true,
+  "params": "{\"path\":str?}"
+ },
+ {
+  "id": "file.open",
+  "label": "Open Project\u2026",
+  "enabled": true,
+  "params": "{\"path\":str}"
+ },
+ {
+  "id": "media.status",
+  "label": "Media Status",
+  "enabled": true,
+  "params": "{\"item\":id?}"
+ },
+ {
+  "id": "file.newSequence",
+  "label": "Sequence\u2026",
+  "enabled": true,
+  "params": "{\"name\":str,\"width\":u32=1920,\"height\":u32=1080,\"fps\":f64=23.976,\"sampleRate\":u32=48000,\"video\":n=3,\"audio\":n=3,\"mix\":\"Stereo|Mono|5.1|Adaptive\"?,\"trackType\":\"Standard|Mono|5.1|Adaptive\"?,\"fromItem\":itemId?,\"fromItems\":[itemId]?}"
+ },
+ {
+  "id": "sequence.addTracks",
+  "label": "Add Tracks\u2026",
+  "enabled": true,
+  "params": "{\"video\":n=1,\"audio\":n=0,\"submix\":n=0,\"videoAfter\":\"first\"|\"V2\"|n?,\"audioAfter\":\"first\"|\"A2\"|n?,\"submixAfter\":\"first\"|\"S1\"|n?,\"audioType\":\"standard|5.1|adaptive|mono\"?,\"submixType\":\"stereo|5.1|adaptive|mono\"?}"
+ },
+ {
+  "id": "timeline.place",
+  "label": "Place Clip",
+  "enabled": true,
+  "params": "{\"item\":id|\"items\":[id] (back to back, one undo step),\"track\":\"V1\"|id|\"A1\" (sound only)|\"new\" (a video track after the last)?,\"audioTrack\":\"A1\"|id|\"new\"?,\"time\":ticks|\"frame\":i64|\"seconds\":f64,\"insert\":bool,\"sourceIn\":ticks?,\"duration\":ticks?,\"video\":bool=true,\"audio\":bool=true}"
+ },
+ {
+  "id": "timeline.trim",
+  "label": "Trim Edit",
+  "enabled": true,
+  "params": "{\"clip\":id,\"edge\":\"in|out\",\"mode\":\"regular|ripple\",\"delta\":ticks|\"deltaFrames\":i64}"
+ },
+ {
+  "id": "timeline.move",
+  "label": "Move Clips",
+  "enabled": true,
+  "params": "{\"moves\":[{\"clip\":id,\"track\":id|\"V2\"|\"new\" (after the last of its kind),\"time\":ticks}],\"insert\":bool,\"linked\":bool?,\"copy\":bool?}"
+ },
+ {
+  "id": "markers.add",
+  "label": "Add Marker",
+  "enabled": true,
+  "params": "{\"target\":\"program|source\",\"time\":ticks?,\"name\":str?,\"comment\":str?,\"color\":label?,\"durationFrames\":i64?}"
+ },
+ {
+  "id": "graphics.newText",
+  "label": "Text",
+  "enabled": true,
+  "params": "{\"text\":str=\"New Text\",\"position\":[x,y]? (point text: its alignment point on the first baseline; with `box`: the box's top-left corner),\"box\":[w,h]? (paragraph text wrapped in a box this size),\"clip\":id?,\"newClip\":bool?,\"vertical\":bool=false,\"size\":px=100,\"font\":str?,\"fontStyle\":str?,\"seconds\":f64=5,\"track\":index?,\"time\":ticks?}"
+ },
+ {
+  "id": "sequence.applyVideoTransition",
+  "label": "Apply Video Transition",
+  "enabled": true,
+  "params": "{\"clip\":id?,\"effect\":\"cross_dissolve|Cross Dissolve|\u2026\"?,\"frames\":i64?,\"edge\":\"in\"|\"out\"?,\"params\":{param:value}?,\"reverse\":bool?}"
+ },
+ {
+  "id": "sequence.applyAudioTransition",
+  "label": "Apply Audio Transition",
+  "enabled": true,
+  "params": "{\"clip\":id?,\"effect\":\"constant_power|Constant Power|\u2026\"?,\"frames\":i64?,\"edge\":\"in\"|\"out\"?,\"params\":{param:value}?,\"reverse\":bool?}"
+ },
+ {
+  "id": "clip.audioGain",
+  "label": "Audio Gain\u2026",
+  "enabled": true,
+  "params": "{\"clips\":[id]?,\"mode\":\"set|adjust|normalizeMax|normalizeAll\"?,\"db\":f64,\"relative\":bool?}"
+ },
+ {
+  "id": "file.exportMedia",
+  "label": "Media\u2026",
+  "enabled": true,
+  "params": "{\"path\":str,\"preset\":str?,\"settings\":ExportSettings?,\"format\":\"h264|hevc|prores|dnxhr|apv|mjpeg|mxf-op1a|mxf-opatom|png|tiff|bmp|jpg|tga|dpx|exr|gif|wav|aiff|aac|flac\"?,\"audioCodec\":\"auto|aac|pcm|flac\"?,\"flacLevel\":0..8=5,\"width\":u32?,\"height\":u32?,\"fps\":f64?,\"bitrateKbps\":u32?,\"bitrateMode\":\"cbr|vbr1Pass|vbr2Pass|crf\"?,\"crf\":0..51=23,\"hardwareEncoding\":\"off|auto\"?,\"scale\":f32=1,\"audio\":bool=true,\"quality\":0..100,\"burnCaptions\":bool=false,\"alpha\":bool=false,\"exrCompression\":\"none|rle|zips|zip\"?,\"captionSidecar\":\"srt|vtt\"?,\"loudnessLufs\":f64?,\"proresProfile\":\"proxy|lt|standard|hq|4444|4444xq\"?,\"dnxProfile\":\"lb|sq|hq|hqx\"?,\"apvProfile\":\"422-10|422-12|444-10|444-12\"?,\"mxfVideoCodec\":\"dnxhr|proRes|h264\"?,\"sequence\":id?,\"range\":\"entire|inOut|workArea|custom\"?,\"startSeconds\":f64?,\"endSeconds\":f64?,\"wait\":bool=false}"
+ },
+ {
+  "id": "file.exportInterchange",
+  "label": "Export Interchange",
+  "enabled": true,
+  "params": "{\"format\":\"edl|xml|fcpxml|otio|aaf|omf\"=xml,\"path\":str,\"sequence\":id?}"
+ },
+ {
+  "id": "edit.undo",
+  "label": "Undo",
+  "enabled": true,
+  "params": "{}"
+ },
+ {
+  "id": "file.import",
+  "label": "Import\u2026",
+  "enabled": true,
+  "params": "{\"paths\":[str],\"bin\":binId?,\"imageSequence\":bool?,\"replace\":bool?}"
+ }
+]

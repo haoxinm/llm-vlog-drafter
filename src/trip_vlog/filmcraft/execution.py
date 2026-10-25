@@ -1,0 +1,263 @@
+"""Execution journal and the versioned, idempotent project build (DESIGN §12.2).
+
+Policy: *versioned rebuilds*. ``build_project`` writes ``filmcraft/<ProjectName>_vNNN.fcproj``.
+  * Same spec hash, same media, and the latest version's journal says it completed (and the file on disk is
+    still the one that was verified) -> no-op: FilmCraft is not even started, nothing is appended anywhere.
+  * Different spec, changed media, or a prior run that failed / was interrupted -> a NEW version; earlier
+    versions are never touched. A plan is therefore never appended to an existing timeline.
+The journal (``filmcraft/execution_journal.json``) is rewritten atomically after every checkpoint.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from trip_vlog.filmcraft.errors import CommandError, FilmCraftError, VerificationFailed
+from trip_vlog.filmcraft.inspect import VerificationReport, verify_against_spec
+from trip_vlog.filmcraft.mappings import ClipMap, MediaMap
+from trip_vlog.filmcraft.timeline_spec import TimelineSpec, ensure_valid
+from trip_vlog.logging_utils import utc_now_iso
+from trip_vlog.paths import safe_filename
+from trip_vlog.state import atomic_write_json
+
+if TYPE_CHECKING:  # pragma: no cover
+    from trip_vlog.filmcraft.adapter import FilmCraftAdapter
+
+JOURNAL_SCHEMA = 1
+_VERSION_RE = re.compile(r"_v(\d{3,})\.fcproj$")
+
+
+@dataclass
+class BuildResult:
+    noop: bool
+    version: int
+    project_path: Path
+    spec_hash: str
+    run: dict[str, Any]
+    verification: VerificationReport | None = None
+    media_map: MediaMap | None = None
+    clip_map: ClipMap | None = None
+    warnings: list[str] = field(default_factory=list)
+
+    @property
+    def sequence_id(self) -> int | None:
+        return self.run.get("sequence_id")
+
+
+# ----------------------------------------------------------------------------
+# journal file
+# ----------------------------------------------------------------------------
+
+
+def load_journal(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"schema_version": JOURNAL_SCHEMA, "runs": []}
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(doc, dict) or not isinstance(doc.get("runs"), list):
+            raise ValueError("not a journal")
+        return doc
+    except (ValueError, OSError):
+        aside = path.with_name(f"{path.stem}.corrupt-{int(time.time())}{path.suffix}")
+        try:
+            os.replace(path, aside)
+        except OSError:
+            pass
+        return {"schema_version": JOURNAL_SCHEMA, "runs": [], "recovered_from": aside.name}
+
+
+def save_journal(path: Path, doc: dict[str, Any]) -> None:
+    atomic_write_json(path, doc)
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def media_signature(paths: list[str]) -> dict[str, list[int]]:
+    """size + mtime_ns of each asset: a changed original must trigger a new version."""
+    sig = {}
+    for p in paths:
+        st = os.stat(p)
+        sig[p] = [st.st_size, st.st_mtime_ns]
+    return sig
+
+
+def project_filename(project_name: str, version: int) -> str:
+    return f"{safe_filename(project_name, 60)}_v{version:03d}.fcproj"
+
+
+def _runs_for(doc: dict[str, Any], project_name: str) -> list[dict[str, Any]]:
+    return sorted((r for r in doc["runs"] if r.get("project_name") == project_name), key=lambda r: r["version"])
+
+
+def next_version(doc: dict[str, Any], fc_dir: Path, project_name: str) -> int:
+    seen = [r["version"] for r in _runs_for(doc, project_name)]
+    prefix = safe_filename(project_name, 60) + "_v"
+    if fc_dir.is_dir():
+        for p in fc_dir.iterdir():
+            m = _VERSION_RE.search(p.name)
+            if m and p.name.startswith(prefix):
+                seen.append(int(m[1]))
+    return max(seen, default=0) + 1
+
+
+def latest_complete_project(adapter: "FilmCraftAdapter") -> Path | None:
+    doc = load_journal(adapter.journal_path)
+    for r in reversed(_runs_for(doc, adapter.config.project_name)):
+        if r.get("status") == "complete":
+            p = adapter.workspace / r["project_path"]
+            if p.is_file():
+                return p
+    return None
+
+
+def _is_noop(adapter: "FilmCraftAdapter", latest: dict[str, Any] | None, spec_hash: str, sig: dict[str, list[int]]) -> bool:
+    if not latest or latest.get("status") != "complete" or latest.get("spec_hash") != spec_hash:
+        return False
+    proj = adapter.workspace / latest["project_path"]
+    if not proj.is_file():
+        return False
+    if latest.get("media_signature") != sig:
+        return False
+    return latest.get("project_sha256") == sha256_file(proj)
+
+
+# ----------------------------------------------------------------------------
+# the build
+# ----------------------------------------------------------------------------
+
+
+def run_build(adapter: "FilmCraftAdapter", spec: TimelineSpec, project_name: str, *, force_new_version: bool = False) -> BuildResult:
+    from trip_vlog.filmcraft.adapter import SequenceSettings
+
+    ensure_valid(spec)  # structural errors never create a version
+    for p in spec.asset_paths:
+        rp = adapter.policy.check_read(p, "asset")
+        if not rp.is_file():
+            raise FilmCraftError(f"asset not found: {rp}")
+    cmap = adapter.discover_capabilities()
+    fc_dir = adapter.fc_dir
+    fc_dir.mkdir(parents=True, exist_ok=True)
+    jpath = adapter.journal_path
+    doc = load_journal(jpath)
+    spec_hash = spec.spec_hash()
+    sig = media_signature(spec.asset_paths)
+    runs = _runs_for(doc, project_name)
+    latest = runs[-1] if runs else None
+
+    if not force_new_version and _is_noop(adapter, latest, spec_hash, sig):
+        assert latest is not None
+        adapter.project_path = adapter.workspace / latest["project_path"]
+        adapter.sequence_id = latest.get("sequence_id")
+        adapter.spec = spec
+        return BuildResult(True, latest["version"], adapter.project_path, spec_hash, latest, None,
+                           MediaMap.from_dict(latest.get("media_mapping", {})), ClipMap.from_dict(latest.get("clip_mapping", {})),
+                           list(latest.get("warnings", [])))
+
+    version = next_version(doc, fc_dir, project_name)
+    project_path = fc_dir / project_filename(project_name, version)
+    spec_copy = fc_dir / f"{project_path.stem}.timeline_spec.json"
+    run: dict[str, Any] = {
+        "version": version, "project_name": project_name, "status": "running",
+        "project_path": project_path.relative_to(adapter.workspace).as_posix(),
+        "spec_hash": spec_hash, "spec_file": spec_copy.relative_to(adapter.workspace).as_posix(),
+        "spec_summary": {"placements": len(spec.placements), "titles": len(spec.titles), "markers": len(spec.markers),
+                         "tracks": list(spec.tracks), "end_frame": spec.end_frame, "fps": str(spec.fps)},
+        "filmcraft_version": cmap.version, "started_at": utc_now_iso(), "finished_at": None,
+        "media_signature": sig, "media_mapping": {}, "clip_mapping": {}, "sequence_id": None,
+        "completed_ops": [], "last_checkpoint": None, "errors": [], "warnings": [],
+        "project_sha256": None, "verified_after_reopen": False,
+    }
+    doc["runs"].append(run)
+    current = {"op": "start"}
+
+    def flush() -> None:
+        save_journal(jpath, doc)
+
+    def done(op: str, checkpoint: str | None = None) -> None:
+        run["completed_ops"].append(op)
+        if checkpoint:
+            run["last_checkpoint"] = checkpoint
+        flush()
+
+    flush()
+    try:
+        atomic_write_json(spec_copy, spec.to_dict())
+        current["op"] = "create_project"
+        adapter.create_project(project_path, project_name)
+        done("create_project", "created")
+
+        current["op"] = "import_media"
+        imp = adapter.import_media(spec.asset_paths)
+        run["media_mapping"] = imp.media_map.to_dict()
+        adapter.save_project()
+        done(f"import_media:{imp.imported}", "imported")
+
+        current["op"] = "create_sequence"
+        seq = adapter.create_sequence(SequenceSettings.from_spec(spec))
+        run["sequence_id"] = seq.sequence_id
+        done("create_sequence")
+
+        current["op"] = "apply_timeline"
+        applied = adapter.apply_timeline(spec, imp.media_map, imp.durations)
+        eff = applied.effective_spec or spec
+        run["warnings"] += applied.warnings
+        run["downgraded_dissolves"] = applied.downgraded_dissolves
+        run["clip_mapping"] = applied.clip_map.to_dict()
+        done(f"apply_timeline:{applied.placed}_placements")
+
+        current["op"] = "verify_before_save"
+        pre = adapter.verify(eff, imp.media_map)
+        if not pre.ok:
+            raise VerificationFailed("timeline read back before saving does not match the spec: " + pre.summary(), pre.mismatches)
+        done("verify_live")
+
+        current["op"] = "save_project"
+        adapter.save_project()
+        run["clip_mapping"] = pre.clip_map.to_dict()
+        done("save_project", "assembled")
+
+        # persistence check: hard-kill the server, then reopen the file in a NEW process and verify again
+        current["op"] = "reopen_verify"
+        adapter.kill_server()
+        adapter.open_project(project_path)
+        post = adapter.verify(eff, imp.media_map)
+        if not post.ok:
+            raise VerificationFailed("project reopened in a new process does not match the spec: " + post.summary(), post.mismatches)
+        run["clip_mapping"] = post.clip_map.to_dict()
+        run["sequence_id"] = adapter.sequence_id if adapter.sequence_id is not None else run["sequence_id"]
+        run["project_sha256"] = sha256_file(project_path)
+        run["verified_after_reopen"] = True
+        run["status"] = "complete"
+        run["finished_at"] = utc_now_iso()
+        done("reopen_verify", "verified")
+        adapter.spec = eff
+        return BuildResult(False, version, project_path, spec_hash, run, post, imp.media_map, post.clip_map, list(run["warnings"]))
+    except BaseException as e:
+        err: dict[str, Any] = {"at": utc_now_iso(), "op": current["op"], "type": type(e).__name__,
+                               "message": adapter.log.sanitizer.text(str(e))}
+        if isinstance(e, CommandError):
+            err["command"] = e.command
+            err["params"] = adapter.log.sanitizer.obj(e.params)
+        if isinstance(e, VerificationFailed):
+            err["mismatches"] = adapter.log.sanitizer.obj([m.to_dict() for m in e.mismatches[:50]])
+        run["errors"].append(err)
+        run["status"] = "failed"
+        run["finished_at"] = utc_now_iso()
+        try:
+            flush()
+        finally:
+            adapter.close()
+        raise
