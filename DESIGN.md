@@ -1098,8 +1098,13 @@ Resolve; EDL froze Resolve; AAF could not be opened. Policy:
     are absent. **Stills whose file name contains digits (e.g.
     `still_1080p.png`, and typical camera names like `IMG_1042.JPG`)
     are misread as image sequences and arrive offline**; `resolve-finish`
-    must detect and repair this (approach chosen from the verifier's
-    experiments). OTIO is rejected by `ImportTimelineFromFile` in every
+    must detect and repair this. Verifier experiments on 21.1.1.10:
+    `MediaPoolItem.ReplaceClip(<expected absolute path>)` on the
+    misread item brings it online with the correct name and record
+    range; importing without `sourceClipsPath`, or pre-importing media
+    with `ImportMedia` and then importing the XML with
+    `importSourceClips=False`, does not fix it. Markers survive the
+    FCP7 XML import in this test. OTIO is rejected by `ImportTimelineFromFile` in every
     path form tried, though the UI import accepts it; OTIO therefore
     stays an unverified secondary export.
 -   Third-party measurements (see `docs/research/resolve-mcp.md`) report
