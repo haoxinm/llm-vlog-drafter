@@ -17,23 +17,31 @@ _spec.loader.exec_module(rv)
 
 # ---------------------------------------------------------------- fake Resolve
 class FakeMPI:
-    def __init__(self, path):
-        self.path = path
+    def __init__(self, path, item=None):
+        self.path, self.item = path, item
 
     def GetClipProperty(self, key=None):
         return self.path if key == "File Path" else None
 
+    def ReplaceClip(self, path):
+        it = self.item
+        if it is None or not it.replace_ok:
+            return False
+        it.name, it.path, it.online = Path(path).name, path, True
+        return True
+
 
 class FakeItem:
-    def __init__(self, name, start, end, left, path, tl_start=86400, online=True):
+    def __init__(self, name, start, end, left, path, tl_start=86400, online=True, replace_ok=True, relink_to=None):
         self.name, self.s, self.e, self.left, self.path, self.tl_start, self.online = name, start, end, left, path, tl_start, online
+        self.replace_ok, self.relink_to = replace_ok, relink_to
 
     def GetName(self): return self.name
     def GetStart(self): return self.s + self.tl_start
     def GetEnd(self): return self.e + self.tl_start
     def GetDuration(self): return self.e - self.s
     def GetLeftOffset(self): return self.left
-    def GetMediaPoolItem(self): return FakeMPI(self.path) if self.path and self.online else None
+    def GetMediaPoolItem(self): return FakeMPI(self.path, self) if self.path and self.online else None
 
 
 class FakeTimeline:
@@ -51,8 +59,9 @@ class FakeTimeline:
 
 
 class FakeProject:
-    def __init__(self, name, timeline, none_with_options=False):
+    def __init__(self, name, timeline, none_with_options=False, hook=None):
         self.name, self.timeline, self.settings = name, timeline, {}
+        self.hook, self.media_imports, self.relinks = hook, [], []
         self.imports: list[tuple] = []
         self.none_with_options = none_with_options
         self.seen_names: set[str] = set()
@@ -69,15 +78,30 @@ class FakeProject:
             return None  # Resolve silently returns None for a reused timeline name
         if opts:
             self.seen_names.add(opts["timelineName"])
+        if self.hook:
+            return self.hook(path, opts, self)
         return self.timeline
+
+    def ImportMedia(self, items):
+        self.media_imports.append(items)
+        if any(isinstance(i, dict) for i in items):
+            raise RuntimeError("dict form unsupported")
+        return [type("Clip", (), {"GetName": lambda self, n=Path(i).name: n})() for i in items]
+
+    def RelinkClips(self, clips, folder):
+        self.relinks.append((clips, folder))
+        for c in clips:
+            if c.item is not None and c.item.relink_to:
+                c.item.name, c.item.path, c.item.online = Path(c.item.relink_to).name, c.item.relink_to, True
+        return True
 
     def SetCurrentTimeline(self, tl): return True
 
 
 class FakePM:
     """Models: the loaded project cannot be deleted; DeleteProject only sees the current folder."""
-    def __init__(self, timeline, prev="UserProject", folder="Sub", none_with_options=False):
-        self.timeline, self.none_with_options = timeline, none_with_options
+    def __init__(self, timeline, prev="UserProject", folder="Sub", none_with_options=False, hook=None):
+        self.timeline, self.none_with_options, self.hook = timeline, none_with_options, hook
         self.folders = {"root": {}, "Sub": {}}
         self.cur_folder = folder
         self.prev = prev
@@ -98,7 +122,7 @@ class FakePM:
         return False
     def GetProjectListInCurrentFolder(self): return list(self.folders[self.cur_folder])
     def CreateProject(self, n):
-        p = FakeProject(n, self.timeline, self.none_with_options)
+        p = FakeProject(n, self.timeline, self.none_with_options, self.hook)
         self.folders[self.cur_folder][n] = p; self.cur = n; self.created = p; return p
     def CloseProject(self, p): self.calls.append("CloseProject"); return True  # stays "current" until another loads
     def LoadProject(self, n):
@@ -146,7 +170,8 @@ def media(tmp_path):
 
 def make_actual_timeline(media: Path, **kw) -> FakeTimeline:
     a, b = str(media / "a.mp4"), str(media / "b.png")
-    items = {"video": [[FakeItem("a.mp4", 0, 105, 15, a), FakeItem("b.png", 105, 195, 0, b)],
+    items = {"video": [[FakeItem("a.mp4", 0, 105, 15, a), FakeItem("Cross Dissolve", 97, 112, None, None),
+                        FakeItem("b.png", 105, 195, 0, b)],
                        [FakeItem("Hello Title", 0, 60, 0, None)]],
              "audio": [[FakeItem("a.mp4", 0, 105, 15, a)]]}
     return FakeTimeline(items, markers={60 + 86400 - 86400: {"name": "Scene A", "color": "Blue"}}, **kw)
@@ -302,7 +327,7 @@ def test_compare_all_pass(media):
     c, _ = run_compare(media)
     for k in ("fps", "resolution", "duration", "track_structure", "clip_order", "record_inout", "source_in", "media_path", "media_online", "markers"):
         assert c[k]["status"] == "pass", (k, c[k])
-    assert c["transitions"]["status"] == "info" and "Title" in c["titles"]["detail"] and "present" in c["titles"]["detail"]
+    assert c["transitions"]["status"] == "pass" and "Title" in c["titles"]["detail"] and "present" in c["titles"]["detail"]
     assert rv.format_passed(list(c.values()) + [rv._r("import", "pass")])
 
 
@@ -313,7 +338,7 @@ def test_tolerance_one_frame_ok_two_fails(media):
     c, _ = run_compare(media, tl)
     assert c["duration"]["status"] == "pass" and c["record_inout"]["status"] == "pass"
     tl = make_actual_timeline(media, dur=198)
-    tl.items["video"][0][1].s += 2
+    tl.items["video"][0][2].s += 2
     tl.items["video"][0][0].left = 18
     c, _ = run_compare(media, tl)
     assert c["duration"]["status"] == "fail" and c["record_inout"]["status"] == "fail" and c["source_in"]["status"] == "fail"
@@ -330,7 +355,7 @@ def test_fps_and_resolution_fail(media):
 def test_order_swapped_fails(media):
     tl = make_actual_timeline(media)
     v = tl.items["video"][0]
-    v[0].name, v[1].name, v[0].path, v[1].path = v[1].name, v[0].name, v[1].path, v[0].path
+    v[0].name, v[2].name, v[0].path, v[2].path = v[2].name, v[0].name, v[2].path, v[0].path
     c, _ = run_compare(media, tl)
     assert c["clip_order"]["status"] == "fail"
 
@@ -628,3 +653,198 @@ def test_main_with_fake_resolve_exit_codes(media, tmp_path, monkeypatch):
         assert rv.main(["--timeline", str(f), "--expected", str(exp), "--output", str(out)]) == code
         rep = json.loads(out.read_text())
         assert rep["resolve"]["version"] == "19.1.0" and rep["status"] == ("pass" if code == 0 else "fail")
+
+
+# ---------------------------------------------------------------- transitions
+def test_transition_classification_and_report():
+    items = {"video": [[FakeItem("landscape_5s.mp4", 0, 105, 15, "/m/l.mp4"), FakeItem("Cross Dissolve", 97, 112, None, None),
+                        FakeItem("still.png", 105, 195, 0, "/m/s.png"),
+                        FakeItem("Gizmo", 190, 195, None, None),            # unknown name, short, at a clip end -> transition
+                        FakeItem("Lower Third", 10, 90, None, None)],       # long title -> not a transition
+                       [FakeItem("Hello Title", 0, 60, None, None), FakeItem("p.mp4", 60, 120, 0, "/m/p.mp4")]],  # title abuts a cut but is long
+             "audio": [[FakeItem("m.wav", 0, 180, 0, "/m/m.wav"), FakeItem("Final Cut Pro 7", 165, 180, None, None),
+                        FakeItem("gone.mp4", 100, 110, 0, "/m/gone.mp4", online=False)]]}  # offline media-looking name: a clip
+    d = rv.dump_timeline(FakeTimeline(items))
+    kinds = {(t["kind"], t["index"], i["name"]): i["kind"] for t in d["tracks"] for i in t["items"]}
+    assert kinds[("video", 1, "Cross Dissolve")] == kinds[("video", 1, "Gizmo")] == kinds[("audio", 1, "Final Cut Pro 7")] == "transition"
+    assert kinds[("video", 1, "Lower Third")] == kinds[("video", 2, "Hello Title")] == kinds[("audio", 1, "gone.mp4")] == "clip"
+    cd = next(i for i in d["tracks"][0]["items"] if i["name"] == "Cross Dissolve")
+    assert cd["has_media_pool_item"] is False and cd["centre"] == 104.5 and cd["nearest_cut"] == 105 and cd["centre_offset"] == -0.5
+
+
+def test_transitions_check_counts_and_exclusion(media):
+    tl = make_actual_timeline(media)
+    tl.items["audio"].append([FakeItem("Final Cut Pro 7", 165, 180, None, None), FakeItem("music.wav", 0, 180, 0, str(media / "a.mp4"))])
+    exp = make_expected(media)
+    exp["transitions"] = 2
+    c, _ = run_compare(media, tl, exp)
+    t = c["transitions"]
+    assert t["status"] == "pass" and t["required"] is False and len(t["found"]) == 2
+    assert "V1 'Cross Dissolve' 97-112 centre 104.5 (nearest cut 105, offset -0.5)" in t["detail"]
+    assert c["clip_order"]["status"] == "pass" and c["record_inout"]["status"] == "pass"  # transitions excluded
+    exp["transitions"] = 3
+    assert checks(rv.compare_timeline(exp, rv.dump_timeline(tl), fold_case=False))["transitions"]["status"] == "fail"
+    exp["transitions"] = None
+    assert checks(rv.compare_timeline(exp, rv.dump_timeline(tl), fold_case=False))["transitions"]["status"] == "info"
+
+
+# ---------------------------------------------------------------- image sequence misdetection
+@pytest.mark.parametrize("exp_name,item_name,ok", [
+    ("IMG_1042.JPG", "IMG_[1042-1100].JPG", True),
+    ("img_1042.jpg", "IMG_[1042-1100].JPG", True),
+    ("still_1080p.png", "still_[1080-1229]p.png", True),
+    ("IMG_1200.JPG", "IMG_[1042-1100].JPG", False),
+    ("other.png", "still_[1080-1229]p.png", False),
+])
+def test_match_sequence_by_name(exp_name, item_name, ok):
+    clip = {"name": exp_name, "source_path": "/m/" + exp_name, "record_start_frame": 500, "record_end_frame": 600}
+    item = {"name": item_name, "media_path": None, "start": 0, "end": 10}
+    assert bool(rv.match_sequence(clip, item)) is ok
+    # the bracket may be only in the path
+    item = {"name": "x", "media_path": "C:\\m\\" + item_name, "start": 0, "end": 10}
+    assert bool(rv.match_sequence(clip, item)) is ok
+
+
+def test_match_sequence_by_position_and_extension():
+    clip = {"name": "a.png", "source_path": "/m/a.png", "record_start_frame": 105, "record_end_frame": 195}
+    seq = {"name": "zzz_[1-9].png", "media_path": None, "start": 105, "end": 195}
+    assert rv.match_sequence(clip, seq)["how"] == "position"
+    assert rv.match_sequence(clip, {**seq, "start": 300, "end": 390}) is None
+    assert rv.match_sequence(clip, {**seq, "name": "zzz_[1-9].jpg"}) is None
+    assert rv.match_sequence(clip, {**seq, "name": "plain.png"}) is None
+
+
+def seq_expected(media: Path) -> dict:
+    e = make_expected(media)
+    e["tracks"][0]["clips"][1].update(name="still_1080p.png", source_path=str(media / "still_1080p.png"))
+    return e
+
+
+def seq_timeline(media: Path, misdetected=True, **item_kw) -> FakeTimeline:
+    tl = make_actual_timeline(media)
+    still = tl.items["video"][0][2]
+    if misdetected:
+        still.name = "still_[1080-1229]p.png"
+        still.path = str(media / "still_[1080-1229]p.png")  # does not exist on disk -> offline
+    else:
+        still.name, still.path = "still_1080p.png", str(media / "still_1080p.png")
+    for k, v in item_kw.items():
+        setattr(still, k, v)
+    return tl
+
+
+@pytest.fixture
+def seq_media(media):
+    (media / "still_1080p.png").write_bytes(b"x")
+    return media
+
+
+def test_misdetected_sequence_matched_and_reported(seq_media):
+    c = checks(rv.compare_timeline(seq_expected(seq_media), rv.dump_timeline(seq_timeline(seq_media)), fold_case=False))
+    s = c["image_sequence_misdetected"]
+    assert s["status"] == "fail" and s["required"] and len(s["misdetections"]) == 1
+    assert "still_1080p.png" in s["detail"] and "still_[1080-1229]p.png" in s["detail"]
+    assert c["clip_order"]["status"] == "pass" and c["record_inout"]["status"] == "pass"  # matched by sequence
+    assert c["media_online"]["status"] == "fail" and "offline" in c["media_online"]["detail"]
+    m = s["misdetections"][0]
+    assert (m["track_kind"], m["track_index"], m["item_index"], m["record"]) == ("video", 1, 2, [105, 195])
+    ok = checks(rv.compare_timeline(seq_expected(seq_media), rv.dump_timeline(seq_timeline(seq_media, False)), fold_case=False))
+    assert ok["image_sequence_misdetected"]["status"] == "pass" and ok["media_online"]["status"] == "pass"
+
+
+# ---------------------------------------------------------------- experiments
+def good_after_media_import(seq_media):
+    """Hook: only the 'ImportMedia per file then importSourceClips=False' approach yields a good still."""
+    def hook(path, opts, project):
+        flat = [i for batch in project.media_imports for i in batch if isinstance(i, str)]
+        good = opts.get("importSourceClips") is False and len(flat) >= 2
+        return seq_timeline(seq_media, misdetected=not good)
+    return hook
+
+
+def test_experiments_recorded_and_recommended(seq_media, tmp_path):
+    resolve = FakeResolve(seq_timeline(seq_media), hook=good_after_media_import(seq_media))
+    x = tmp_path / "t.xml"; x.write_text("<xmeml/>")
+    res = rv.run_import(resolve, [x], seq_expected(seq_media), keep_project=False, stamp="E1")
+    e = res["formats"]["fcp7xml"]
+    assert not e["passed"] and {c["check"]: c["status"] for c in e["checks"]}["media_online"] == "fail"
+    ex = res["experiments"]["still_sequence"]
+    ap = {a["approach"]: a for a in ex["approaches"]}
+    assert list(ap) == ["import_source_clips_no_path", "pre_import_media_then_xml", "pre_import_media_dict_then_xml", "repair_replace_clip"]
+    assert ex["misdetected"][0]["resolve_name"] == "still_[1080-1229]p.png"
+    # (i) no sourceClipsPath, (ii) one ImportMedia call per file, names recorded, (iii) dict form recorded even if unsupported
+    assert "sourceClipsPath" not in ap["import_source_clips_no_path"]["steps"][0]["args"][1] and not ap["import_source_clips_no_path"]["works"]
+    ii = [s for s in ap["pre_import_media_then_xml"]["steps"] if s["call"] == "ImportMedia"]
+    assert len(ii) == len(ex["media_files"]) == 2 and all(len(s["args"][0]) == 1 for s in ii) and ii[0]["clip_names"] == ["a.mp4"]
+    assert ap["pre_import_media_then_xml"]["works"] and ap["pre_import_media_then_xml"]["stills"][0]["online"] is True
+    iii = ap["pre_import_media_dict_then_xml"]
+    assert iii["steps"][0]["errors"] and iii["steps"][0]["args"] == [[{"FilePath": ex["media_files"][0]}]]
+    assert ex["recommended"] == "pre_import_media_then_xml"
+    # (b) repair: before offline & misdetected, after online with the real file
+    rep = ap["repair_replace_clip"]["items"][0]
+    assert rep["before"]["online"] is False and "[1080-1229]" in rep["before"]["name"]
+    assert rep["after"]["online"] is True and rep["after"]["name"] == "still_1080p.png" and rep["attempts"][0]["call"] == "ReplaceClip"
+    # timeline names unique; only the scratch project deleted
+    names = [i[1]["timelineName"] for i in resolve.pm.created.imports if i[1]]
+    assert len(names) == len(set(names)) == 4
+    assert resolve.pm.deleted == [res["scratch_project"]] and res["scratch_deleted"]
+    json.dumps(res, default=str)
+
+
+def test_repair_falls_back_to_relink(seq_media, tmp_path):
+    good = str(seq_media / "still_1080p.png")
+    resolve = FakeResolve(seq_timeline(seq_media, replace_ok=False, relink_to=good))
+    x = tmp_path / "t.xml"; x.write_text("<xmeml/>")
+    res = rv.run_import(resolve, [x], seq_expected(seq_media), keep_project=True)
+    ex = res["experiments"]["still_sequence"]
+    rep = next(a for a in ex["approaches"] if a["approach"] == "repair_replace_clip")
+    assert [a["call"] for a in rep["items"][0]["attempts"]] == ["ReplaceClip", "RelinkClips"]
+    assert rep["works"] and ex["recommended"] == "repair_replace_clip"
+    assert resolve.pm.created.relinks and resolve.pm.created.relinks[0][1] == str(seq_media)
+    assert resolve.pm.deleted == []
+
+
+def test_experiments_only_on_misdetection_or_flag_and_defensive(seq_media, tmp_path):
+    x = tmp_path / "t.xml"; x.write_text("<xmeml/>")
+    o = tmp_path / "t.otio"; o.write_text("{}")
+    res = rv.run_import(FakeResolve(seq_timeline(seq_media, False)), [x], seq_expected(seq_media), keep_project=True)
+    assert "experiments" not in res and res["formats"]["fcp7xml"]["passed"]
+    res = rv.run_import(FakeResolve(seq_timeline(seq_media)), [o], seq_expected(seq_media), keep_project=True)
+    assert "experiments" not in res  # fcp7xml only
+    res = rv.run_import(FakeResolve(seq_timeline(seq_media, False)), [x], seq_expected(seq_media), keep_project=True, experiments=True)
+    ex = res["experiments"]["still_sequence"]
+    assert ex["misdetected"] == [] and ex["approaches"][3]["result"].startswith("skipped")
+
+    def boom(path, opts, project):
+        if "_exp_" in opts["timelineName"]:
+            raise RuntimeError("boom")
+        return project.timeline
+    resolve = FakeResolve(seq_timeline(seq_media), hook=boom)
+    res = rv.run_import(resolve, [x], seq_expected(seq_media), keep_project=True, experiments=True)
+    ap = res["experiments"]["still_sequence"]["approaches"]
+    assert len(ap) == 4 and all(a["steps"] for a in ap[:3]) and not any(a["works"] for a in ap[:3])
+
+
+# ---------------------------------------------------------------- OTIO rejected message
+def test_otio_rejected_detail_and_manual_suggestion(media, tmp_path):
+    f = write_otio(tmp_path, relative_otio())
+    res = rv.run_import(FakeResolve(None), [f], make_expected(media), keep_project=True, work_dir=tmp_path / "w")
+    for e in res["formats"].values():
+        assert e["checks"][0]["detail"] == rv.OTIO_REJECTED_MSG and "manual File > Import > Timeline may still work" in e["checks"][0]["detail"]
+    bare = res["formats"]["otio[bare]"]["file"]
+    assert Path(bare).is_file() and Path(bare).parent.name == "otio_bare"
+    assert bare in res["otio_manual_suggestion"] and "media links" in res["otio_manual_suggestion"]
+
+
+def test_main_prints_experiments_and_flag(seq_media, tmp_path, monkeypatch, capsys):
+    x = tmp_path / "t.xml"; x.write_text("<xmeml/>")
+    exp = tmp_path / "e.json"; exp.write_text(json.dumps(seq_expected(seq_media)))
+    resolve = FakeResolve(seq_timeline(seq_media), hook=good_after_media_import(seq_media))
+    monkeypatch.setattr(rv, "connect_resolve", lambda *a, **k: (resolve, {"diagnosis": []}))
+    out = tmp_path / "r.json"
+    assert rv.main(["--timeline", str(x), "--expected", str(exp), "--output", str(out), "--experiments"]) == 1
+    txt = capsys.readouterr().out
+    assert "pre_import_media_then_xml gives an online still" not in txt and "'pre_import_media_then_xml' gives an online still" in txt
+    assert "image_sequence_misdetected" in txt
+    rep = json.loads(out.read_text())
+    assert rep["experiments"]["still_sequence"]["recommended"] == "pre_import_media_then_xml" and rep["status"] == "fail"

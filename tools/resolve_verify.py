@@ -27,6 +27,9 @@ Expected-timeline JSON (frames are integers on the timeline, record_end is exclu
        "source_in_frame": 15, "source_out_frame": 120}]}]
 }
 A clip with "source_path": null (titles/graphics) is optional: reported as info only.
+Transitions (items without a media pool item named Dissolve/Wipe/Dip/Fade/..., or short ones at a cut) are
+excluded from the clip checks and counted for the (non-required) transitions check.
+--experiments forces the FCP7 image-sequence experiments (they run automatically when a still is misdetected).
 """
 from __future__ import annotations
 
@@ -45,7 +48,8 @@ from typing import Any
 
 TOL_FRAMES = 1
 SCHEMA_VERSION = 1
-REQUIRED_CHECKS = ("import", "fps", "duration", "clip_order", "record_inout", "source_in", "media_online")
+REQUIRED_CHECKS = ("import", "fps", "duration", "clip_order", "record_inout", "source_in", "media_online",
+                   "image_sequence_misdetected")
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif", ".webp", ".heic", ".exr", ".dpx"}
 FORMAT_BY_SUFFIX = {".otio": "otio", ".xml": "fcp7xml", ".fcpxml": "fcpxml", ".edl": "edl", ".aaf": "aaf"}
 # Import order. Formats observed to crash/freeze/fail on Resolve 21.1 are "risky": skipped unless
@@ -55,6 +59,14 @@ RISKY_ORDER = ("edl", "aaf", "fcpxml")
 OTIO_VARIANTS = ("bare", "slash", "file_url")
 SKIP_RISKY_MSG = ("skipped \u2014 observed to crash/freeze/fail on Resolve 21.1; pass --include-risky-formats to try")
 SCRATCH_DEFAULT_NAMES = (None, "", "Untitled Project")
+# Resolve lists transitions as ordinary timeline items without a MediaPoolItem. "Final Cut Pro 7" is the
+# name Resolve gives imported FCP7 audio transitions (constant-power fades).
+TRANSITION_NAME_RE = re.compile(r"dissolve|cross\s*fade|fade|transition|final cut pro 7|\b(?:dip|wipe)\b", re.I)
+TRANSITION_MAX_FRAMES = 30  # an unnamed item without media is a transition only if it is this short...
+MEDIA_NAME_RE = re.compile(r"\.[A-Za-z0-9]{2,5}$")  # ...and its name does not look like a media file
+SEQ_RE = re.compile(r"^(.*)\[(\d+)-(\d+)\](.*)$")  # Resolve's image-sequence naming: still_[1080-1229]p.png
+OTIO_REJECTED_MSG = ("rejected by ImportTimelineFromFile in this Resolve version "
+                     "(manual File > Import > Timeline may still work)")
 
 
 # --------------------------------------------------------------------------- discovery
@@ -359,9 +371,12 @@ def dump_timeline(timeline: Any) -> dict:
             tname = _safe(_m(timeline, "GetTrackName"), kind, idx, errors=errs, label="GetTrackName") if True else None
             items = _safe(_m(timeline, "GetItemListInTrack"), kind, idx, default=[], errors=errs, label=f"GetItemListInTrack({kind},{idx})") or []
             rec = []
-            for it in items:
-                rec.append(_dump_item(it, start, errs))
+            for i, it in enumerate(items):
+                r = _dump_item(it, start, errs)
+                r["index"] = i  # position in GetItemListInTrack, used to fetch the live item again
+                rec.append(r)
             rec.sort(key=lambda r: (r["start"] if r["start"] is not None else 0))
+            classify_items(rec)
             out["tracks"].append({"kind": kind, "index": idx, "name": tname or f"{kind} {idx}", "items": rec})
     mk = _safe(_m(timeline, "GetMarkers"), default={}, errors=errs, label="GetMarkers") or {}
     for fid, m in mk.items():
@@ -374,6 +389,40 @@ def dump_timeline(timeline: Any) -> dict:
                                "color": (m or {}).get("color")})
     out["markers"].sort(key=lambda m: m["frame"])
     return out
+
+
+def is_transition_name(name: Any) -> bool:
+    return bool(name) and TRANSITION_NAME_RE.search(str(name)) is not None
+
+
+def classify_items(items: list[dict]) -> None:
+    """In place: set item['kind'] = 'transition' | 'clip' for one track's dumped items.
+    Transition = no MediaPoolItem AND (known transition name OR short item that spans/abuts a cut point or
+    clip end of this track). Items that look like media files by name are never transitions. Transitions
+    also get centre, nearest_cut and centre_offset (centre minus nearest cut)."""
+    cuts: list[float] = []
+    for it in items:
+        if it.get("has_media_pool_item"):
+            cuts += [c for c in (it.get("start"), it.get("end")) if c is not None]
+    for it in items:
+        it["kind"] = "clip"
+        if it.get("has_media_pool_item"):
+            continue
+        s, e, name = it.get("start"), it.get("end"), it.get("name")
+        if s is None or e is None:
+            continue
+        if name and MEDIA_NAME_RE.search(str(name)):
+            continue
+        by_name = is_transition_name(name)
+        by_shape = (e - s) <= TRANSITION_MAX_FRAMES and any(s - TOL_FRAMES <= c <= e + TOL_FRAMES for c in cuts)
+        if not (by_name or by_shape):
+            continue
+        it["kind"] = "transition"
+        centre = (s + e) / 2
+        it["centre"] = centre
+        near = min(cuts, key=lambda c: abs(c - centre)) if cuts else None
+        it["nearest_cut"] = near
+        it["centre_offset"] = (centre - near) if near is not None else None
 
 
 def _dump_item(it: Any, tl_start: float, errs: list) -> dict:
@@ -425,6 +474,39 @@ def _item_key(name: Any, path: Any) -> set[str]:
     return keys
 
 
+def match_sequence(clip: dict, item: dict) -> dict | None:
+    """If Resolve read an expected single file as an image sequence (still_1080p.png -> still_[1080-1229]p.png,
+    the digits taken as a frame number), describe the match, else None. Matches by name (prefix + a number in the
+    bracket range + suffix equals the expected file name), or, failing that, by an image extension equal to the
+    expected one at the expected record range."""
+    exp = os.path.basename(str(clip.get("source_path") or clip.get("name") or "").replace("\\", "/"))
+    if not exp:
+        return None
+    cands = []
+    for src in (item.get("media_path"), item.get("name")):
+        if src:
+            base = os.path.basename(str(src).replace("\\", "/"))
+            m = SEQ_RE.match(base)
+            if m:
+                cands.append((base, m))
+    if not cands:
+        return None
+    low = exp.lower()
+    for base, m in cands:
+        pre, lo, hi, suf = m.group(1).lower(), int(m.group(2)), int(m.group(3)), m.group(4).lower()
+        if len(low) > len(pre) + len(suf) and low.startswith(pre) and low.endswith(suf):
+            mid = low[len(pre):len(low) - len(suf)]
+            if mid.isdigit() and lo <= int(mid) <= hi:
+                return {"how": "name", "expected_file": exp, "resolve_name": item.get("name"),
+                        "resolve_path": item.get("media_path"), "pattern": base}
+    ext = os.path.splitext(exp)[1].lower()
+    if ext in IMAGE_EXTS and os.path.splitext(cands[0][0])[1].lower() == ext \
+            and _within(clip.get("record_start_frame"), item.get("start")) and _within(clip.get("record_end_frame"), item.get("end")):
+        return {"how": "position", "expected_file": exp, "resolve_name": item.get("name"),
+                "resolve_path": item.get("media_path"), "pattern": cands[0][0]}
+    return None
+
+
 def compare_timeline(expected: dict, actual: dict, fold_case: bool | None = None) -> list[dict]:
     """Return list of check results (pass/fail/info) for one imported timeline."""
     res: list[dict] = []
@@ -454,8 +536,13 @@ def compare_timeline(expected: dict, actual: dict, fold_case: bool | None = None
     for t in expected.get("tracks", []):
         exp_by_kind.setdefault(t.get("kind", "video"), []).append(t)
     act_by_kind: dict[str, list[dict]] = {"video": [], "audio": []}
+    found_tr: list[dict] = []
     for t in actual.get("tracks", []):
-        act_by_kind.setdefault(t["kind"], []).append(t)
+        # transitions are items too, but are neither clips nor media: split them off
+        for it in t["items"]:
+            if it.get("kind") == "transition":
+                found_tr.append({**it, "track": f"{t['kind'][0].upper()}{t.get('index', '?')}"})
+        act_by_kind.setdefault(t["kind"], []).append({**t, "items": [i for i in t["items"] if i.get("kind") != "transition"]})
     struct = []
     for kind in ("video", "audio"):
         ne = sum(1 for t in exp_by_kind.get(kind, []) if t.get("clips"))
@@ -466,6 +553,7 @@ def compare_timeline(expected: dict, actual: dict, fold_case: bool | None = None
                   "; ".join(f"{k}: expected {ne} populated track(s), got {na}" for k, ne, na in struct)))
 
     order_bad, io_bad, src_bad, path_bad, online_bad, info_titles = [], [], [], [], [], []
+    seq_bad: list[dict] = []
     n_req = 0
     for kind in ("video", "audio"):
         etracks = [t for t in exp_by_kind.get(kind, []) if t.get("clips")]
@@ -476,6 +564,7 @@ def compare_timeline(expected: dict, actual: dict, fold_case: bool | None = None
             optional = [c for c in et["clips"] if not c.get("source_path")]
             required = [c for c in et["clips"] if c.get("source_path")]
             items = list(at["items"]) if at else []
+            tindex = at.get("index") if at else None
             opt_names = {str(c.get("name", "")).lower() for c in optional}
             rest = []
             for it in items:
@@ -493,7 +582,13 @@ def compare_timeline(expected: dict, actual: dict, fold_case: bool | None = None
                     order_bad.append(f"{label}[{j}] '{c.get('name')}' missing")
                     continue
                 it = rest[j]
-                if not (_item_key(c.get("name"), c.get("source_path")) & _item_key(it["name"], it["media_path"])):
+                seq = match_sequence(c, it)
+                if seq:
+                    seq.update({"track": label, "track_kind": kind, "track_index": tindex, "item_index": it.get("index"),
+                                "position": j, "expected_path": c.get("source_path"),
+                                "record": [it["start"], it["end"]]})
+                    seq_bad.append(seq)
+                if not seq and not (_item_key(c.get("name"), c.get("source_path")) & _item_key(it["name"], it["media_path"])):
                     order_bad.append(f"{label}[{j}] expected '{c.get('name')}', got '{it['name']}'")
                 if not (_within(c.get("record_start_frame"), it["start"]) and _within(c.get("record_end_frame"), it["end"])):
                     io_bad.append(f"{label}[{j}] '{c.get('name')}' expected {c.get('record_start_frame')}-{c.get('record_end_frame')}, got {it['start']}-{it['end']}")
@@ -513,6 +608,12 @@ def compare_timeline(expected: dict, actual: dict, fold_case: bool | None = None
     res.append(_r("source_in", "fail" if src_bad else "pass", "; ".join(src_bad) or f"source in within +/-{TOL_FRAMES} frame (stills skipped)"))
     res.append(_r("media_path", "fail" if path_bad else "pass", "; ".join(path_bad) or "media paths match"))
     res.append(_r("media_online", "fail" if online_bad else "pass", "; ".join(online_bad) or "all media online"))
+    sq = _r("image_sequence_misdetected", "fail" if seq_bad else "pass",
+            "; ".join(f"{x['track']}[{x['position']}] expected file '{x['expected_file']}' but Resolve read it as image sequence "
+                      f"'{x['resolve_name']}' (matched by {x['how']}; path {x['resolve_path']}); the digits in the file name were taken as a frame number"
+                      for x in seq_bad) or "no still was turned into an image sequence")
+    sq["misdetections"] = seq_bad
+    res.append(sq)
     # markers
     em, am = expected.get("markers") or [], actual.get("markers") or []
     if not em and not am:
@@ -522,8 +623,18 @@ def compare_timeline(expected: dict, actual: dict, fold_case: bool | None = None
         res.append(_r("markers", "pass" if not miss and len(em) == len(am) else "fail",
                       f"expected {len(em)}, got {len(am)}" + (f"; missing {[(m.get('name'), m.get('frame')) for m in miss]}" if miss else "")))
     et_ = expected.get("transitions")
-    res.append(_r("transitions", "info",
-                  f"expected {et_}; Resolve's scripting API exposes little about transitions, check visually on the Edit page"))
+    found_tr.sort(key=lambda x: (x["track"], x.get("start") or 0))
+    desc = "; ".join(
+        f"{x['track']} '{x.get('name')}' {x.get('start'):g}-{x.get('end'):g} centre {x['centre']:g}"
+        + (f" (nearest cut {x['nearest_cut']:g}, offset {x['centre_offset']:+g})" if x.get("nearest_cut") is not None else " (no cut found)")
+        for x in found_tr)
+    if et_ is None:
+        tr = _r("transitions", "info", f"no expected count; found {len(found_tr)}" + (f": {desc}" if desc else ""))
+    else:
+        tr = _r("transitions", "pass" if len(found_tr) == et_ else "fail",
+                f"expected {et_}, found {len(found_tr)}" + (f": {desc}" if desc else ""), required=False)
+    tr["found"] = [{k: x.get(k) for k in ("track", "name", "start", "end", "centre", "nearest_cut", "centre_offset")} for x in found_tr]
+    res.append(tr)
     res.append(_r("titles", "info", "; ".join(info_titles) or "no title/graphic clips expected; check visually"))
     if actual.get("errors"):
         res.append(_r("api_errors", "info", f"{len(actual['errors'])} API call(s) failed/None, first: {actual['errors'][0]}"))
@@ -675,9 +786,163 @@ def import_with_retry(mp: Any, abs_path: str, options: dict) -> tuple[Any, list[
     return tl, attempts
 
 
+# --------------------------------------------------------------------------- still-sequence experiments
+def _native(p: Any) -> str:
+    """Absolute path with native-style separators for Resolve calls (Windows backslashes if it is a drive path)."""
+    n = normalize_path(p, None, windows=False)
+    return format_media_ref(n, "bare") if _is_abs_ref(n) else str(p)
+
+
+def _jsonable(r: Any) -> Any:
+    if isinstance(r, (bool, int, float, str, type(None))):
+        return r
+    if isinstance(r, (list, tuple)):
+        return [_jsonable(x) for x in r]
+    if isinstance(r, dict):
+        return {str(k): _jsonable(v) for k, v in r.items()}
+    return _type_name(r)
+
+
+def _call(steps: list, obj: Any, name: str, *args: Any) -> Any:
+    """Defensive API call that records the call, its arguments and its result in `steps`."""
+    errs: list[str] = []
+    r = _safe(_m(obj, name), *args, errors=errs, label=name)
+    st: dict[str, Any] = {"call": name, "args": _jsonable(list(args)), "result": _jsonable(r)}
+    if errs:
+        st["errors"] = errs
+    steps.append(st)
+    return r
+
+
+def _clip_names(res: Any) -> list:
+    out = []
+    for c in (res if isinstance(res, list) else []):
+        n = _safe(_m(c, "GetName"))
+        out.append(n if n is not None else _type_name(c))
+    return out
+
+
+def summarize_stills(dump: dict) -> list[dict]:
+    """Every image-like clip of a dump: track, name, record range, path and online state."""
+    out = []
+    for t in dump.get("tracks", []):
+        for it in t["items"]:
+            if it.get("kind") == "transition":
+                continue
+            names = [str(it.get("name") or ""), os.path.basename(str(it.get("media_path") or "").replace("\\", "/"))]
+            if any(os.path.splitext(re.sub(r"\[\d+-\d+\]", "", n))[1].lower() in IMAGE_EXTS for n in names if n):
+                out.append({"track": f"{t['kind'][0].upper()}{t['index']}", "name": it.get("name"), "start": it.get("start"),
+                            "end": it.get("end"), "media_path": it.get("media_path"), "online": it.get("online"),
+                            "sequence_name": any(SEQ_RE.match(n) for n in names if n)})
+    return out
+
+
+def _item_state(item: Any, tl_start: float) -> dict:
+    d = _dump_item(item, tl_start, [])
+    return {k: d[k] for k in ("name", "start", "end", "media_path", "media_exists_on_disk", "online")}
+
+
+def _import_experiment(label: str, desc: str, mp: Any, xml_path: str, flag: bool, media_dir: str | None,
+                       pre: list[tuple[str, Any]], expected: dict, stamp: str, fold_case: bool | None) -> dict:
+    """One extra FCP7 import as its own timeline. Never raises."""
+    rec: dict[str, Any] = {"approach": label, "description": desc, "steps": [], "works": False}
+    try:
+        for call, arg in pre:
+            r = _call(rec["steps"], mp, call, arg)
+            rec["steps"][-1]["clip_names"] = _clip_names(r)
+        opts: dict[str, Any] = {"timelineName": f"verify_{stamp}_exp_{_slug(label)}", "importSourceClips": flag}
+        tl = _call(rec["steps"], mp, "ImportTimelineFromFile", xml_path, opts)
+        if tl is None:
+            rec["result"] = "ImportTimelineFromFile returned None"
+            return rec
+        dump = dump_timeline(tl)
+        cs = {c["check"]: c for c in compare_timeline(expected, dump, fold_case)}
+        rec["stills"] = summarize_stills(dump)
+        rec["checks"] = {k: cs[k]["status"] for k in ("clip_order", "record_inout", "media_online", "image_sequence_misdetected") if k in cs}
+        rec["works"] = bool(rec["stills"]) and all(v == "pass" for v in rec["checks"].values())
+        rec["result"] = "still online with correct name and record range" if rec["works"] else "still not fixed: " + ", ".join(
+            f"{k}={v}" for k, v in rec["checks"].items() if v != "pass")
+    except Exception as e:  # an experiment must never abort the run
+        rec["error"] = f"{type(e).__name__}: {e}"
+        rec["result"] = rec["error"]
+    return rec
+
+
+def _repair_experiment(tl: Any, mp: Any, tl_start: float, misdetections: list[dict], media_dir: str | None) -> dict:
+    """Repair the misdetected item(s) of the ORIGINAL import in place (scratch project only): ReplaceClip with the
+    expected absolute path, then MediaPool.RelinkClips as a separate attempt if that fails."""
+    rec: dict[str, Any] = {"approach": "repair_replace_clip", "description": "MediaPoolItem.ReplaceClip(expected path), then MediaPool.RelinkClips",
+                           "items": [], "steps": [], "works": False}
+    try:
+        if not misdetections:
+            rec["result"] = "skipped: no misdetected item in the original import"
+            return rec
+        oks = []
+        for m in misdetections:
+            def live() -> Any:
+                items = _safe(_m(tl, "GetItemListInTrack"), m["track_kind"], m["track_index"]) or []
+                idx = m.get("item_index")
+                return items[idx] if isinstance(idx, int) and 0 <= idx < len(items) else None
+            it: dict[str, Any] = {"expected": m["expected_path"], "track": m["track"], "attempts": []}
+            item = live()
+            it["before"] = _item_state(item, tl_start) if item is not None else None
+            mpi = _safe(_m(item, "GetMediaPoolItem")) if item is not None else None
+            target = _native(m["expected_path"])
+            r = _call(it["attempts"], mpi, "ReplaceClip", target) if mpi is not None else None
+            if mpi is None:
+                it["attempts"].append({"call": "ReplaceClip", "result": "skipped: item has no MediaPoolItem"})
+            if not r:
+                folder = media_dir or os.path.dirname(target)
+                _call(it["attempts"], mp, "RelinkClips", [mpi] if mpi is not None else [], folder)
+            item = live()
+            it["after"] = _item_state(item, tl_start) if item is not None else None
+            a = it["after"] or {}
+            it["works"] = bool(a.get("online")) and not SEQ_RE.match(str(a.get("name") or "")) \
+                and not SEQ_RE.match(os.path.basename(str(a.get("media_path") or "")))
+            oks.append(it["works"])
+            rec["items"].append(it)
+        rec["works"] = bool(oks) and all(oks)
+        rec["result"] = "item online with the expected file after repair" if rec["works"] else "repair did not bring the still online"
+    except Exception as e:
+        rec["error"] = f"{type(e).__name__}: {e}"
+        rec["result"] = rec["error"]
+    return rec
+
+
+def run_still_sequence_experiments(project: Any, mp: Any, tl: Any, actual: dict, xml_path: str, expected: dict,
+                                   misdetections: list[dict], media_dir: str | None, stamp: str,
+                                   fold_case: bool | None = None, forced: bool = False) -> dict:
+    """Find what avoids or repairs the image-sequence misdetection (FCP7 XML only, scratch project only,
+    nothing deleted, originals untouched). Every approach is wrapped; failures are recorded, never raised."""
+    files = []
+    for t in expected.get("tracks", []):
+        for c in t.get("clips", []):
+            sp = c.get("source_path")
+            if sp and _native(sp) not in files:
+                files.append(_native(sp))
+    out: dict[str, Any] = {"triggered_by": "--experiments" if forced and not misdetections else "image_sequence_misdetected",
+                           "misdetected": [{k: m[k] for k in ("track", "expected_file", "resolve_name", "resolve_path")} for m in misdetections],
+                           "media_files": files, "approaches": []}
+    if tl is None:
+        out["note"] = "original import returned no timeline; nothing to experiment on"
+        return out
+    ap = out["approaches"]
+    ap.append(_import_experiment("import_source_clips_no_path", "(i) importSourceClips=True WITHOUT sourceClipsPath",
+                                 mp, xml_path, True, None, [], expected, stamp, fold_case))
+    ap.append(_import_experiment("pre_import_media_then_xml", "(ii) ImportMedia([path]) per file, then importSourceClips=False",
+                                 mp, xml_path, False, None, [("ImportMedia", [f]) for f in files], expected, stamp, fold_case))
+    ap.append(_import_experiment("pre_import_media_dict_then_xml", "(iii) ImportMedia([{'FilePath': path}]) per file, then importSourceClips=False",
+                                 mp, xml_path, False, None, [("ImportMedia", [{"FilePath": f}]) for f in files], expected, stamp, fold_case))
+    ap.append(_repair_experiment(tl, mp, actual.get("start_frame") or 0, misdetections, media_dir))
+    ok = [a for a in ap if a["works"]]
+    out["recommended"] = ok[0]["approach"] if ok else None
+    out["summary"] = [f"{a['approach']}: {'WORKS' if a['works'] else 'no'} - {a.get('result')}" for a in ap]
+    return out
+
+
 def run_import(resolve: Any, files: list[Path], expected: dict, keep_project: bool,
                scratch_prefix: str = "tripvlog_verify", include_risky: bool = False,
-               work_dir: Path | None = None, stamp: str | None = None) -> dict:
+               work_dir: Path | None = None, stamp: str | None = None, experiments: bool = False) -> dict:
     """Create a scratch project, import each file, dump + compare. Returns the report fragment."""
     pm = _safe(_m(resolve, "GetProjectManager"))
     result: dict[str, Any] = {"formats": {}, "scratch_project": None, "scratch_kept": keep_project, "notes": []}
@@ -738,16 +1003,27 @@ def run_import(resolve: Any, files: list[Path], expected: dict, keep_project: bo
             entry["diagnostics"]["resolve_return_type"] = _type_name(tl)
             if tl is None:
                 entry["actual"] = None
-                entry["checks"] = [_r("import", "fail", "ImportTimelineFromFile returned None (unsupported format in this Resolve version, "
-                                      "parse error, or import dialog blocked); see Workspace > Console in Resolve")]
+                detail = (OTIO_REJECTED_MSG if fmt == "otio" else
+                          "ImportTimelineFromFile returned None (unsupported format in this Resolve version, "
+                          "parse error, or import dialog blocked); see Workspace > Console in Resolve")
+                entry["checks"] = [_r("import", "fail", detail)]
             else:
                 _safe(_m(project, "SetCurrentTimeline"), tl)
                 actual = dump_timeline(tl)
                 entry["actual"] = actual
                 entry["checks"] = [_r("import", "pass", f"imported as '{actual.get('name')}'"
                                       + ("" if len(attempts) == 1 else " (only the no-options retry worked)"))] + compare_timeline(expected, actual)
+                mis = next((c.get("misdetections") for c in entry["checks"] if c["check"] == "image_sequence_misdetected"), None) or []
+                if fmt == "fcp7xml" and (mis or experiments) and "still_sequence" not in result.setdefault("experiments", {}):
+                    result["experiments"]["still_sequence"] = run_still_sequence_experiments(
+                        project, mp, tl, actual, abs_path, expected, mis, media_dir, stamp, forced=experiments)
             entry["passed"] = format_passed(entry["checks"])
             result["formats"][label if label not in result["formats"] else f"{label}:{f.name}"] = entry
+        if any(e.get("format") == "otio" and e.get("actual") is None and not e.get("skipped") for e in result["formats"].values()):
+            bare = result["formats"].get("otio[bare]", {}).get("file")
+            result["otio_manual_suggestion"] = (
+                f"OTIO: in Resolve use File > Import > Timeline and pick {bare or 'the .otio file (see the work folder)'} "
+                "manually, then tell us whether the media links.")
     finally:
         if not keep_project:
             _cleanup(pm, project, name, prev_name, folder, result)
@@ -904,6 +1180,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--expected", help="expected_timeline.json")
     ap.add_argument("--output", help="where to write resolve_verification.json (default: the handoff dir, else cwd)")
     ap.add_argument("--keep-project", action="store_true", help="do not delete the scratch Resolve project afterwards")
+    ap.add_argument("--experiments", action="store_true",
+                    help="force the image-sequence experiments for the FCP7 XML even if no still was misdetected "
+                         "(they run automatically when one is)")
     ap.add_argument("--include-risky-formats", action="store_true",
                     help="also try FCPXML/EDL/AAF (observed to crash/freeze/fail on Resolve 21.1); run last. Save your work first")
     return ap
@@ -962,7 +1241,7 @@ def main(argv: list[str] | None = None) -> int:
               "They run LAST (FCPXML very last). SAVE YOUR WORK NOW; the report is written only if Resolve survives.")
     stamp = f"{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
     res = run_import(resolve, files, expected, args.keep_project, include_risky=args.include_risky_formats,
-                     work_dir=out_path.parent / f"resolve_verify_work_{stamp}", stamp=stamp)
+                     experiments=args.experiments, work_dir=out_path.parent / f"resolve_verify_work_{stamp}", stamp=stamp)
     report.update(res)
     report["include_risky_formats"] = bool(args.include_risky_formats)
     ok = any(f["passed"] for f in res["formats"].values())
@@ -982,6 +1261,20 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[{label}] info: {SKIP_RISKY_MSG}")
     for n in res["notes"]:
         print(f"note: {n}")
+    if res.get("otio_manual_suggestion"):
+        print(res["otio_manual_suggestion"])
+    ex = res.get("experiments", {}).get("still_sequence")
+    if ex:
+        print("\nStill image-sequence experiments (FCP7 XML, scratch project):")
+        for m in ex.get("misdetected", []):
+            print(f"  misdetected: expected '{m['expected_file']}', Resolve read '{m['resolve_name']}'")
+        for line in ex.get("summary", []):
+            print(f"  {line}")
+        print(f"  => " + (f"'{ex['recommended']}' gives an online still with the correct record range"
+                          if ex.get("recommended") else "no approach gave an online still with the correct record range"))
+        offline = any(c["check"] == "media_online" and c["status"] == "fail" for e in res["formats"].values() for c in e.get("checks", []))
+        if offline and ex.get("recommended"):
+            print(f"  media_online fails in the original import; use '{ex['recommended']}' to fix it.")
     imports_ok = [e for e in res["formats"].values() if not e.get("skipped")]
     if imports_ok and all(e["actual"] is None for e in imports_ok):
         print("\nEvery import returned None. Open Resolve's Console (Workspace > Console) right after running; it often shows "

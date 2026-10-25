@@ -44,7 +44,7 @@ python tools\resolve_verify.py --handoff "D:\Trips\Iceland\resolve_handoff"
 ```
 
 Other options: `--timeline FILE` (repeatable), `--expected FILE`, `--output PATH` (default `<handoff>/resolve_verification.json`,
-else the current directory), `--keep-project`, `--include-risky-formats`. If the env vars point elsewhere (non-default install), set them first, e.g.
+else the current directory), `--keep-project`, `--include-risky-formats`, `--experiments` (force the still-sequence experiments below). If the env vars point elsewhere (non-default install), set them first, e.g.
 `export RESOLVE_SCRIPT_API=...` / `$env:RESOLVE_SCRIPT_LIB="..."`.
 
 Exit codes: `0` at least one format passed all required checks; `1` none did; `2` bad inputs; `3` scripting unavailable (manual required).
@@ -97,6 +97,11 @@ rewritten to absolute media references; everything else is unchanged. Each is im
 
 The run shows which form Resolve links (media_online passes). If an OTIO already has only absolute references, no variants are made.
 
+On Resolve Studio 21.1 `ImportTimelineFromFile` returned None for the original and all three variants (with and without options), although
+a manual File > Import > Timeline of the original works (media missing). The OTIO result therefore reads "rejected by ImportTimelineFromFile
+in this Resolve version (manual File > Import > Timeline may still work)". The variants stay in the work folder; the script prints a one-line
+suggestion to import `<work>/otio_bare/phase0.otio` through the UI and tell us whether the media links.
+
 ## What each check means
 
 Required checks decide the exit code (a format passes when all of them pass); others are reported but do not fail the run.
@@ -110,16 +115,52 @@ Required checks decide the exit code (a format passes when all of them pass); ot
 | record_inout | yes | each clip's timeline start/end within +/-1 frame |
 | source_in | yes | each clip's source in-point within +/-1 frame (stills skipped) |
 | media_online | yes | each clip has a media pool item whose file path exists on disk (otherwise offline / needs relink) |
+| image_sequence_misdetected | yes | no expected still was turned into an image sequence (see below) |
 | resolution | no | timeline width x height |
 | track_structure | no | number of populated video and audio tracks |
 | media_path | no | Resolve's file path equals expected (case-insensitive on Windows/macOS, `file://` and relative forms normalised) |
 | markers | no | marker count and frame positions (+/-1) |
-| transitions | info | Resolve's scripting API exposes almost nothing about transitions; check dissolves and fades on the Edit page |
+| transitions | no (pass/fail) | expected count equals the transitions found (see below); each one is listed with track, start, end and centre relative to the nearest cut |
 | titles | info | whether title/graphic clips arrived; FilmCraft titles are expected to be offline or empty (no format carries editable titles) |
+
+## Transitions
+
+`GetItemListInTrack` returns transitions as ordinary items without a media pool item. The script marks an item `"kind": "transition"` (raw item
+kept in the dump) when it has no media pool item and either its name contains Dissolve, Wipe, Dip, Cross Fade, Fade or Transition (or is
+"Final Cut Pro 7", which is how Resolve labels imported FCP7 audio transitions), or it is short (<= 30 frames) and spans or abuts a cut or clip
+end of its track. Names that look like media files are never transitions. Transitions are left out of `clip_order`, `record_inout` and the media
+checks and counted for `transitions`. Titles and generators without media that are not transitions behave as before (info only). Example from a
+real run: `V1 'Cross Dissolve' 97-112 centre 104.5 (nearest cut 105, offset -0.5)` and `A2 'Final Cut Pro 7' 165-180` (the audio fade-out).
+
+## The image-sequence problem
+
+Resolve reads digits in a still's file name as a frame number: `still_1080p.png` was imported as `still_[1080-1229]p.png`, an image sequence
+whose file does not exist, so the clip is offline. The script detects an item whose name or path has a `[N-M]` bracket where the text around
+it plus a number inside the range equals an expected file (`IMG_1042.JPG` -> `IMG_[1042-1100].JPG`), or, failing that, has the expected image
+extension at the expected record range. It reports the required check `image_sequence_misdetected` naming both files and matches the item to
+the expected clip, so order and record in/out are still evaluated (record 105-195 passes). `media_online` stays honest: it fails while the
+still is offline in the original import.
+
+### Experiments (`experiments.still_sequence` in the JSON)
+
+Run automatically for the FCP7 XML when a misdetection is found, or always with `--experiments`. They only add timelines and media to the
+scratch project (nothing is deleted, original files are never touched); each is wrapped so a failure is recorded, never fatal. Each approach
+lists every call with arguments and result, whether the still is online, its name and path, and `works` (online, no bracket name, order and
+record range correct):
+
+1. `import_source_clips_no_path`: importSourceClips=True without `sourceClipsPath`.
+2. `pre_import_media_then_xml`: `MediaPool.ImportMedia([path])` once per expected file (returned clip names recorded), then importSourceClips=False.
+3. `pre_import_media_dict_then_xml`: same with `ImportMedia([{"FilePath": path}])` if supported.
+4. `repair_replace_clip`: on the original import, the misdetected item's `MediaPoolItem.ReplaceClip(expected path)`, then `MediaPool.RelinkClips([item], folder)`
+   if that fails; the item is dumped before and after.
+
+The console summarises which approach gives an online still with the correct record range and `recommended` holds the first that works. Imports
+share the scratch media pool, so earlier approaches can influence later ones (approach 2 runs before 3).
 
 ## Sending results back
 
-Send `resolve_verification.json` and the console table. Per format it records the absolute path passed, whether the file exists, its size, the
+Send `resolve_verification.json` and the console table (including the experiments summary and the OTIO manual-import line). If you tried the
+`<work>/otio_bare/phase0.otio` manual import, say whether the media linked. Per format it records the absolute path passed, whether the file exists, its size, the
 type Resolve returned, and the `attempts` list. Cleanup details are in `cleanup_steps`. If every import returned None, also open Resolve's
 **Workspace > Console** right after the run and copy what it printed (it often names the import error). If the scratch project could not be
 deleted, the script prints its exact name (`tripvlog_verify_<stamp>`) and manual steps: open the Project Manager, make sure another project is
