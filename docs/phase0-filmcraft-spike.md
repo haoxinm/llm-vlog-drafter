@@ -163,6 +163,11 @@ Expected timeline: 1920x1080 30 fps, 195 frames (6 s 15 f); V1 landscape (src 0:
 | EDL (`phase0.edl`) | Froze Resolve |
 | AAF (`phase0.aaf`) | "Cannot be opened for reading" |
 
+Scripted run (`tools/resolve_verify.py`, Studio 21.1.1.10, Windows 11): FCP7 XML imports with correct fps (30), duration (195),
+tracks, clip order, record and source in/out, the marker, and both transitions (listed by Resolve as items "Cross Dissolve" and
+"Final Cut Pro 7"); titles absent; `still_1080p.png` misread as image sequence `still_[1080-1229]p.png` and offline. OTIO: the
+original and three absolute-path variants (bare `C:\`, `C:/`, `file:///C:/`) all returned None from `ImportTimelineFromFile`.
+
 Decision: FCP7 XML is the primary handoff format, OTIO secondary; FCPXML, EDL and AAF are not exported by default.
 Detailed per-check fidelity (clip order, in/out, transitions, markers, audio levels) was not reported yet; `tools/resolve_verify.py` automates it.
 

@@ -1090,6 +1090,18 @@ Resolve; EDL froze Resolve; AAF could not be opened. Policy:
 -   FCPXML, EDL and AAF are never exported by default; if configured
     explicitly, the handoff report carries a prominent warning with the
     observed results.
+-   Scripted verification on Studio 21.1.1.10 (Windows,
+    `tools/resolve_verify.py`): FCP7 XML imports via
+    `ImportTimelineFromFile` with correct fps, duration, tracks, clip
+    order, record/source in-out, linked media, the marker, and both
+    transitions (Resolve lists transitions as timeline items). Titles
+    are absent. **Stills whose file name contains digits (e.g.
+    `still_1080p.png`, and typical camera names like `IMG_1042.JPG`)
+    are misread as image sequences and arrive offline**; `resolve-finish`
+    must detect and repair this (approach chosen from the verifier's
+    experiments). OTIO is rejected by `ImportTimelineFromFile` in every
+    path form tried, though the UI import accepts it; OTIO therefore
+    stays an unverified secondary export.
 -   Third-party measurements (see `docs/research/resolve-mcp.md`) report
     that FCP7 XML import drops markers and that titles arrive as
     media-less clips; the handoff report lists both so they can be
