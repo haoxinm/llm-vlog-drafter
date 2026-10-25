@@ -99,8 +99,12 @@ def align_tracks(expected: dict, actual: dict) -> dict[str, Any]:
     return {"pairs": pairs, "transitions": found_tr, "struct": struct}
 
 
-def compare_timeline(expected: dict, actual: dict, fold_case: bool | None = None) -> list[dict]:
-    """Return list of check results (pass/fail/info) for one imported timeline."""
+def compare_timeline(expected: dict, actual: dict, fold_case: bool | None = None,
+                     path_aliases: dict[str, str] | None = None) -> list[dict]:
+    """Return list of check results (pass/fail/info) for one imported timeline.
+
+    ``path_aliases`` maps an isolated copy (staged path) to the expected source path it stands for: a clip whose Resolve
+    media path is such a copy of its expected source counts as a media_path match."""
     res: list[dict] = []
     # fps
     ef, af = to_number(expected.get("fps")), actual.get("fps")
@@ -132,6 +136,7 @@ def compare_timeline(expected: dict, actual: dict, fold_case: bool | None = None
 
     order_bad, io_bad, src_bad, path_bad, online_bad, info_titles = [], [], [], [], [], []
     seq_bad: list[dict] = []
+    via_copy = 0
     n_req = 0
     for pair in aligned["pairs"]:
         label, kind, tindex = pair["label"], pair["kind"], pair["tindex"]
@@ -164,14 +169,20 @@ def compare_timeline(expected: dict, actual: dict, fold_case: bool | None = None
                 src_bad.append(f"{label}[{j}] '{c.get('name')}' expected {c.get('source_in_frame')}, got {it['source_in']}")
             if not it["media_path"]:
                 path_bad.append(f"{label}[{j}] '{c.get('name')}' Resolve reports no File Path")
-            elif not paths_equal(c.get("source_path"), it["media_path"], fold_case=fold_case):
+            elif paths_equal(c.get("source_path"), it["media_path"], fold_case=fold_case):
+                pass
+            elif any(paths_equal(staged, it["media_path"], fold_case=fold_case) and paths_equal(src, c.get("source_path"), fold_case=fold_case)
+                     for staged, src in (path_aliases or {}).items()):
+                via_copy += 1
+            else:
                 path_bad.append(f"{label}[{j}] expected {c.get('source_path')}, got {it['media_path']}")
             if not it["online"]:
                 online_bad.append(f"{label}[{j}] '{c.get('name')}' offline ({it['media_path'] or 'no media pool item/path'})")
     res.append(_r("clip_order", "fail" if order_bad else "pass", "; ".join(order_bad) or f"{n_req} media clip(s) in expected order"))
     res.append(_r("record_inout", "fail" if io_bad else "pass", "; ".join(io_bad) or f"record in/out within +/-{TOL_FRAMES} frame"))
     res.append(_r("source_in", "fail" if src_bad else "pass", "; ".join(src_bad) or f"source in within +/-{TOL_FRAMES} frame (stills skipped)"))
-    res.append(_r("media_path", "fail" if path_bad else "pass", "; ".join(path_bad) or "media paths match"))
+    res.append(_r("media_path", "fail" if path_bad else "pass", "; ".join(path_bad) or "media paths match"
+                  + (f" ({via_copy} via isolated copies in resolve_handoff/stills)" if via_copy else "")))
     res.append(_r("media_online", "fail" if online_bad else "pass", "; ".join(online_bad) or "all media online"))
     sq = _r("image_sequence_misdetected", "fail" if seq_bad else "pass",
             "; ".join(f"{x['track']}[{x['position']}] expected file '{x['expected_file']}' but Resolve read it as image sequence "

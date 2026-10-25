@@ -226,6 +226,12 @@ Exit codes: `0` finished, `1` required checks failed, `2` preconditions/argument
 * Never deletes or modifies an existing project, never touches media files, never calls `DeleteProject`, `LoadProject` or `CloseProject`. The only
   deletions are of items this run created, during rollback of a title that could not be verified.
 * `MediaPoolItem.ReplaceClip` is called only with paths listed in `media_manifest.csv`, and only for media that arrived offline or as an image sequence.
+* Observed on Resolve Studio 21.1.1.10: `ReplaceClip` returns False for a still that has numbered siblings in its folder (e.g. `261010_stars_-318.jpg` ..
+  `-377.jpg`), but works for a still without (`still_1080p.png`, `261010_stars_final.jpg`). For stills only, `resolve-finish` then copies that single file to
+  `resolve_handoff/stills/<key>/<original name>` (`<key>` = 12 hex of a hash of the source path; reused on re-runs; the original is only read) and
+  calls `ReplaceClip` with the copy, which is allowed by the guard only for a manifest still and only for that exact location. The report lists the
+  copies (`staged_copies`, "Media repairs"), and the final media-path check accepts them. The Resolve project then references these copies, so keep
+  `resolve_handoff/stills/` with the project. Video and audio never get this fallback.
 * Writes `resolve_handoff/resolve_finish_report.json` / `.md` and records the run in `manifest.json` (stage `resolve_finish`, shown by `trip-vlog status`).
 
 ### Titles are experimental

@@ -187,6 +187,162 @@ def test_repair_refuses_expected_path_not_in_manifest(tmp_path, inject):
     assert "mpi.ReplaceClip" not in {c["call"] for c in session.log}
 
 
+# ---------------------------------------------------------------- stills with numbered siblings: isolated copy fallback
+def _siblings_ws(tmp_path, still="261010_stars_-318.jpg"):
+    w = build_workspace(tmp_path, still=still)
+    (w["media"] / "261010_stars_-319.jpg").write_bytes(b"y" * 64)  # numbered sibling in the same folder
+    return w
+
+
+def _snapshot(p: Path):
+    return p.read_bytes(), p.stat().st_mtime_ns
+
+
+def test_still_with_numbered_siblings_falls_back_to_isolated_copy(tmp_path, inject):
+    w = _siblings_ws(tmp_path)
+    orig = w["media"] / "261010_stars_-318.jpg"
+    before = {p.name: _snapshot(p) for p in w["media"].iterdir()}
+    fake = inject()
+    res, lines = run(w["ws"])
+    (rep,) = res.report["repairs"]
+    staged = w["handoff"] / "stills" / finish.stills_key(str(orig)) / orig.name
+    assert rep["result"] == "online" and rep["replace_returned"] is True and rep["staged_copy"] == str(staged)
+    assert [a["returned"] for a in rep["attempts"]] == [False, True]
+    assert rep["attempts"][0]["path"] == str(orig) and rep["attempts"][1]["path"] == str(staged)
+    assert "isolated copy" in rep["detail"] and "resolve_handoff/stills" in rep["detail"]
+    assert staged.read_bytes() == orig.read_bytes() and not staged.is_symlink() and staged.stat().st_nlink == 1
+    assert sorted(p.name for p in staged.parent.iterdir()) == [orig.name]  # no numbered siblings
+    assert {p.name: _snapshot(p) for p in w["media"].iterdir()} == before  # originals untouched
+    assert res.status == "pass", res.report["final_checks"]
+    c = checks(res)
+    assert c["media_online"]["status"] == c["media_path"]["status"] == c["image_sequence_misdetected"]["status"] == "pass"
+    assert "1 via isolated copies in resolve_handoff/stills" in c["media_path"]["detail"]
+    assert res.report["staged_copies"] == [{"copy": str(staged), "source": str(orig)}]
+    md = (w["handoff"] / "resolve_finish_report.md").read_text(encoding="utf-8")
+    assert "Isolated copies (1)" in md and "resolve_handoff/stills/" in md and str(staged) in md
+    mpis = [c for c in res.api.log if c["call"] == "mpi.ReplaceClip"]
+    assert len(mpis) == 2 and not any(c.get("blocked") for c in mpis)
+
+
+def test_rerun_reuses_the_isolated_copy(tmp_path, inject):
+    w = _siblings_ws(tmp_path)
+    inject()
+    res, _ = run(w["ws"])
+    staged = Path(res.report["repairs"][0]["staged_copy"])
+    snap = _snapshot(staged)
+    inject()
+    res2, _ = run(w["ws"])
+    assert res2.status == "pass" and Path(res2.report["repairs"][0]["staged_copy"]) == staged
+    assert _snapshot(staged) == snap  # not recopied
+    assert len(list((w["handoff"] / "stills").iterdir())) == 1
+    staged.write_bytes(b"short")  # different size: recopied from the original
+    inject()
+    res3, _ = run(w["ws"])
+    assert res3.status == "pass" and staged.read_bytes() == (w["media"] / "261010_stars_-318.jpg").read_bytes()
+
+
+def test_same_source_staged_once(tmp_path):
+    w = _siblings_ws(tmp_path)
+    inp = finish.load_inputs(w["ws"])
+    r = finish.FinishRun(inp, ApiSession(), "S", False, echo=lambda *_: None)
+    src = str(w["media"] / "261010_stars_-318.jpg")
+    a = finish.stage_still(r, src)
+    m = a.stat().st_mtime_ns
+    assert finish.stage_still(r, src) == a and a.stat().st_mtime_ns == m
+    assert len(list((w["handoff"] / "stills").iterdir())) == 1
+
+
+def test_still_without_siblings_repairs_on_first_attempt_without_copy(tmp_path, inject):
+    w = build_workspace(tmp_path, still="261010_stars_final.jpg")
+    inject()
+    res, _ = run(w["ws"])
+    (rep,) = res.report["repairs"]
+    assert rep["result"] == "online" and len(rep["attempts"]) == 1 and "staged_copy" not in rep
+    assert not (w["handoff"] / "stills").exists() and "staged_copies" not in res.report
+    assert "via isolated" not in checks(res)["media_path"]["detail"]
+
+
+def test_offline_video_never_gets_the_fallback(tmp_path, inject):
+    w = build_workspace(tmp_path)
+    (w["media"] / "landscape_6s.mp4").write_bytes(b"z" * 64)  # numbered sibling of landscape_5s.mp4
+    inject(offline_all=True, misread_stills=False)
+    res, _ = run(w["ws"])
+    vid = next(r for r in res.report["repairs"] if r["expected_path"].endswith("landscape_5s.mp4"))
+    assert vid["result"] == "still_offline" and len(vid["attempts"]) == 1 and "staged_copy" not in vid
+    assert vid["replace_returned"] is False
+    assert res.status == "fail" and not (w["handoff"] / "stills" / finish.stills_key(vid["expected_path"])).exists()
+
+
+def test_failed_fallback_is_reported_still_offline(tmp_path, inject, monkeypatch):
+    w = _siblings_ws(tmp_path)
+    fake = inject()
+    monkeypatch.setattr(fake_resolve, "has_numbered_sibling", lambda p: True)  # even the copy is refused
+    res, _ = run(w["ws"])
+    (rep,) = res.report["repairs"]
+    assert rep["result"] == "still_offline" and [a["returned"] for a in rep["attempts"]] == [False, False]
+    assert res.status == "fail" and "detail" not in rep
+
+
+def test_allow_staged_guard(tmp_path):
+    src = tmp_path / "m" / "a_-1.jpg"
+    other = tmp_path / "m" / "b_-1.jpg"
+    src.parent.mkdir()
+    for p in (src, other):
+        p.write_bytes(b"x")
+    root = tmp_path / "ws" / "stills"
+    key = finish.stills_key(str(src))
+
+    def mk(d, name="a_-1.jpg"):
+        (root / d).mkdir(parents=True, exist_ok=True)
+        (root / d / name).write_bytes(b"x")
+        return root / d / name
+
+    s = ApiSession(allowed_media=media_keys([str(src)]), stills_root=root)
+    good = mk(key)
+    mpi = fake_resolve.FakeMPI(str(tmp_path / "x_[1-9].jpg"))
+    g = s.wrap(mpi, "mpi")
+    with pytest.raises(AllowlistViolation, match="not listed in media_manifest.csv"):
+        g.ReplaceClip(str(good))  # not registered yet
+    s.allow_staged(str(src), str(good))
+    assert g.ReplaceClip(str(good)) is True
+    for bad_source, bad_staged, why in [
+        (str(tmp_path / "evil.jpg"), str(good), "not listed in media_manifest.csv"),  # non-manifest source
+        (str(src), str(other), "isolated copy"),  # outside the stills root
+        (str(src), str(mk("0123456789ab")), "isolated copy"),  # wrong key folder
+        (str(src), str(mk(key, "other.jpg")), "isolated copy"),  # basename differs
+        (str(src), str(root / key / "missing.jpg"), "isolated copy"),
+        (str(src), str(root / key / ".." / key / "a_-1.jpg" / ".." / ".." / "a_-1.jpg"), "isolated copy"),
+    ]:
+        s2 = ApiSession(allowed_media=media_keys([str(src)]), stills_root=root)
+        with pytest.raises(AllowlistViolation, match=why):
+            s2.allow_staged(bad_source, bad_staged)
+        assert s2.staged_media == set()
+        with pytest.raises(AllowlistViolation):
+            s2.wrap(fake_resolve.FakeMPI(None), "mpi").ReplaceClip(bad_staged)
+    with pytest.raises(AllowlistViolation, match="no stills root"):
+        ApiSession(allowed_media=media_keys([str(src)])).allow_staged(str(src), str(good))
+
+
+def test_compare_path_aliases_only_for_the_expected_source():
+    from trip_vlog.resolve.compare import compare_timeline
+    exp = {"fps": 30, "tracks": [{"kind": "video", "clips": [{"name": "a.jpg", "source_path": "/m/a.jpg", "record_start_frame": 0,
+                                                              "record_end_frame": 10}]}]}
+    act = {"fps": 30, "tracks": [{"kind": "video", "index": 1, "items": [
+        {"name": "a.jpg", "media_path": "/ws/stills/abc/a.jpg", "online": True, "start": 0, "end": 10, "source_in": 0, "index": 0}]}]}
+    d = {c["check"]: c for c in compare_timeline(exp, act)}
+    assert d["media_path"]["status"] == "fail"
+    d = {c["check"]: c for c in compare_timeline(exp, act, path_aliases={"/ws/stills/abc/a.jpg": "/m/a.jpg"})}
+    assert d["media_path"]["status"] == "pass" and "1 via isolated copies" in d["media_path"]["detail"]
+    d = {c["check"]: c for c in compare_timeline(exp, act, path_aliases={"/ws/stills/abc/a.jpg": "/m/other.jpg"})}
+    assert d["media_path"]["status"] == "fail"
+
+
+def test_dry_run_plan_mentions_the_fallback(tmp_path, inject):
+    inject()
+    res, lines = run(build_workspace(tmp_path)["ws"], dry_run=True)
+    assert any("resolve_handoff/stills/" in l for l in lines)
+
+
 # ---------------------------------------------------------------- markers
 def test_markers_present_are_not_duplicated(tmp_path, inject):
     w = build_workspace(tmp_path)

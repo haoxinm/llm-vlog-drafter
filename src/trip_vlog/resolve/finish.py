@@ -7,7 +7,8 @@ API through :mod:`trip_vlog.resolve.guard`:
    frame rate and resolution from the edit plan;
 2. import ``resolve_handoff/timeline.xml`` (FCP7 XML) with a unique timeline name;
 3. repair media that arrived offline or was misread as an image sequence (``IMG_1042.JPG`` -> ``IMG_[1042-1100].JPG``)
-   with ``MediaPoolItem.ReplaceClip(<path from media_manifest.csv>)``;
+   with ``MediaPoolItem.ReplaceClip(<path from media_manifest.csv>)``; a still that Resolve refuses because it has numbered siblings
+   in its folder falls back to an isolated copy under ``resolve_handoff/stills/<key>/``;
 4. add scene markers that are missing;
 5. try to create the titles of the timeline spec as editable Resolve titles (EXPERIMENTAL; anything that cannot be
    verified by read-back is rolled back and listed for manual recreation);
@@ -26,6 +27,7 @@ import json
 import os
 import platform
 import re
+import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,13 +37,14 @@ from trip_vlog import __version__
 from trip_vlog.filmcraft.execution import load_journal
 from trip_vlog.filmcraft.timeline_spec import TimelineSpec, TitleSpec, downgrade_dissolves, parse_track
 from trip_vlog.logging_utils import utc_now_iso
+from trip_vlog.media.scan import IMAGE_EXTS as STILL_EXTS
 from trip_vlog.planning.duration import parse_fps
 from trip_vlog.resolve.api import method, safe_call
 from trip_vlog.resolve.compare import align_tracks, compare_timeline, format_passed, match_sequence, _r
 from trip_vlog.resolve.discovery import connect_resolve, python_compat_hint, python_info
 from trip_vlog.resolve.dump import SEQ_RE, TOL_FRAMES, dump_item, dump_timeline
 from trip_vlog.resolve.expected import count_xml_transitions, expected_from_spec
-from trip_vlog.resolve.guard import MUTATING, ApiSession, media_key, media_keys
+from trip_vlog.resolve.guard import MUTATING, ApiSession, media_key, media_keys, stills_key
 from trip_vlog.resolve.paths import common_media_dir, native_path
 from trip_vlog.state import Manifest, Workspace, atomic_write_json, atomic_write_text
 
@@ -49,6 +52,7 @@ EXIT_OK, EXIT_FAILED, EXIT_USAGE, EXIT_UNAVAILABLE = 0, 1, 2, 3
 STAGE = "resolve_finish"
 REPORT_JSON = "resolve_finish_report.json"
 REPORT_MD = "resolve_finish_report.md"
+STILLS_DIR = "stills"  # resolve_handoff/stills/<12 hex>/<original name>: isolated copies of stills (no numbered siblings)
 SCHEMA_VERSION = 1
 MARKER_COLOR = "Blue"
 TITLE_ROUTES = (("InsertFusionTitleIntoTimeline", "Text+"), ("InsertTitleIntoTimeline", "Text"))
@@ -215,7 +219,9 @@ def planned_steps(inp: FinishInputs, project_name: str | None) -> list[str]:
         f"import {inp.xml_path.name} (FCP7 XML, {len(spec.placements)} placement(s)) with importSourceClips=True"
         + (f" and sourceClipsPath={native_path(media)}" if media else ""),
         "read the timeline back; for every media clip that is offline or was misread as an image sequence (e.g. IMG_1042.JPG), "
-        "call MediaPoolItem.ReplaceClip(<its path from media_manifest.csv>), then confirm it is online",
+        "call MediaPoolItem.ReplaceClip(<its path from media_manifest.csv>), then confirm it is online; if Resolve refuses a still "
+        "(it sees numbered siblings in its folder as an image sequence), copy that one file to "
+        "resolve_handoff/stills/<key>/<name> (the original is never touched) and ReplaceClip to the copy",
         f"add {len(inp.plan_markers)} scene marker(s) that are missing (existing frame+name matches are not duplicated)",
         (f"EXPERIMENTAL: create {len(spec.titles)} title(s) (Text+ in a helper timeline, appended on the intended track and range, "
          "text set through the Fusion comp); a title that cannot be verified is rolled back and listed" if spec.titles
@@ -236,6 +242,7 @@ class FinishRun:
     phases: list[dict[str, Any]] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     echo: Callable[[str], None] = print
+    staged: dict[str, str] = field(default_factory=dict)  # isolated copy -> expected source path (for the final comparison)
 
     def phase(self, name: str, status: str, detail: str = "", **extra: Any) -> dict[str, Any]:
         rec = {"phase": name, "status": status, "detail": detail, **extra}
@@ -255,6 +262,26 @@ def _is_bad_media(item: dict[str, Any]) -> bool:
 
 
 # ---------------------------------------------------------------------------------------------- repairs
+STILLS_DIR_REL = f"resolve_handoff/{STILLS_DIR}"
+
+
+def stage_still(run: FinishRun, source: str) -> Path:
+    """Copy a still to ``resolve_handoff/stills/<key>/<name>`` (shutil.copy2, never a link) and return the copy. The folder holds only
+    that file, so Resolve sees no numbered siblings. An existing copy of the same size is reused. The source is only read."""
+    src = Path(source)
+    dest = run.inp.handoff / STILLS_DIR / stills_key(source) / src.name
+    if dest.is_file() and dest.stat().st_size == src.stat().st_size:
+        return dest
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dest)
+    return dest
+
+
+def _redump(tl: Any, pair: dict[str, Any], it: dict[str, Any], actual: dict[str, Any]) -> dict[str, Any]:
+    live = _item_at(tl, pair["kind"], pair["tindex"], it.get("index"))
+    return dump_item(live, actual.get("start_frame") or 0, []) if live is not None else {}
+
+
 def repair_media(run: FinishRun, tl: Any, expected: dict[str, Any], actual: dict[str, Any]) -> list[dict[str, Any]]:
     """ReplaceClip every offline / image-sequence-misread media clip whose expected source is in the manifest and on disk."""
     allowed = run.api.allowed_media
@@ -290,14 +317,34 @@ def repair_media(run: FinishRun, tl: Any, expected: dict[str, Any], actual: dict
             if mpi is None:
                 rec.update(result="skipped", detail="the timeline item has no media pool item")
                 continue
+            attempts: list[dict[str, Any]] = []
+            rec["attempts"] = attempts
             try:
                 ok = method(mpi, "ReplaceClip")(native_path(path))
             except Exception as e:  # noqa: BLE001 - recorded, never fatal
                 rec.update(result="error", detail=f"{type(e).__name__}: {e}")
                 continue
-            live2 = _item_at(tl, pair["kind"], pair["tindex"], it.get("index"))
-            after = dump_item(live2, actual.get("start_frame") or 0, []) if live2 is not None else {}
+            attempts.append({"path": native_path(path), "returned": bool(ok)})
+            after = _redump(tl, pair, it, actual)
             fixed = bool(after) and not _is_bad_media(after)
+            if not fixed and os.path.splitext(path)[1].lower() in STILL_EXTS:
+                # Observed: ReplaceClip refuses a file that has numbered siblings in its folder (Resolve sees one frame of an
+                # image sequence). Retry with an isolated single-file copy; the original is only read.
+                try:
+                    staged = stage_still(run, path)
+                    run.api.allow_staged(path, staged)
+                    rec["staged_copy"] = str(staged)
+                    ok = method(mpi, "ReplaceClip")(native_path(staged))
+                    attempts.append({"path": native_path(staged), "returned": bool(ok)})
+                    after = _redump(tl, pair, it, actual)
+                    fixed = bool(after) and not _is_bad_media(after)
+                    if fixed:
+                        run.staged[str(staged)] = path
+                        rec["detail"] = (f"the clip now references the isolated copy {STILLS_DIR_REL}/{staged.parent.name}/"
+                                         f"{staged.name} (Resolve refused the original, which has numbered siblings)")
+                except Exception as e:  # noqa: BLE001
+                    rec.update(result="error", detail=f"isolated copy fallback failed: {type(e).__name__}: {e}")
+                    continue
             rec.update(result="online" if fixed else "still_offline", replace_returned=bool(ok),
                        now={k: after.get(k) for k in ("name", "media_path", "online", "start", "end")})
     return repairs
@@ -485,7 +532,14 @@ def render_markdown(rep: dict[str, Any]) -> str:
         for r in rep["repairs"]:
             L.append(f"- {r['track']}[{r['position']}] {r['reason']}: was `{(r.get('was') or {}).get('name')}` -> "
                      f"`{os.path.basename(str(r['expected_path']))}`: **{r.get('result')}**" + (f" ({r['detail']})" if r.get("detail") else ""))
-        L.append("")
+        staged = sorted({r["staged_copy"] for r in rep["repairs"] if r.get("staged_copy") and r.get("result") == "online"})
+        if staged:
+            L += [f"Isolated copies ({len(staged)}): Resolve refused ReplaceClip on the original of these stills because they have numbered "
+                  f"siblings in their folder (it reads them as an image sequence), so the clips reference single-file copies instead. "
+                  f"The Resolve project now references copies under `resolve_handoff/stills/` for those clips: keep that folder with the project. "
+                  f"The originals were not modified.", ""] + [f"- `{p}`" for p in staged] + [""]
+        else:
+            L.append("")
     if rep.get("markers"):
         L += ["## Markers", ""] + [f"- frame {m['frame']} '{m['name']}': {m.get('result')}" + (f" ({m['detail']})" if m.get("detail") else "")
                                   for m in rep["markers"]] + [""]
@@ -556,7 +610,8 @@ def run_finish(output: Path | str, *, project_name: str | None = None, dry_run: 
         return FinishResult(EXIT_USAGE, "preconditions_failed")
     started = utc_now_iso()
     stamp = time.strftime("%Y%m%d_%H%M%S")
-    session = ApiSession(allowed_media=media_keys(inp.manifest_paths), redactions=((str(inp.root), "<workspace>"),))
+    session = ApiSession(allowed_media=media_keys(inp.manifest_paths), redactions=((str(inp.root), "<workspace>"),),
+                         stills_root=inp.handoff / STILLS_DIR)
     report: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION, "tool": "trip-vlog resolve-finish", "tool_version": __version__,
         "started_at": started, "workspace": str(inp.root), "dry_run": dry_run, "python": python_info(),
@@ -700,8 +755,13 @@ def _execute(inp: FinishInputs, report: dict[str, Any], session: ApiSession, api
         repairs = repair_media(run, tl, expected({}), actual)
         if repairs:
             fixed = sum(1 for r in repairs if r.get("result") in ("online", "already_online"))
-            run.phase("repair media", "ok" if fixed == len(repairs) else "warn", f"{fixed}/{len(repairs)} clip(s) repaired with ReplaceClip")
+            run.phase("repair media", "ok" if fixed == len(repairs) else "warn", f"{fixed}/{len(repairs)} clip(s) repaired with ReplaceClip"
+                      + (f" ({len(run.staged)} via isolated copies in {STILLS_DIR_REL})" if run.staged else ""))
             actual = dump_timeline(tl)
+            if run.staged:
+                run.notes.append(f"The Resolve project references isolated copies of {len(run.staged)} still(s) under {STILLS_DIR_REL}/ "
+                                 "(Resolve refused the originals, which have numbered siblings); keep that folder with the project.")
+                report["staged_copies"] = [{"copy": c, "source": o} for c, o in run.staged.items()]
         else:
             run.phase("repair media", "ok", "nothing offline or misread")
 
@@ -726,7 +786,8 @@ def _execute(inp: FinishInputs, report: dict[str, Any], session: ApiSession, api
         # 6. final read-back
         final = dump_timeline(tl)
         names = {t["index"]: t["resolve_name"] for t in titles if t["status"] == "created"}
-        final_checks = [_r("import", "pass", f"imported as '{final.get('name')}'")] + compare_timeline(expected(names), final)
+        final_checks = [_r("import", "pass", f"imported as '{final.get('name')}'")] + compare_timeline(
+            expected(names), final, path_aliases=run.staged)
         if spec.titles:
             created = [t for t in titles if t["status"] == "created"]
             final_checks = [c for c in final_checks if c["check"] != "titles"] + [

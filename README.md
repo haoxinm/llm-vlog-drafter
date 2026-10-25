@@ -137,6 +137,9 @@ Media references are absolute: moving the package or the media to another machin
 2. imports `resolve_handoff/timeline.xml` with a unique timeline name;
 3. repairs media that arrived offline or was misread as an image sequence (`IMG_1042.JPG` becomes `IMG_[1042-1191].JPG` in Resolve) with
    `MediaPoolItem.ReplaceClip(<path from media_manifest.csv>)`; paths outside the manifest are refused;
+   Resolve refuses `ReplaceClip` for a still that has numbered siblings in its folder (`stars_-318.jpg` next to `stars_-319.jpg`; it reads them
+   as an image sequence). For stills only, the fallback copies that one file (`shutil.copy2`, the original is never modified) to
+   `resolve_handoff/stills/<key>/<name>` and relinks the clip to the copy. Keep `resolve_handoff/stills/` together with the Resolve project;
 4. adds scene markers that are missing (an existing marker with the same frame and name is not duplicated);
 5. **experimental:** creates the titles of the timeline spec as editable Text+ titles on their track and range; a title that cannot be verified
    by read-back is rolled back (only items this run created) and listed for manual recreation. The baseline planner emits no titles yet;

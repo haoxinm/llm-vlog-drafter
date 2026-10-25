@@ -6,6 +6,10 @@ It models what was observed on Resolve Studio 21.1.1.10 with the verifier:
 * a still whose file name contains digits is misread as an image sequence (``still_[1080-1229]p.png``,
   ``IMG_[1042-1191].JPG``) and is offline; ``MediaPoolItem.ReplaceClip(<existing file>)`` brings it online with the
   right name and the same record range;
+* ``ReplaceClip(path)`` returns False and changes nothing when the target file has a numbered sibling in its directory (Resolve
+  sees it as one frame of an on-disk image sequence): observed for ``261010_stars_-318.jpg`` .. ``-377.jpg`` while
+  ``261010_stars_final.jpg`` and ``still_1080p.png`` (no numbered siblings) were repaired fine. Modelled as: another file in the
+  directory whose name equals the target's with one maximal digit run replaced by a different digit run;
 * timelines start at frame ``TL_START``; transitions are listed as items without a media pool item;
 * a project name that exists makes ``CreateProject`` return None; a reused timeline name makes the import return None.
 
@@ -23,6 +27,18 @@ from urllib.parse import unquote, urlparse
 TL_START = 86400
 SEQ_RE = re.compile(r"^(.*?)(\d+)(\D*)\.([A-Za-z0-9]+)$")
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
+
+
+def has_numbered_sibling(path: str) -> bool:
+    p = Path(path)
+    runs = list(re.finditer(r"\d+", p.name))
+    if not p.parent.is_dir():
+        return False
+    for m in runs:
+        pat = re.compile(re.escape(p.name[:m.start()]) + r"\d+" + re.escape(p.name[m.end():]))
+        if any(f.name != p.name and f.is_file() and pat.fullmatch(f.name) for f in p.parent.iterdir()):
+            return True
+    return False
 
 
 def _path_from_url(url: str) -> str:
@@ -45,7 +61,7 @@ class FakeMPI:
 
     def ReplaceClip(self, path):
         self.replace_calls.append(path)
-        if not Path(path).is_file():
+        if not Path(path).is_file() or has_numbered_sibling(path):
             return False
         self.path, self._name = path, Path(path).name
         for it in self.items:

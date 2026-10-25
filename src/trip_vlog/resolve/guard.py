@@ -4,7 +4,8 @@
 :class:`Guard` that only exposes the methods listed in :data:`ALLOWED` for that kind of object, logs each call with
 sanitised arguments and a summarised result, and enforces two argument rules:
 
-* ``MediaPoolItem.ReplaceClip(path)`` only accepts a path that is listed in the media manifest;
+* ``MediaPoolItem.ReplaceClip(path)`` only accepts a path that is listed in the media manifest, or an isolated copy of a
+  manifest still registered with :meth:`ApiSession.allow_staged`;
 * ``Timeline.DeleteClips`` / ``MediaPool.DeleteTimelines`` only accept objects that this run created.
 
 There is no ``eval``/``exec`` and nothing here is reachable by an LLM. Methods that delete projects, load or close
@@ -13,10 +14,13 @@ projects, or run scripts are not in the allowlist, so calling them raises :class
 
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from trip_vlog.logging_utils import sanitize, utc_now_iso
@@ -63,6 +67,14 @@ def media_key(path: Any) -> str:
     return n.lower() if (os.name == "nt" or sys.platform == "darwin") else n
 
 
+def stills_key(source: Any) -> str:
+    """Folder name of the isolated copy of a source still: first 12 hex of sha1(media_key(source))."""
+    return hashlib.sha1(media_key(source).encode("utf-8")).hexdigest()[:12]
+
+
+_HEX12 = re.compile(r"^[0-9a-f]{12}$")
+
+
 @dataclass
 class ApiSession:
     """The call log and the rules shared by all guarded objects of one run."""
@@ -73,6 +85,8 @@ class ApiSession:
     created_items: dict[int, Any] = field(default_factory=dict)  # id(raw) -> raw; created by this run
     created_timelines: dict[int, Any] = field(default_factory=dict)
     redactions: tuple[tuple[str, str], ...] = ()
+    stills_root: Any = None  # <workspace>/resolve_handoff/stills; isolated copies of manifest stills live below it
+    staged_media: set[str] = field(default_factory=set)  # media_key() of registered isolated copies
     clock: Callable[[], str] = utc_now_iso
 
     # ---- wrapping
@@ -131,11 +145,29 @@ class ApiSession:
         entry["at"] = self.clock()
         self.log.append(entry)
 
+    def allow_staged(self, source: Any, staged: Any) -> None:
+        """Also allow ReplaceClip with ``staged``: the isolated copy of the manifest file ``source``. Refused unless the source
+        is in the manifest and ``staged`` is a file with the same name directly inside ``<stills_root>/<key of source>/``."""
+        if media_key(source) not in self.allowed_media:
+            raise AllowlistViolation(f"staged copy refused: {source!r} is not listed in media_manifest.csv")
+        if self.stills_root is None:
+            raise AllowlistViolation("staged copy refused: no stills root configured")
+        try:
+            sp = Path(str(staged)).resolve()
+            root = Path(str(self.stills_root)).resolve()
+        except (OSError, ValueError) as e:
+            raise AllowlistViolation(f"staged copy refused: {e}") from None
+        base = os.path.basename(str(source).replace("\\", "/"))
+        if not (sp.is_file() and sp.parent.parent == root and _HEX12.match(sp.parent.name) and sp.parent.name == stills_key(source)
+                and sp.name == base):
+            raise AllowlistViolation(f"staged copy refused: {staged!r} is not the isolated copy of {base!r} under {root}")
+        self.staged_media.update({media_key(sp), media_key(staged)})
+
     # ---- argument rules
     def check_args(self, role: str, name: str, raw_args: tuple[Any, ...]) -> None:
         if role == "mpi" and name == "ReplaceClip":
             path = raw_args[0] if raw_args else None
-            if not isinstance(path, str) or media_key(path) not in self.allowed_media:
+            if not isinstance(path, str) or (media_key(path) not in self.allowed_media and media_key(path) not in self.staged_media):
                 raise AllowlistViolation(f"ReplaceClip refused: {path!r} is not listed in media_manifest.csv")
         elif role == "timeline" and name == "DeleteClips":
             items = raw_args[0] if raw_args else None
