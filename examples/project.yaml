@@ -1,0 +1,67 @@
+# Example trip-vlog configuration (DESIGN §4.1). Every field is optional; defaults shown.
+project:
+  title: "Trip Vlog"
+  target_duration_seconds: 180
+  aspect_ratio: "16:9"
+  frame_rate: "30"            # number or rational, e.g. "30000/1001"
+  language: "en"
+  story_mode: "mostly_chronological"   # chronological | mostly_chronological | thematic
+  style: "personal, cinematic, authentic"
+  audience: "friends and family"
+  include_narration: false
+  include_subtitles: false
+  music_policy: "user_supplied_only"   # none | user_supplied_only
+  preserve_natural_audio: true
+  target_loudness_lufs: null
+
+editorial:
+  must_include: []
+  must_exclude: []
+  preferred_topics: []
+  max_similar_shots_per_scene: 2
+  opening_hook_seconds: 8
+  closing_seconds: 10
+  allow_nonlinear_hook: true
+  avoid_fabricated_context: true
+  avoid_excessive_transitions: true
+
+media:
+  recursive: true
+  follow_symlinks: false
+  fingerprint: "fast"            # fast | sha256
+  proxy_policy: "on_demand"      # on_demand | always | never
+  vision_sampling_fps: 1.0
+  fine_sampling_fps: 4.0
+  fine_sampling_enabled: false
+  segment_window_seconds: 6.0
+  transcribe_speech: true
+  vision_provider: "anthropic"   # anthropic | replay | <other adapter>
+  llm_provider: "anthropic"
+  llm_model: null                # set via config or env; never hard-coded
+  local_only: false
+  # Phase 1 inventory settings
+  ffprobe_path: null             # else $FFPROBE, PATH, standard install dirs
+  ffmpeg_path: null              # else $FFMPEG, PATH, standard install dirs
+  probe_timeout_seconds: 60
+  thumbnail_max_side: 480
+  contact_sheet_frames: 6        # frames per video contact sheet (0 = off)
+  export_gps: false              # GPS is private; keep it out of JSONL exports
+
+workflow:
+  approval: "stop_after_outline" # stop_after_outline | auto_approve
+
+filmcraft:                       # not used until Phase 2
+  mode: "mcp"                    # mcp | cli | bridge
+  executable: null
+  control_host: "127.0.0.1"
+  control_port: null
+  project_name: "Trip Vlog Draft"
+  sequence_name: "Main Draft"
+  prefer_native_project: true
+  interchange_formats: ["otio", "fcp7_xml"]
+
+outputs:                         # relative to the output workspace
+  project_file: "filmcraft/TripVlog.fcproj"
+  preview_file: "preview/draft.mp4"
+  edit_plan_file: "plans/edit_plan.json"
+  interchange_dir: "resolve_handoff"

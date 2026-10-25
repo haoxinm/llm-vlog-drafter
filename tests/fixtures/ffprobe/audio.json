@@ -1,0 +1,5 @@
+{
+  "streams": [{"index": 0, "codec_name": "mp3", "codec_type": "audio", "duration": "61.2"},
+              {"index": 1, "codec_name": "mjpeg", "codec_type": "video", "width": 500, "height": 500, "disposition": {"attached_pic": 1}}],
+  "format": {"format_name": "mp3", "duration": "61.2"}
+}

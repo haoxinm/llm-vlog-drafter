@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "trip-vlog"
+version = "0.1.0"
+description = "Draft a travel vlog from photos and videos (Phase 1: media inventory)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+dependencies = [
+    "pydantic>=2.5",
+    "PyYAML>=6.0",
+    "jsonschema>=4.18",
+    "Pillow>=10.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+trip-vlog = "trip_vlog.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/trip_vlog"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "integration: needs ffmpeg/ffprobe on PATH; skipped cleanly when missing",
+]
