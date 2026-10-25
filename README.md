@@ -71,7 +71,10 @@ trip-vlog index --media /path/to/trip-media --output /path/to/vlog-project
 
 # Phase 3b: label video segments and photos with the vision model (runs index + segment first; needs an LLM endpoint, see "LLM provider")
 trip-vlog analyze --output /path/to/vlog-project [--media /path/to/trip-media] [--limit N] [--sampling-fps 1.0] [--dry-run]
-trip-vlog llm-check [--output /path/to/vlog-project | --config project.yaml] [--endpoint NAME] [--no-image]
+trip-vlog llm-check [--output /path/to/vlog-project | --config project.yaml] [--endpoint NAME] [--no-image] [--speech [--no-llm]]
+
+# Phase 3c: audio features + optional speech transcription (backend none by default; see "Speech transcription")
+trip-vlog transcribe --output /path/to/vlog-project [--media /path/to/trip-media] [--limit N] [--dry-run]
 
 # Optional, Resolve Studio only: finish the handoff inside Resolve (see "Finish in Resolve" below)
 trip-vlog resolve-finish --output /path/to/vlog-project [--dry-run] [--project-name NAME] [--keep-on-failure]
@@ -98,7 +101,7 @@ Invalid values and unsafe paths (workspace inside the media folder, outputs esca
 ```
 vlog-project/
   project.yaml  manifest.json  README.md          # manifest: versions, approval, FilmCraft version, per-stage status
-  media_index/    catalog.sqlite (authoritative), assets.jsonl, moments.jsonl, inventory_report.json, thumbnails/, contact_sheets/, analysis/ (sampled frames + per-segment sheets)
+  media_index/    catalog.sqlite (authoritative), assets.jsonl, moments.jsonl, transcripts.jsonl, inventory_report.json, thumbnails/, contact_sheets/, analysis/ (sampled frames + per-segment sheets)
   plans/          edit_plan.json, plan_summary.md, selection_plan.json, *.schema.json, validation_report.json
   filmcraft/      Trip Vlog Draft_v001.fcproj ..., capability_snapshot.json, command_log.jsonl, execution_journal.json, mapping_report.json
   preview/        draft.mp4, qc_report.json, contact_sheet_timeline.jpg, render_report.json
@@ -313,6 +316,137 @@ One tiny live request per check (a 2-field JSON reply; then a generated red squa
 shows endpoint, api, URL (no query string or secrets), local/remote, model, structured-output mode, ok/FAIL, latency, tokens and the error class with a short message. Exit
 0 if all checks pass, 1 if any fails, 2 for a bad configuration or unknown `--endpoint`.
 
+## Speech transcription (optional)
+
+Phase 3c adds two stages after `segment`: `audio` (cheap measurements, always on) and `transcribe` (optional, **off until you choose a backend**). Both run inside
+`trip-vlog transcribe` and, before labeling, inside `trip-vlog analyze`; `draft --planner baseline` never runs them. Nothing is tied to one vendor: transcription is
+a small adapter with three backends.
+
+```yaml
+speech:
+  enabled: true                  # the one switch (media.transcribe_speech is a deprecated alias, see below)
+  backend: none                  # none | openai_transcriptions | command
+  language: null                 # e.g. "en"; null lets the backend detect it
+  min_speech_seconds: 1.0        # skip assets with less non-silent audio than this (the segmenter's silence detection)
+  audio_format: wav              # wav | flac: the temporary 16 kHz mono file handed to the backend
+  keep_audio: false              # true keeps media_index/audio/<asset>/... instead of deleting it after use
+  chunk_seconds: 600             # HTTP backend only: longer audio is uploaded in chunks of this length (25 MB limits, retries)
+  context_max_chars: 1200        # transcript text per segment shown to the vision model in `analyze`; 0 = never send transcripts there
+  endpoint:                      # backend: openai_transcriptions
+    base_url: https://api.openai.com
+    path: null                   # null -> /v1/audio/transcriptions
+    model: null                  # or the env var named by model_env (default TRIP_VLOG_SPEECH_MODEL); no model id is built in
+    model_env: TRIP_VLOG_SPEECH_MODEL
+    api_key_env: OPENAI_API_KEY  # NAME of the environment variable holding the key; null = no Authorization header
+    headers: {}                  # values may use ${ENV_VAR}; never logged
+    timeout_seconds: 300
+    max_retries: 2               # connection errors, 429 and 5xx, with backoff / Retry-After; a timeout is not retried
+    response_format: verbose_json   # verbose_json | json | text | srt | vtt
+    timestamp_granularities: [segment]   # sent only with verbose_json; [] omits the field
+    params: {}                   # extra form fields (temperature, prompt, ...); scalars or lists
+    allow_insecure_http: false   # plain http to a non-loopback host needs this
+  command:                       # backend: command
+    executable: null
+    args: []                     # must contain {input} and {output_dir} (or {output_base})
+    output_format: srt           # srt | vtt | json
+    timeout_seconds: 3600
+```
+
+**Backends**
+
+- `none` (default): the stage reports `skipped` ("speech.backend is none") and is not an error; `status` does not list it as unfinished. Audio features are still measured.
+- `openai_transcriptions`: `POST {base_url}{path}` as `multipart/form-data` (standard library only, no SDK) with the fields `file`, `model`, `response_format`
+  (`verbose_json`), `timestamp_granularities[]` (`segment`), optional `language`, plus your `params`; `Authorization: Bearer <key from api_key_env>`. The file is always sent
+  as `audio.wav`/`audio.flac`, never under its real name. Replies are read as `segments[] {start, end, text, avg_logprob, no_speech_prob}` and `language`; a server that
+  returns only `text` yields one segment spanning the clip, marked `timestamps: coarse`. **The request shape follows the public OpenAI documentation; verify it against your
+  server** (`trip-vlog llm-check --speech`, below). OpenAI-compatible local servers (faster-whisper-server, a whisper.cpp server, LocalAI, ...) work at `http://127.0.0.1:<port>`.
+- `command`: runs a local program with an argument list (no shell). Placeholders inside each argument: `{input}` (the WAV/FLAC), `{output_dir}` (an empty temporary folder,
+  removed afterwards), `{output_base}` (`{output_dir}/transcript`, for tools that take a prefix) and `{language}` (the configured language or `auto`). After the program exits 0 the
+  file `transcript.<ext>` (or the only `*.<ext>` in `{output_dir}`) is read as SRT, VTT or whisper-style JSON (openai-whisper / faster-whisper `segments[]`, whisper.cpp `-oj`).
+  A non-zero exit, a timeout or a missing output file fails that asset with the tool's last output.
+
+**Examples**
+
+```yaml
+# OpenAI (audio leaves the machine): export OPENAI_API_KEY first
+speech:
+  backend: openai_transcriptions
+  endpoint: {model: <your transcription model id>}
+```
+```yaml
+# A local whisper server on this machine (faster-whisper-server, whisper.cpp server, LocalAI): no key, works with media.local_only: true
+speech:
+  backend: openai_transcriptions
+  endpoint: {base_url: "http://127.0.0.1:8000", api_key_env: null, model: <the model name your server expects>}
+```
+```yaml
+# whisper.cpp command line tool (model path and executable are yours). -osrt -of <prefix> writes <prefix>.srt
+speech:
+  backend: command
+  language: en
+  command:
+    executable: /opt/whisper.cpp/build/bin/whisper-cli
+    args: ["-m", "/path/to/your-whisper-model.bin", "-f", "{input}", "-l", "{language}", "-osrt", "-of", "{output_base}"]
+    output_format: srt
+```
+```powershell
+# Windows PowerShell: key for a remote endpoint, then dry-run, check and run
+$env:OPENAI_API_KEY = "..."
+trip-vlog transcribe --output C:\vlogs\lisbon --media D:\Trips\Lisbon --config .\project.yaml --dry-run
+trip-vlog llm-check --config .\project.yaml --speech --no-llm
+trip-vlog transcribe --output C:\vlogs\lisbon --media D:\Trips\Lisbon --config .\project.yaml
+# whisper.cpp on Windows in project.yaml: executable: 'C:\tools\whisper.cpp\whisper-cli.exe' (single quotes keep the backslashes), args as above
+```
+```sh
+trip-vlog transcribe --output ./vlog --media ./trip --dry-run    # assets, minutes of audio, requests, backend/endpoint, local or remote; extracts and sends nothing
+trip-vlog llm-check --config project.yaml --speech --no-llm      # one generated 1-second tone to the backend; empty text is fine
+```
+
+**`media.transcribe_speech` vs `speech.enabled`.** `speech.enabled` is the single source of truth. The older `media.transcribe_speech` is still accepted: at load time its value is
+copied into `speech.enabled` and the alias is cleared (so the effective `project.yaml` shows only `speech.enabled`). Setting both to different values is a configuration error.
+
+**What is stored.** Transcript segments (verbatim words, start/end seconds in source time, `confidence` = `exp(avg_logprob)` when the backend reports it, `no_speech_prob`,
+language, backend, model, `timestamps: segment|coarse`) are in the catalog `transcripts` table and `media_index/transcripts.jsonl`. Each moment's `transcript_refs` lists the
+transcript IDs overlapping its source range (also after labeling narrows the range). `speech_summary` stays `null`: spoken words and inferred summaries are kept apart
+(DESIGN §7.3), any later summary must be labeled as inferred, and subtitles (§13.4) may only come from the transcript. Segments with `timestamps: coarse` are not suitable for subtitles.
+
+**Skipping and caching.** Assets without an audio stream, and assets whose non-silent audio (from the segmenter's silence detection, `media.silence_threshold_db`) is shorter than
+`speech.min_speech_seconds`, are skipped and counted in the summary. Each asset's transcript is cached by its content version plus backend identity (backend, model, language, request
+format, granularities and `params`; for `command`: executable name, `args`, format, language) and the audio settings (format, 16 kHz mono, and `chunk_seconds` for the HTTP backend).
+URLs, keys, headers, timeouts and retry counts are not part of it, nor are the target duration, segment window or any planning setting: those never re-run transcription.
+A connection failure of three assets in a row stops the stage; authentication, model or URL errors (401/403/404) stop it immediately; other per-asset failures leave a `partial`
+stage and are retried by the next run.
+
+**In `analyze`.** `transcribe` runs before `analyze`. A video segment that overlaps transcript text gets that text (cut at `speech.context_max_chars`) in its labeling request as an
+`untrusted_media_data kind="transcript"` block, with an instruction to use it only to ground `event`; only those segments get a new cache key, segments without speech keep theirs.
+The prompt template is unchanged (`segment_labels.v1`). Set `context_max_chars: 0` to keep transcripts out of the vision request. With a remote `llm.vision` endpoint this text
+leaves the machine too.
+
+### Audio features
+
+The `audio` stage (`media.audio_features`, default true) makes one ffmpeg pass per asset (cached by content version) and stores `features.audio` on every segment and `audio` /
+`audio_tags` on every moment (and in `moments.jsonl`), e.g. `{silent, clipped, wind_likely, active_ratio, mean_db, peak_db, lf_share_db, asset_loudness_lufs, audio_tags}`.
+They are measurements and hints, not judgments:
+
+| Flag | Rule | Why |
+|---|---|---|
+| `silent` | power-mean level of the segment below `media.silence_threshold_db` (default -35 dB) | same rule as the segmenter |
+| `clipped` | at least 2% of the 0.25 s windows peak at >= -0.1 dBFS | one full-scale peak in a normalised file does not count; sustained flat tops do |
+| `wind_likely` | at least 2 non-silent windows, and at least half of them have the 200 Hz low-passed level within 1 dB of the full-band level (>= ~79% of the power below ~200 Hz) | wind and handling rumble sit almost entirely below 200 Hz; speech, surf, crowds and music keep much more above it (white noise: ~2.5%). A steady engine or deep bass can also trigger it |
+| `active_ratio` | share of windows above the silence threshold | energy only, not speech detection |
+| `asset_loudness_lufs` | EBU R128 integrated loudness of the whole asset (`null` when silent) | loudness is per asset, not per segment |
+
+`audio_tags` are derived only from those flags: `silent`, `clipped_audio`, `wind_likely`, or `clean_audio` (audible, not clipped, not wind-dominated; it says nothing about *what*
+the sound is, which stays an editorial judgment). Audio is measured on a mono downmix at 16 kHz, so correlated stereo reads up to ~3 dB louder than the segmenter's per-channel `audio_mean_db`.
+
+### Privacy
+
+Audio leaves the machine **only** with a remote `openai_transcriptions` endpoint (`trip-vlog transcribe --dry-run` and the stage summary say `remote` and how many minutes). A
+loopback endpoint (127.x, `localhost`, `::1`) or the `command` backend keeps it local; with `media.local_only: true` a non-loopback `speech.endpoint` is rejected when the
+configuration loads (`command` counts as local). Extracted audio lives in a temporary folder and is deleted unless `keep_audio: true`. Transcripts are personal data: they are
+stored in the workspace, and are sent to the vision endpoint in `analyze` unless `context_max_chars: 0` (the same endpoint rules apply). Keys are read from environment variables
+and never logged, and error messages echoed by a server are masked.
+
 ## Platform notes
 
 Windows 10/11 and macOS 13+ are first-class targets, Linux is for development and CI. The code uses `pathlib` only, argument-list subprocesses (no shell),
@@ -322,7 +456,7 @@ with Python 3.11 and 3.13. Only Linux has been exercised locally so far; treat W
 
 ## Known limitations
 
-- **Phase 3 is only partly implemented (the LLM gateway exists, see "LLM provider"):** no vision labeling, transcription, LLM outline/selection planning, critic or natural-language revisions. The baseline planner
+- **Phase 3 is only partly implemented (LLM gateway, vision labeling, optional transcription and audio features exist):** no LLM outline/selection planning, critic or natural-language revisions. The baseline planner
   is chronological with fixed clip lengths, stills at a default duration, no music or narration, hard cuts, and no titles.
 - Resolve import is unverified by this tool (see above). Titles are not carried by any interchange format; audio fades appear as dissolves in OTIO;
   FCPXML drops non-V1 transitions; EDL carries one video track. Only the FilmCraft 0.13.0 / Linux combination has been run; Windows and macOS are unverified until CI has run.

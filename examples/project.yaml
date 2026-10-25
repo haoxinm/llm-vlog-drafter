@@ -41,8 +41,8 @@ media:
   vision_send_filenames: true        # base name only, wrapped as untrusted data
   photo_duplicate_distance: 6
   segment_window_seconds: 6.0
-  transcribe_speech: true
-  local_only: false              # true: every endpoint used by llm.text / llm.vision must be loopback
+  local_only: false              # true: every endpoint used by llm.text / llm.vision (and an active speech.endpoint) must be loopback
+  audio_features: true           # loudness, clipped / wind-likely / silent flags per segment (one ffmpeg pass per asset)
   # Phase 1 inventory settings
   ffprobe_path: null             # else $FFPROBE, PATH, standard install dirs
   ffmpeg_path: null              # else $FFMPEG, PATH, standard install dirs
@@ -55,6 +55,17 @@ media:
   scene_threshold: 0.30          # ffmpeg scene-cut score
   silence_threshold_db: -35      # audio below this level counts as silence
   still_duration_seconds: 3.0    # default on-screen time of a photo
+
+speech:                          # optional transcription; backend none = skipped (see README "Speech transcription")
+  enabled: true
+  backend: none                  # none | openai_transcriptions | command
+  language: null
+  min_speech_seconds: 1.0
+  audio_format: wav              # wav | flac
+  keep_audio: false
+  context_max_chars: 1200        # transcript text shown to the vision model per segment (0 = never)
+  # endpoint: {base_url: "http://127.0.0.1:8000", api_key_env: null, model: <model name your server expects>}
+  # command: {executable: /path/to/whisper-cli, args: ["-f", "{input}", "-osrt", "-of", "{output_base}"], output_format: srt}
 
 workflow:
   approval: "stop_after_outline" # stop_after_outline | auto_approve
