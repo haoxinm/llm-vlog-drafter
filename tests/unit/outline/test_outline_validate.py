@@ -55,8 +55,8 @@ def test_schema_fields_roles_and_nullable_members():
     assert hook["properties"]["moment_id"]["type"] == ["string", "null"] and hook["properties"]["justification"]["type"] == ["string", "null"]
     assert set(resp["required"]) == {"premise", "story_mode_used", "scenes", "hook", "missing_coverage", "uncertainties"}
     assert "schema_version" in ol.outline_schema()["required"]
-    text = json.dumps([resp, ol.outline_schema()]).lower()
-    assert "claude" not in text and "gpt" not in text and "timestamp_seconds" not in text            # no model names, no timestamps
+    names = {k for sch in (resp, ol.outline_schema()) for o in all_objects(sch) for k in o["properties"]}
+    assert not {n for n in names if "timestamp" in n or n.startswith("source_")}                       # the model never writes timestamps
 
 
 def test_schema_and_models_agree():

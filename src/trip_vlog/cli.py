@@ -1,11 +1,12 @@
-"""Command line interface: index / analyze / transcribe / llm-check / draft / approve / status / resume.
+"""Command line interface: index / analyze / transcribe / outline / llm-check / draft / approve / status / resume.
 
 Exit codes
   0    success (pipeline finished; QC findings are reported, not errors)
   1    a stage failed (details in `status`, logs/errors.jsonl)
   2    usage or configuration error (bad flag, unusable paths, planner not implemented)
-  3    stopped at the approval gate: review plans/plan_summary.md, then `approve` and `resume` (or `draft --auto-approve`)
-  4    `approve` refused: the plan is missing, failed validation, or the plan stage did not succeed
+  3    stopped at the approval gate: review plans/story_outline.md (`outline`) or plans/plan_summary.md (`draft`), then `approve` and
+       `resume` (or `--auto-approve`)
+  4    `approve` refused: the outline/plan is missing, failed validation, or its stage did not succeed
        (`resolve-finish`: 0 finished, 1 required checks failed, 2 preconditions/arguments, 3 Resolve scripting unavailable)
   130  interrupted (Ctrl-C); `resume` continues
 """
@@ -23,7 +24,8 @@ import yaml
 from trip_vlog import __version__
 from trip_vlog.config import ConfigError
 from trip_vlog.draft_stages import DRAFT_STAGES
-from trip_vlog.orchestrator import IndexResult, approve_plan, read_status, run_analyze, run_draft, run_index, run_transcribe, ApprovalRefused
+from trip_vlog.orchestrator import (ApprovalRefused, IndexResult, approve_pending, read_status, run_analyze, run_draft, run_index, run_outline,
+                                    run_transcribe)
 
 
 def _common(p: argparse.ArgumentParser, *, media_required: bool) -> None:
@@ -61,6 +63,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true",
                    help="print how many assets / minutes of audio would be transcribed, by which backend, local or remote; extracts and sends nothing")
 
+    p = sub.add_parser("outline", help="LLM story outline from the labeled moments, then stop for your approval "
+                                       "(runs index, segment, audio, transcribe and analyze first)")
+    _common(p, media_required=False)
+    p.add_argument("--duration", type=float, help="target duration in seconds (project.target_duration_seconds)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="print how many moments go into the prompt, the estimated input size and the endpoint (local/remote); sends nothing")
+    p.add_argument("--auto-approve", action="store_true", default=None,
+                   help="skip the approval stop; approval is recorded as automatic (workflow.approval=auto_approve)")
+
     p = sub.add_parser("llm-check", help="send one tiny live request per configured endpoint (text, then image) and print a result table")
     p.add_argument("--output", type=Path, help="workspace whose project.yaml configures the endpoints")
     p.add_argument("--config", type=Path, help="project.yaml (default: <output>/project.yaml if present, else defaults)")
@@ -95,8 +106,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--auto-approve", action="store_true", default=None,
                    help="skip the approval stop; approval is recorded as automatic (workflow.approval=auto_approve)")
 
-    p = sub.add_parser("approve", help="approve the current plans/edit_plan.json so `resume` can build the FilmCraft project")
+    p = sub.add_parser("approve", help="approve what is waiting at the approval gate: the story outline (plans/story_outline.json) or "
+                                       "the edit plan (plans/edit_plan.json); it says which")
     p.add_argument("--output", type=Path, required=True)
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--outline", dest="which", action="store_const", const="outline", help="approve the story outline explicitly")
+    g.add_argument("--plan", dest="which", action="store_const", const="plan", help="approve the edit plan explicitly")
 
     p = sub.add_parser("resolve-finish", help="optional: finish the handoff inside DaVinci Resolve Studio "
                                               "(new project, import, relink stills, markers, experimental titles, report)")
@@ -279,6 +294,52 @@ def _cmd_transcribe(args: argparse.Namespace, command: str = "transcribe") -> in
     return res.exit_code
 
 
+def _print_outline_result(res: IndexResult) -> None:
+    from trip_vlog.state import Manifest, Workspace
+
+    print(f"run {res.run_id} -> {res.workspace}")
+    if res.dry_run is not None:
+        from trip_vlog.outline_stages import format_dry_run
+
+        print(format_dry_run(res.dry_run))
+        return
+    m = Manifest.load(Workspace(res.workspace).manifest_path)
+    for name, status in res.stage_status.items():
+        st = m.stage(name)
+        if status == "skipped" and st.get("decision") == "cache_hit":
+            status = "cached"
+        print(f"  {name:<16} {status}")
+        if status == "failed" and st.get("error"):
+            for line in str(st["error"]).splitlines()[:8]:
+                print(f"      {line}")
+    s = m.stage("outline").get("summary", {})
+    if s.get("scenes"):
+        print(f"outline: {s['scenes']} scene(s), {s.get('planned_seconds', 0):g} s planned (target {s.get('target_seconds', 0):g} s); "
+              f"{s.get('moments_in_prompt', 0)} of {s.get('eligible_moments', 0)} moments in the prompt; {s.get('requests', 0)} request(s) to "
+              f"'{s.get('endpoint')}' ({'local' if s.get('local') else 'remote'}), {s.get('input_tokens', 0)} input / {s.get('output_tokens', 0)} output tokens")
+        if s.get("repairs") or s.get("warnings"):
+            print(f"  {s.get('repairs', 0)} automatic repair(s), {s.get('warnings', 0)} warning(s): see plans/story_outline.md")
+        if s.get("edited_outline_backup"):
+            print(f"  your edited outline was replaced because the inputs changed; a copy is at {s['edited_outline_backup']}")
+    ws = res.workspace
+    if res.awaiting_approval:
+        ap = m.stage("outline_approval").get("summary", {})
+        print("\nAWAITING APPROVAL: no clips have been selected and nothing was created in FilmCraft.")
+        if ap.get("invalidated"):
+            print(f"  {ap['invalidated']}")
+        print(f"  review: {ws / ap.get('outline_summary', 'plans/story_outline.md')}")
+        print(f"  edit  : {ws / ap.get('outline', 'plans/story_outline.json')} (optional)")
+        print(f"  then  : trip-vlog approve --output {ws}  &&  trip-vlog resume --output {ws}")
+    elif m.stage("outline_approval").get("status") == "succeeded":
+        print(f"outline approved ({(m.get('outline_approval') or {}).get('mode')}): {ws / 'plans' / 'story_outline.json'}")
+
+
+def _cmd_outline(args: argparse.Namespace, command: str = "outline") -> int:
+    res = run_outline(args.media, args.output, args.config, _overrides(args), dry_run=args.dry_run, command=command)
+    _print_outline_result(res)
+    return res.exit_code
+
+
 def _cmd_llm_check(args: argparse.Namespace) -> int:
     from trip_vlog.config import load_config
     from trip_vlog.llm.check import format_table, run_llm_check
@@ -311,6 +372,9 @@ def _cmd_resume(args: argparse.Namespace) -> int:
     if m.get("pipeline") == "transcribe":
         args.limit, args.dry_run = None, False
         return _cmd_transcribe(args, "resume")
+    if m.get("pipeline") == "outline":
+        args.dry_run = False
+        return _cmd_outline(args, "resume")
     res = run_index(args.media, args.output, args.config, _overrides(args), command="resume")
     _print_index_result(res)
     return res.exit_code
@@ -318,11 +382,14 @@ def _cmd_resume(args: argparse.Namespace) -> int:
 
 def _cmd_approve(args: argparse.Namespace) -> int:
     try:
-        ap = approve_plan(args.output)
+        kind, ap = approve_pending(args.output, args.which)
     except ApprovalRefused as e:
         print(f"error: {e}", file=sys.stderr)
         return 4
-    print(f"approved plan {ap['plan_hash'][:12]} (recorded in manifest.json). Continue with: trip-vlog resume --output {args.output}")
+    if kind == "outline":
+        print(f"approved story outline {ap['outline_hash'][:12]} (recorded in manifest.json). Continue with: trip-vlog resume --output {args.output}")
+    else:
+        print(f"approved plan {ap['plan_hash'][:12]} (recorded in manifest.json). Continue with: trip-vlog resume --output {args.output}")
     return 0
 
 
@@ -345,8 +412,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
     print(f"last run  : {m.get('run_id')} ({m.get('command')}) started {m.get('run_started_at')} finished {m.get('run_finished_at') or '-'}")
     print("stages:")
     stages = m.get("stages", {})
-    canonical = ("scan", "probe", "catalog", "thumbnails", "segment", "audio", "transcribe", "analyze", *DRAFT_STAGES[5:])
-    order = ([n for n in canonical if n in stages or (m.get("pipeline") == "draft" and n not in ("analyze", "audio", "transcribe"))]
+    canonical = ("scan", "probe", "catalog", "thumbnails", "segment", "audio", "transcribe", "analyze", "outline", "outline_approval", *DRAFT_STAGES[5:])
+    order = ([n for n in canonical if n in stages or (m.get("pipeline") == "draft" and n not in ("analyze", "audio", "transcribe", "outline", "outline_approval"))]
              + [n for n in stages if n not in canonical])
     for name in order:
         st = stages.get(name, {})
@@ -357,6 +424,9 @@ def _cmd_status(args: argparse.Namespace) -> int:
     ap = m.get("approval")
     if ap:
         print(f"approval  : {ap.get('status')}" + (f" ({ap.get('mode')})" if ap.get("mode") else "") + f" plan {str(ap.get('plan_hash', ''))[:12]}")
+    oap = m.get("outline_approval")
+    if oap:
+        print(f"outline   : {oap.get('status')}" + (f" ({oap.get('mode')})" if oap.get("mode") else "") + f" outline {str(oap.get('outline_hash', ''))[:12]}")
     fc = m.get("filmcraft")
     if fc:
         print(f"filmcraft : {fc.get('version')}  project {fc.get('project')} (v{fc.get('project_version')})  snapshot {fc.get('capability_snapshot')}")
@@ -383,7 +453,10 @@ def _cmd_status(args: argparse.Namespace) -> int:
     unfinished = [n for n in order if n != "resolve_finish" and stages.get(n, {}).get("status", "pending") not in ("succeeded", "partial")
                   and not (stages.get(n, {}).get("decision") == "cache_hit")
                   and not (stages.get(n, {}).get("status") == "skipped" and stages[n].get("summary", {}).get("skipped"))]  # e.g. no speech backend
-    if stages.get("approval", {}).get("status") == "awaiting_approval":
+    if stages.get("outline_approval", {}).get("status") == "awaiting_approval":
+        print(f"next: review plans/story_outline.md (edit plans/story_outline.json if needed), then `trip-vlog approve --output {info['workspace']}` "
+              f"and `trip-vlog resume --output {info['workspace']}`")
+    elif stages.get("approval", {}).get("status") == "awaiting_approval":
         print(f"next: review plans/plan_summary.md, then `trip-vlog approve --output {info['workspace']}` and `trip-vlog resume --output {info['workspace']}`")
     elif unfinished:
         print(f"next: `trip-vlog resume --output {info['workspace']}` (unfinished: {', '.join(unfinished)})")
@@ -399,7 +472,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return {"index": _cmd_index, "status": _cmd_status, "resume": _cmd_resume, "draft": _cmd_draft,
-                "approve": _cmd_approve, "resolve-finish": _cmd_resolve_finish, "analyze": _cmd_analyze, "transcribe": _cmd_transcribe,
+                "approve": _cmd_approve, "outline": _cmd_outline, "resolve-finish": _cmd_resolve_finish, "analyze": _cmd_analyze, "transcribe": _cmd_transcribe,
                 "llm-check": _cmd_llm_check}[args.command](args)
     except ConfigError as e:
         print(f"error: {e}", file=sys.stderr)

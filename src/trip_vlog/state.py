@@ -226,7 +226,7 @@ class StageRunner:
             if waiting:
                 self._waiting.add(name)
                 self._record(name, status=str(Status.SKIPPED), decision="awaiting_approval", error=None)
-                self.logger.event(name, Status.SKIPPED, message="waiting for plan approval")
+                self.logger.event(name, Status.SKIPPED, message="waiting for approval")
                 return Status.SKIPPED
             self._record(name, status=str(Status.SKIPPED), decision="dependency_failed",
                          error=f"dependency failed: {', '.join(blocked)}")
