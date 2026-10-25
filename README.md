@@ -64,6 +64,9 @@ trip-vlog status  --output /path/to/vlog-project [--json]   # every stage incl. 
 
 # Inventory only (Phase 1)
 trip-vlog index --media /path/to/trip-media --output /path/to/vlog-project
+
+# Optional, Resolve Studio only: finish the handoff inside Resolve (see "Finish in Resolve" below)
+trip-vlog resolve-finish --output /path/to/vlog-project [--dry-run] [--project-name NAME] [--keep-on-failure]
 ```
 
 - `--auto-approve` (or `workflow.approval: auto_approve`) skips the stop and records `approval.mode = "automatic"` in `manifest.json`.
@@ -91,7 +94,8 @@ vlog-project/
   plans/          edit_plan.json, plan_summary.md, selection_plan.json, *.schema.json, validation_report.json
   filmcraft/      Trip Vlog Draft_v001.fcproj ..., capability_snapshot.json, command_log.jsonl, execution_journal.json, mapping_report.json
   preview/        draft.mp4, qc_report.json, contact_sheet_timeline.jpg, render_report.json
-  resolve_handoff/  timeline.xml, timeline.otio, media_manifest.csv, edit_plan.json, project_reference.json, handoff_report.md
+  resolve_handoff/  timeline.xml, timeline.otio, media_manifest.csv, edit_plan.json, project_reference.json, handoff_report.md,
+                    resolve_finish_report.json/.md (only after `resolve-finish`)
   logs/           run.jsonl, errors.jsonl
 ```
 
@@ -118,6 +122,28 @@ written and the report says what failed.
 **The report states that Resolve import is unverified** unless a passing `resolve_verification.json` is present. To verify, run `tools/resolve_verify.py`
 on a machine with Resolve open (see [docs/resolve-verification.md](docs/resolve-verification.md)), then `trip-vlog resume` to refresh the report.
 Media references are absolute: moving the package or the media to another machine breaks the links until they are relinked.
+
+### Finish in Resolve (`resolve-finish`, optional, Studio only)
+
+`trip-vlog resolve-finish --output WORKSPACE` runs on your machine with **DaVinci Resolve Studio open** and *External scripting using = Local*
+(Preferences > System > General, then restart Resolve). It uses only Resolve's documented scripting API through an allowlisted, logged wrapper
+(no LLM, no MCP layer, no `eval`/`exec`), after `draft` has completed its handoff:
+
+1. creates a **new** project `<title> (trip-vlog vNNN)` (never reuses, modifies or deletes an existing project) and sets frame rate and resolution from the edit plan;
+2. imports `resolve_handoff/timeline.xml` with a unique timeline name;
+3. repairs media that arrived offline or was misread as an image sequence (`IMG_1042.JPG` becomes `IMG_[1042-1191].JPG` in Resolve) with
+   `MediaPoolItem.ReplaceClip(<path from media_manifest.csv>)`; paths outside the manifest are refused;
+4. adds scene markers that are missing (an existing marker with the same frame and name is not duplicated);
+5. **experimental:** creates the titles of the timeline spec as editable Text+ titles on their track and range; a title that cannot be verified
+   by read-back is rolled back (only items this run created) and listed for manual recreation. The baseline planner emits no titles yet;
+6. reads the timeline back, compares it with the FilmCraft timeline spec and writes `resolve_handoff/resolve_finish_report.json` and `.md`
+   (every API call, repairs, titles, pass/fail table). The new project is always kept and saved.
+
+`--dry-run` prints the planned steps and changes nothing. Exit codes: `0` finished (the report lists titles that need manual work), `1` required
+checks failed, `2` preconditions or arguments (no completed handoff, stale handoff, project name already exists), `3` Resolve scripting unavailable
+(diagnosis printed, including this Python version against what Resolve's `fusionscript` library supports). `trip-vlog status` shows the run.
+It is not part of `draft`; the plain FCP7 XML import remains the supported path without Studio. See
+[docs/resolve-verification.md](docs/resolve-verification.md#resolve-finish) for how to run it on Windows and macOS and what to send back.
 
 ### Phase 1 details (inventory)
 
