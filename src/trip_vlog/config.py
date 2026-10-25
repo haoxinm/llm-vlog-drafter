@@ -382,6 +382,11 @@ class SpeechConfig(_Model):
     enabled: bool = True                 # single source of truth; media.transcribe_speech is a deprecated alias
     backend: Literal["none", "openai_transcriptions", "command"] = "none"
     language: str | None = Field(None, pattern=r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$")   # null -> let the backend detect it
+
+    @field_validator("backend", mode="before")
+    @classmethod
+    def _blank_backend(cls, v: Any) -> Any:
+        return "none" if v is None or (isinstance(v, str) and not v.strip()) else v
     endpoint: SpeechEndpointConfig = Field(default_factory=SpeechEndpointConfig)
     command: SpeechCommandConfig = Field(default_factory=SpeechCommandConfig)
     min_speech_seconds: float = Field(1.0, ge=0, le=3600)   # skip assets with less non-silent audio than this
@@ -485,6 +490,9 @@ class Config(_Model):
     @model_validator(mode="before")
     @classmethod
     def _legacy_media_keys(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            # A section written with no value (`speech:`) means "use the defaults", e.g. no transcription.
+            data = {k: v for k, v in data.items() if v is not None}
         media = data.get("media") if isinstance(data, dict) else None
         if isinstance(media, dict):
             old = sorted(k for k in ("llm_provider", "vision_provider", "llm_model") if k in media)
