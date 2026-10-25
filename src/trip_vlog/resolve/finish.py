@@ -57,7 +57,8 @@ SCHEMA_VERSION = 1
 MARKER_COLOR = "Blue"
 TITLE_ROUTES = (("InsertFusionTitleIntoTimeline", "Text+"), ("InsertTitleIntoTimeline", "Text"))
 TITLE_TEXT_TOOLS = (("FindToolByID", "TextPlus"), ("FindTool", "Template"))
-# API calls observed to work on the user's Resolve Studio 21.1.1.10 (Windows 11) through tools/resolve_verify.py.
+# API calls observed to work on the user's Resolve Studio 21.1.1.10 (Windows 11) through tools/resolve_verify.py and
+# resolve-finish runs.
 PROVEN_CALLS = frozenset({
     "resolve.GetProductName", "resolve.GetVersionString", "resolve.GetVersion", "resolve.GetProjectManager",
     "pm.GetCurrentProject", "pm.GetCurrentFolder", "pm.CreateProject", "project.GetName", "project.SetSetting",
@@ -65,6 +66,7 @@ PROVEN_CALLS = frozenset({
     "mpi.GetClipProperty", "timeline.GetName", "timeline.GetStartFrame", "timeline.GetEndFrame", "timeline.GetSetting",
     "timeline.GetTrackCount", "timeline.GetItemListInTrack", "timeline.GetMarkers", "item.GetName", "item.GetStart",
     "item.GetEnd", "item.GetDuration", "item.GetLeftOffset", "item.GetMediaPoolItem",
+    "pm.SaveProject", "pm.GetProjectListInCurrentFolder", "timeline.GetTrackName",
 })
 
 # Test hook: replace to inject a fake Resolve, ``lambda: (resolve_or_None, info_dict)``.
