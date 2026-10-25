@@ -38,6 +38,15 @@ def out(msg):
     sys.stdout.buffer.flush()
 
 
+def localhost_file_url(path: str) -> str:
+    """``file://localhost/...`` URL of an absolute path, in the form Premiere/FCP7 XML uses on every OS
+    (``file://localhost/C:/dir/x.mp4`` for drive paths, ``file://localhost/dir/x.mp4`` for POSIX paths)."""
+    posix = str(path).replace("\\", "/")
+    if not posix.startswith("/"):
+        posix = "/" + posix
+    return "file://localhost" + urllib.parse.quote(posix, safe="/:")
+
+
 class Fail(Exception):
     pass
 
@@ -263,7 +272,7 @@ class Engine:
                     body.append("<track>")
                     for c in sorted(t["clips"], key=lambda c: c["startFrame"]):
                         item = self.items[c["item"]]
-                        f = f"<file id=\"f{c['item']}\"><pathurl>file://localhost{urllib.parse.quote(item['path'])}</pathurl></file>" if "path" in item else ""
+                        f = f"<file id=\"f{c['item']}\"><pathurl>{localhost_file_url(item['path'])}</pathurl></file>" if "path" in item else ""
                         body.append(f"<clipitem><name>{c['name']}</name><start>{c['startFrame']}</start><end>{c['endFrame']}</end>{f}</clipitem>")
                     body.append("</track>")
                 body.append(f"</{kind}>")

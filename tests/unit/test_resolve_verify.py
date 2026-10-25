@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
+import urllib.parse
+from pathlib import Path, PureWindowsPath
 import sys
-from pathlib import Path
 
 import pytest
 
@@ -553,7 +555,10 @@ def test_make_otio_variants_files(tmp_path):
     base = f.resolve().parent
     exp = rv.normalize_path("../../../tests/fixtures/generated/x.mp4", base, windows=False)
     got = {k: json.loads(p.read_text())["tracks"]["children"][0]["children"][0]["media_references"]["DEFAULT_MEDIA"]["target_url"] for k, p in out.items()}
-    assert got["slash"] == exp and got["file_url"] == "file://" + exp and got["bare"] == exp
+    is_win = re.match(r"^[A-Za-z]:/", exp) is not None  # drive path: file:///C:/x, POSIX path: file:///x
+    exp_url = "file:///" + urllib.parse.quote(exp, safe="/:") if is_win else "file://" + urllib.parse.quote(exp, safe="/")
+    exp_bare = str(PureWindowsPath(exp)) if is_win else exp
+    assert got["slash"] == exp and got["file_url"] == exp_url and got["bare"] == exp_bare
     assert json.loads(f.read_text()) == relative_otio()  # original untouched
     # absolute-only OTIO -> no variants
     doc = synthetic_otio()

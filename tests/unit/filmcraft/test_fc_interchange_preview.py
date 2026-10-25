@@ -178,3 +178,24 @@ def test_render_preview_rejects_bad_targets(fc, tmp_path):
         adapter.render_preview(ws / "preview" / "x.mov")
     with pytest.raises(ParameterError, match="scale"):
         adapter.render_preview(scale=2)
+
+
+@pytest.mark.parametrize("url,expect", [
+    ("file:///C:/Users/me/My%20Media/x.mp4", "C:/Users/me/My Media/x.mp4"),
+    ("file://localhost/C:/Users/me/x.mp4", "C:/Users/me/x.mp4"),
+    ("file://localhost/C%3A/Users/me/x.mp4", "C:/Users/me/x.mp4"),
+    ("FILE://LOCALHOST/c:/x.mp4", "c:/x.mp4"),
+    ("file://srv/share/x.mp4", "//srv/share/x.mp4"),
+    ("file:///home/me/x.mp4", "/home/me/x.mp4"),
+])
+def test_url_to_path_windows_and_posix_forms(url, expect):
+    assert ix.url_to_path(url) == expect
+    assert ix.is_absolute_ref(ix.url_to_path(url))
+
+
+def test_fake_localhost_file_url_is_well_formed_for_windows_and_posix_paths():
+    from fake_filmcraft import localhost_file_url
+    assert localhost_file_url("C:\\Users\\me\\My Media\\x.mp4") == "file://localhost/C:/Users/me/My%20Media/x.mp4"
+    assert localhost_file_url("/home/me/x.mp4") == "file://localhost/home/me/x.mp4"
+    for p in ("C:\\Users\\me\\x.mp4", "/home/me/x.mp4"):
+        assert canon_path(localhost_file_url(p)) == canon_path(p.replace("\\", "/"))
