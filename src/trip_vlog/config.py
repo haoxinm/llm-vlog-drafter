@@ -412,6 +412,16 @@ class SpeechConfig(_Model):
         return self.backend != "openai_transcriptions" or self.endpoint.is_local
 
 
+class PlanningConfig(_Model):
+    """LLM editorial planning (story outline; DESIGN §8.1, §9.5)."""
+
+    max_moments_in_prompt: int = Field(400, ge=1, le=20000)   # more candidate moments than this are pre-selected deterministically
+    transcript_excerpt_chars: int = Field(160, ge=0, le=2000)  # verbatim speech excerpt per moment shown to the story editor (0 = none)
+    cluster_gap_seconds: float = Field(300.0, ge=0, le=86400)  # moments captured closer together than this form one time cluster
+    outline_max_tokens: int = Field(8000, ge=256)             # upper bound on the outline reply (also capped by the endpoint's max_tokens)
+    outline_retries: int = Field(1, ge=0, le=3)               # re-asks with deterministic findings before the outline stage fails
+
+
 class WorkflowConfig(_Model):
     approval: Literal["stop_after_outline", "auto_approve"] = "stop_after_outline"
     planner: Literal["baseline", "llm"] = "baseline"  # "llm" arrives in Phase 3/4 and is rejected until then
@@ -482,6 +492,7 @@ class Config(_Model):
     media: MediaConfig = MediaConfig()
     llm: LLMConfig = Field(default_factory=LLMConfig)
     speech: SpeechConfig = Field(default_factory=SpeechConfig)
+    planning: PlanningConfig = PlanningConfig()
     workflow: WorkflowConfig = WorkflowConfig()
     filmcraft: FilmCraftConfig = FilmCraftConfig()
     qc: QcConfig = QcConfig()

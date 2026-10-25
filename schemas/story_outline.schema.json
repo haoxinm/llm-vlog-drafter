@@ -1,0 +1,168 @@
+{
+  "$id": "https://trip-vlog.local/schemas/story_outline:1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Approved story outline: scenes with roles, budgets and candidate moment IDs. No timeline commands, no timestamps.",
+  "properties": {
+    "hook": {
+      "additionalProperties": false,
+      "properties": {
+        "justification": {
+          "description": "Why this is a real, compelling moment, else null.",
+          "maxLength": 500,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "moment_id": {
+          "description": "The hook moment (also listed in the first scene), else null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "used": {
+          "description": "True when the first scene is a short nonlinear opening hook.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "used",
+        "moment_id",
+        "justification"
+      ],
+      "type": "object"
+    },
+    "missing_coverage": {
+      "description": "Coverage the story needs (or the user asked for) that the catalog lacks.",
+      "items": {
+        "maxLength": 500,
+        "type": "string"
+      },
+      "maxItems": 100,
+      "type": "array"
+    },
+    "premise": {
+      "description": "A short narrative premise grounded in the catalog.",
+      "maxLength": 1500,
+      "type": "string"
+    },
+    "scenes": {
+      "description": "Scenes in story order.",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_moment_ids": {
+            "description": "IDs copied exactly from the catalog, in the order they would be used.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 200,
+            "minItems": 1,
+            "type": "array"
+          },
+          "chronology_note": {
+            "description": "Why the scene is out of chronological order, or null when it is in order.",
+            "maxLength": 500,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "purpose": {
+            "description": "What this scene does for the story, in one or two sentences.",
+            "maxLength": 500,
+            "type": "string"
+          },
+          "role": {
+            "description": "Editorial role of the scene.",
+            "enum": [
+              "opening_hook",
+              "arrival_context",
+              "establishing_place",
+              "activity_action",
+              "personal_reaction",
+              "culture_food",
+              "scenic_breathing_room",
+              "transition",
+              "reflection_ending",
+              "other"
+            ],
+            "type": "string"
+          },
+          "scene_id": {
+            "description": "Stable scene id assigned by code (scene_01, scene_02, ...).",
+            "pattern": "^[A-Za-z0-9_.-]{1,80}$",
+            "type": "string"
+          },
+          "target_duration_seconds": {
+            "description": "Time budget for the scene on the timeline, in seconds.",
+            "exclusiveMinimum": 0,
+            "maximum": 7200,
+            "type": "number"
+          },
+          "title": {
+            "description": "Short working title.",
+            "maxLength": 200,
+            "type": "string"
+          },
+          "tone": {
+            "description": "Emotional tone, a few words.",
+            "maxLength": 200,
+            "type": "string"
+          }
+        },
+        "required": [
+          "scene_id",
+          "role",
+          "title",
+          "purpose",
+          "tone",
+          "target_duration_seconds",
+          "candidate_moment_ids",
+          "chronology_note"
+        ],
+        "type": "object"
+      },
+      "maxItems": 60,
+      "minItems": 1,
+      "type": "array"
+    },
+    "schema_version": {
+      "enum": [
+        "1"
+      ],
+      "type": "string"
+    },
+    "story_mode_used": {
+      "description": "How the scenes are ordered.",
+      "enum": [
+        "chronological",
+        "mostly_chronological",
+        "thematic"
+      ],
+      "type": "string"
+    },
+    "uncertainties": {
+      "description": "Things the user should confirm before the outline is approved.",
+      "items": {
+        "maxLength": 500,
+        "type": "string"
+      },
+      "maxItems": 100,
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "premise",
+    "story_mode_used",
+    "scenes",
+    "hook",
+    "missing_coverage",
+    "uncertainties"
+  ],
+  "title": "story_outline",
+  "type": "object"
+}

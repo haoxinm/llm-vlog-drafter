@@ -67,6 +67,13 @@ speech:                          # optional transcription; backend none = skippe
   # endpoint: {base_url: "http://127.0.0.1:8000", api_key_env: null, model: <model name your server expects>}
   # command: {executable: /path/to/whisper-cli, args: ["-f", "{input}", "-osrt", "-of", "{output_base}"], output_format: srt}
 
+planning:                        # LLM story outline (README "Story outline"); uses llm.text
+  max_moments_in_prompt: 400     # more usable moments than this are pre-selected deterministically before the request
+  transcript_excerpt_chars: 160  # verbatim speech excerpt per moment shown to the story editor (0 = none)
+  cluster_gap_seconds: 300       # moments captured closer together form one time cluster (pre-selection keeps the best of each)
+  outline_max_tokens: 8000       # upper bound on the reply (also capped by the endpoint's max_tokens)
+  outline_retries: 1             # corrected re-asks with the validation findings before the outline stage fails
+
 workflow:
   approval: "stop_after_outline" # stop_after_outline | auto_approve
   planner: "baseline"            # baseline (no LLM); "llm" arrives in Phase 3/4
