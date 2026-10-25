@@ -24,6 +24,9 @@ Requires: python3 stdlib, ffmpeg/ffprobe on PATH, generated fixtures
 Exit status: 0 when every *required* check passed, 1 otherwise, 2 on usage error.
 DaVinci Resolve cannot be run by this script; the Resolve import test is always
 reported as ``pending``.
+
+Cross-platform: pathlib, argument-list subprocesses (no shell), UTF-8 and "\\n" for every file/pipe, binaries found with
+``.exe`` on Windows and app-bundle / Homebrew / Program Files locations on macOS / Windows.  Only Linux has been *run*.
 """
 from __future__ import annotations
 
@@ -58,13 +61,14 @@ class Recorder:
         self.fixtures = fixtures
         self.checks: list[dict] = []
         self.log_path = out / "commands.jsonl"
-        self.log = open(self.log_path, "w", encoding="utf-8")
+        self.log = open(self.log_path, "w", encoding="utf-8", newline="\n")
         self.t0 = time.time()
 
     def sanitize(self, obj):
         text = json.dumps(obj, ensure_ascii=False)
-        for real, token in ((str(self.out), "$OUT"), (str(self.fixtures), "$FIXTURES"), (str(REPO), "$REPO")):
-            text = text.replace(real, token)
+        for real, token in ((self.out, "$OUT"), (self.fixtures, "$FIXTURES"), (REPO, "$REPO")):
+            for v in {str(real), real.as_posix(), str(real).replace("\\", "\\\\")}:
+                text = text.replace(v, token)
         obj = json.loads(text)
         return self._redact(obj)
 
@@ -104,7 +108,7 @@ class Mcp:
         self.rec, self.label, self.next_id = rec, label, 0
         self.proc = subprocess.Popen(
             [binary, "mcp", *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, text=True, bufsize=1,
+            stderr=subprocess.DEVNULL,  # binary pipes: UTF-8 and "\n" on every OS
         )
         self.init = self.rpc("initialize", {
             "protocolVersion": "2025-06-18", "capabilities": {},
@@ -112,7 +116,7 @@ class Mcp:
         self._write({"jsonrpc": "2.0", "method": "notifications/initialized"})
 
     def _write(self, msg):
-        self.proc.stdin.write(json.dumps(msg) + "\n")
+        self.proc.stdin.write((json.dumps(msg) + "\n").encode("utf-8"))
         self.proc.stdin.flush()
 
     def rpc(self, method, params=None):
@@ -124,7 +128,7 @@ class Mcp:
             line = self.proc.stdout.readline()
             if not line:
                 raise McpError("server closed stdout")
-            msg = json.loads(line)
+            msg = json.loads(line.decode("utf-8"))
             if msg.get("id") == rid:
                 self.rec.event(kind="res", session=self.label, method=method, response=msg)
                 if "error" in msg:
@@ -161,7 +165,35 @@ class Mcp:
 
 
 def run(cmd, **kw):
-    return subprocess.run(cmd, capture_output=True, text=True, **kw)
+    """Run an argument list (never a shell string); decode output as UTF-8."""
+    return subprocess.run([str(c) for c in cmd], capture_output=True, text=True, encoding="utf-8", errors="replace", **kw)
+
+
+def canon(p: str) -> str:
+    """Comparable form of a filesystem path: forward slashes, normalised, case-folded on Windows."""
+    if re.match(r"^/[A-Za-z]:[/\\]", p):  # file URL path of a Windows drive: /C:/x
+        p = p[1:]
+    return os.path.normcase(os.path.normpath(p)).replace("\\", "/")
+
+
+def find_filmcraft_cli(explicit: str | None) -> str | None:
+    """--filmcraft-cli, $FILMCRAFT_CLI, PATH, then documented install locations per platform."""
+    exe = "filmcraft-cli.exe" if os.name == "nt" else "filmcraft-cli"
+    cands: list[str | Path | None] = [explicit, os.environ.get("FILMCRAFT_CLI"), shutil.which("filmcraft-cli")]
+    cands += [REPO / "../filmcraft/target/release" / exe, Path.cwd() / "target/release" / exe]
+    if sys.platform == "win32":  # MSI default folder (docs/agents.md); portable zip is user-chosen
+        for env in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+            if os.environ.get(env):
+                cands.append(Path(os.environ[env]) / "FilmCraft" / exe)
+    elif sys.platform == "darwin":  # separate filmcraft-cli zip; Homebrew prefixes; app bundle (CLI not documented there)
+        cands += [f"/opt/homebrew/bin/{exe}", f"/usr/local/bin/{exe}", Path.home() / ".local/bin" / exe,
+                  f"/Applications/FilmCraft.app/Contents/MacOS/{exe}"]
+    else:
+        cands += [f"/usr/bin/{exe}", f"/usr/local/bin/{exe}"]
+    for c in cands:
+        if c and Path(c).is_file():
+            return str(Path(c).resolve())
+    return None
 
 
 def ffprobe(path: Path) -> dict:
@@ -217,12 +249,18 @@ def comparable(sig: dict) -> dict:
 
 
 def file_url_to_path(u: str, base: Path | None = None, note: list | None = None) -> str:
+    return canon(_file_url_to_path(u, base, note))
+
+
+def _file_url_to_path(u: str, base: Path | None = None, note: list | None = None) -> str:
     """Decode a media reference.  FilmCraft writes OTIO ``target_url`` / EDL ``SOURCE FILE`` *relative to the
     exported file's directory* when both share a top-level directory, absolute otherwise (observed)."""
-    if "://" not in u and not u.startswith("/"):
+    if "://" not in u and not u.startswith("/") and not re.match(r"^[A-Za-z]:[/\\]", u):
         if note is not None and "relative media paths" not in note:
             note.append("relative media paths")
         return os.path.normpath(str((base or Path(".")) / urllib.parse.unquote(u)))
+    if "://" not in u:
+        return urllib.parse.unquote(u)
     u = re.sub(r"^file://localhost", "file://", u)
     return urllib.parse.unquote(urllib.parse.urlparse(u).path)
 
@@ -244,7 +282,7 @@ def expected_clips(sig: dict, media_paths: dict[str, str]) -> dict[str, list[dic
 def validate_otio(path: Path, sig: dict, media_paths: dict[str, str]) -> dict:
     res = {"format": "otio", "findings": [], "mismatches": []}
     rel_note: list = []
-    doc = json.loads(path.read_text())
+    doc = json.loads(path.read_text(encoding="utf-8"))
     res["schema"] = doc.get("OTIO_SCHEMA")
     tracks = {t["name"]: t for t in doc["tracks"]["children"]}
     exp = expected_clips(sig, media_paths)
@@ -387,7 +425,7 @@ def tc_to_frames(tc: str, fps=FPS) -> int:
 
 def validate_edl(path: Path, sig: dict, media_paths: dict[str, str]) -> dict:
     res = {"format": "cmx3600_edl", "findings": [], "mismatches": []}
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     events = []
     for ln in text.splitlines():
         m = re.match(r"^(\d{3})\s+(\S+)\s+(\S+)\s+(\S+)\s*(\d*)\s+(\d\d:\d\d:\d\d[:;]\d\d)\s+(\d\d:\d\d:\d\d[:;]\d\d)\s+(\d\d:\d\d:\d\d[:;]\d\d)\s+(\d\d:\d\d:\d\d[:;]\d\d)", ln)
@@ -510,21 +548,22 @@ def main(argv=None) -> int:
     ap.add_argument("--fixtures", default=str(REPO / "tests/fixtures/generated"))
     ap.add_argument("--out", default=str(REPO / "spike/out"))
     args = ap.parse_args(argv)
-    if not args.filmcraft_cli or not Path(args.filmcraft_cli).exists():
-        print("error: --filmcraft-cli (or $FILMCRAFT_CLI) must point at a built filmcraft-cli", file=sys.stderr)
+    args.filmcraft_cli = find_filmcraft_cli(args.filmcraft_cli)
+    if not args.filmcraft_cli:
+        print("error: filmcraft-cli not found; pass --filmcraft-cli, set $FILMCRAFT_CLI, or put it on PATH", file=sys.stderr)
         return 2
     for tool in ("ffmpeg", "ffprobe"):
         if not shutil.which(tool):
             print(f"error: {tool} not on PATH", file=sys.stderr)
             return 2
-    binary = str(Path(args.filmcraft_cli).resolve())
+    binary = args.filmcraft_cli
     out = Path(args.out).resolve()
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True)
     fx = Path(args.fixtures).resolve()
     if not (fx / "landscape_5s.mp4").exists():
-        run(["bash", str(REPO / "tests/fixtures/make_fixtures.sh"), str(fx)])
+        run([sys.executable, REPO / "tests/fixtures/make_fixtures.py", fx])
     rec = Recorder(out, fx)
     snap: dict = {"schema": "phase0.capability_snapshot.v1", "required_checks_failed": []}
     chk = rec.check
@@ -548,12 +587,12 @@ def main(argv=None) -> int:
     chk("CLI `commands --json` lists engine commands", len(catalog) > 100, len(catalog))
     ids = {c["id"]: c for c in catalog}
     snap["command_catalog"] = {"count": len(catalog), "required": {k: {v: ids[v]["params"] for v in vs if v in ids} for k, vs in REQUIRED_COMMANDS.items()}}
-    (out / "command_catalog.json").write_text(json.dumps(catalog, indent=1))
+    (out / "command_catalog.json").write_text(json.dumps(catalog, indent=1), encoding="utf-8", newline="\n")
 
     mcp = Mcp(binary, rec, label="build")
     snap["mcp"] = {"initialize": mcp.init}
     tools = mcp.rpc("tools/list")["tools"]
-    (out / "mcp_tools.json").write_text(json.dumps(tools, indent=2))
+    (out / "mcp_tools.json").write_text(json.dumps(tools, indent=2), encoding="utf-8", newline="\n")
     snap["mcp"]["tools"] = [t["name"] for t in tools]
     chk("MCP initialize + tools/list handshake", len(tools) >= 5 and "command_run" in snap["mcp"]["tools"], snap["mcp"]["tools"])
     ok, mcp_cmds = mcp.tool("command_list")
@@ -579,7 +618,7 @@ def main(argv=None) -> int:
     chk("import 5 media files (media_import)", ok and not r.get("errors") and len(r.get("items", [])) == 5, r)
     capability("import_media", "media_import {paths}", ok and len(r.get("items", [])) == 5, r)
     item = dict(zip(media, r["items"]))
-    media_paths = {p.name: str(p) for p in media.values()}
+    media_paths = {p.name: canon(str(p)) for p in media.values()}
     ok, proj = mcp.tool("project_inspect")
     pitems = {c["name"]: c for c in proj["root"]["children"]}
     snap["imported_items"] = {n: {"item": c["item"], "type": c["type"], "duration_ticks": c["duration"],
@@ -707,10 +746,10 @@ def main(argv=None) -> int:
     ok, r = mcp.cmd("file.saveAs", {"path": str(proj_path)})
     chk("save project (.fcproj) (file.saveAs)", ok and proj_path.exists(), r)
     capability("save_project", "command_run file.saveAs", ok and proj_path.exists(), r)
-    doc = json.loads(proj_path.read_text())
+    doc = json.loads(proj_path.read_text(encoding="utf-8"))
     snap["fcproj"] = {"format": doc.get("format"), "schema_version": doc.get("schema_version"), "generator": doc.get("generator"),
                       "top_level_keys": list(doc), "project_keys": list(doc["project"]), "bytes": proj_path.stat().st_size,
-                      "media_referenced_by_path": str(fx) in proj_path.read_text()}
+                      "media_referenced_by_path": json.dumps(str(fx))[1:-1] in proj_path.read_text(encoding="utf-8")}
     chk(".fcproj is JSON with format=filmcraft.project and a schema_version", doc.get("format") == "filmcraft.project" and isinstance(doc.get("schema_version"), int), snap["fcproj"])
     sig_saved = timeline_signature(mcp)
     mcp.close()
@@ -870,7 +909,7 @@ def main(argv=None) -> int:
     snap["summary"] = {"checks": len(rec.checks), "passed": sum(c["ok"] for c in rec.checks),
                        "required_failed": len(snap["required_checks_failed"]), "warnings": len(snap["warnings"]),
                        "wall_seconds": round(time.time() - rec.t0, 1)}
-    (out / "capability_snapshot.json").write_text(json.dumps(rec.sanitize(snap), indent=2, ensure_ascii=False))
+    (out / "capability_snapshot.json").write_text(json.dumps(rec.sanitize(snap), indent=2, ensure_ascii=False), encoding="utf-8", newline="\n")
     rec.log.close()
     print(f"\n{snap['summary']}")
     print(f"outputs: {out}")

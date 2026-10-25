@@ -556,7 +556,7 @@
     }
   ],
   "render": {
-    "seconds_to_render": 13.6,
+    "seconds_to_render": 14.6,
     "result": {
       "cancel": "jobs.cancel",
       "job": 1,
@@ -567,8 +567,8 @@
         "bytes": 4368276,
         "frames": 195,
         "path": "$OUT/preview.mp4",
-        "render_fps": 14.488219431814505,
-        "seconds": 13.459210838
+        "render_fps": 13.370903562823772,
+        "seconds": 14.583905948
       }
     },
     "ffprobe": {
@@ -1493,7 +1493,7 @@
       "evidence": {
         "backup": null,
         "bytes": 13745,
-        "ms": 2.2700519999999997,
+        "ms": 2.4817419999999997,
         "path": "$OUT/phase0.fcproj"
       },
       "commands_in_catalog": {
@@ -2044,7 +2044,7 @@
       "detail": {
         "backup": null,
         "bytes": 13745,
-        "ms": 2.2700519999999997,
+        "ms": 2.4817419999999997,
         "path": "$OUT/phase0.fcproj"
       }
     },
@@ -2162,8 +2162,8 @@
           "bytes": 4368276,
           "frames": 195,
           "path": "$OUT/preview.mp4",
-          "render_fps": 14.488219431814505,
-          "seconds": 13.459210838
+          "render_fps": 13.370903562823772,
+          "seconds": 14.583905948
         }
       }
     },
@@ -2512,6 +2512,6 @@
     "passed": 58,
     "required_failed": 0,
     "warnings": 1,
-    "wall_seconds": 14.5
+    "wall_seconds": 15.7
   }
 }

@@ -25,7 +25,7 @@ git clone --depth 1 https://github.com/storytold/filmcraft && cd filmcraft
 cargo build --release -p filmcraft-cli                      # -> target/release/filmcraft-cli
 cd ../llm-vlog-drafter
 python3 spike/phase0_filmcraft_spike.py --filmcraft-cli /path/to/filmcraft-cli --filmcraft-src /path/to/filmcraft
-# (generates fixtures via tests/fixtures/make_fixtures.sh if missing; outputs in spike/out/, git-ignored)
+# (generates fixtures via tests/fixtures/make_fixtures.py if missing; outputs in spike/out/, git-ignored)
 ```
 
 ## 2. Discovered interfaces
@@ -152,8 +152,29 @@ Expected timeline: 1920x1080 30 fps, 195 frames (6 s 15 f); V1 landscape (src 0:
 4. Save screenshots of the Edit page and the import log for each format, and send them back with the Resolve version/edition.
 5. Pass criterion for the pipeline: one format imports with correct order/in/out/duration/fps and online media; transitions and markers are bonus; titles are expected to fail.
 
-## 9. Files
+## 9. Windows and macOS (DESIGN.md 22.1)
+
+**Verified only on Linux in this spike.** Nothing below was run on Windows or macOS.
+
+Documented by FilmCraft (README "Get started"/installation tables, `docs/releasing.md`, `packaging/`, `.github/workflows/`):
+
+| Platform | Documented builds | Notes |
+|---|---|---|
+| Windows | x64, x86 and ARM64: `filmcraft-<v>-windows-<arch>.msi` and `-portable.zip` (code-signed; built with `+crt-static`, no VC++ redistributable) | MSI installs to `C:\Program Files\FilmCraft\` including `filmcraft-cli.exe` (not on `PATH`, `docs/agents.md`); `windows-arm64.yml` installs the ARM64 MSI on a Windows 11 ARM64 runner and runs `filmcraft-cli --version`. GUI draws via Vulkan/DX12 (`WGPU_BACKEND` override). Logs in `%APPDATA%\FilmCraft\Logs` |
+| macOS | App `filmcraft-<v>-macos-universal.dmg` and **separate** CLI `filmcraft-cli-<v>-macos-universal.zip` (Apple silicon + Intel, signed and notarized) | The `.app` holds only the desktop app, so the headless MCP/CLI must come from the zip (or a source build). Not on Homebrew as far as the docs say |
+| Linux | AppImage, Flatpak, deb, rpm, tar.gz for x86_64 and aarch64; riscv64 tarball | deb/rpm put the CLI at `/usr/bin/filmcraft-cli` |
+
+Caveats: the README says Windows and Linux get "far less testing than macOS" and hardware decode/encode differs per OS (VideoToolbox, Media Foundation, VA-API, NVENC);
+`docs/gaps.md` lists Windows/Linux run-time behaviour as an open gap (G9). The repo's own `ci.yml` delegates to a shared workflow in another repository, so which OSes
+its test gate covers is **not visible** from the checkout; `release.yml` / `docs/releasing.md` show macOS and Windows runners for packaging. Whether the headless `mcp` mode behaves
+identically on Windows/macOS (path forms, `file://` URL style, relative-path rule in OTIO/EDL, `file.exportMedia` presets) is **untested** -- the spike must be re-run there and the snapshot compared.
+
+Spike portability: `spike/phase0_filmcraft_spike.py` uses `pathlib`, argument-list subprocesses (no shell), binary pipes with UTF-8 and `\n`, normalises Windows drive-letter `file:///C:/...` paths for
+comparison, and discovers `filmcraft-cli` (`.exe` on Windows) via `--filmcraft-cli`, `$FILMCRAFT_CLI`, `PATH`, a sibling source build, `Program Files\FilmCraft`, Homebrew prefixes
+and `/usr/bin`. `tests/fixtures/make_fixtures.py` is the cross-platform fixture generator (`make_fixtures.sh` remains as a POSIX convenience). Windows/macOS code paths are unexecuted.
+
+## 10. Files
 
 * `spike/phase0_filmcraft_spike.py` -- end-to-end spike (stdlib; optional otio/xmllint); `--filmcraft-cli`, `--filmcraft-src`, `--fixtures`, `--out`; exit 0 / 1 (required check failed) / 2 (usage).
-* `tests/fixtures/make_fixtures.sh` -- ffmpeg fixtures (5 s 1080p30 landscape + tone, 4 s 1080x1920 portrait, 1080p PNG, 6 s wav and m4a); output git-ignored.
+* `tests/fixtures/make_fixtures.py` (and `.sh`) -- ffmpeg fixtures (5 s 1080p30 landscape + tone, 4 s 1080x1920 portrait, 1080p PNG, 6 s wav and m4a); output git-ignored.
 * `docs/phase0/capability_snapshot.json`, `docs/phase0/mcp_tools.json` -- evidence. Spike run output (`commands.jsonl` sanitized log, exports, preview) goes to `spike/out/` (git-ignored).
