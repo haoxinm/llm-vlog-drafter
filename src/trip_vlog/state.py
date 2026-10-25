@@ -159,6 +159,7 @@ class Stage:
     deps: tuple[str, ...] = ()
     inputs: Callable[[Any], Any] | None = None  # JSON-able description of inputs; hashed for skip decisions
     always_run: bool = False  # cheap detection stages (e.g. scan) that must see the current disk state
+    verify: Callable[[Any], bool] | None = None  # extra cache-hit condition (e.g. the artifact still exists on disk)
 
 
 class StageRunner:
@@ -173,15 +174,17 @@ class StageRunner:
         self.manifest, self.logger, self.ctx = manifest, logger, ctx
         self._stages: dict[str, Stage] = {}
         self._blocked: set[str] = set()
+        self._waiting: set[str] = set()
 
     def register(self, name: str, fn: Callable[[Any], StageResult], *, deps: tuple[str, ...] = (),
-                 inputs: Callable[[Any], Any] | None = None, always_run: bool = False) -> None:
+                 inputs: Callable[[Any], Any] | None = None, always_run: bool = False,
+                 verify: Callable[[Any], bool] | None = None) -> None:
         if name in self._stages:
             raise ValueError(f"stage already registered: {name}")
         for d in deps:
             if d not in self._stages:
                 raise ValueError(f"stage {name!r} depends on unregistered stage {d!r}")
-        self._stages[name] = Stage(name, fn, tuple(deps), inputs, always_run)
+        self._stages[name] = Stage(name, fn, tuple(deps), inputs, always_run, verify)
 
     @property
     def names(self) -> list[str]:
@@ -195,6 +198,12 @@ class StageRunner:
             results[stage.name] = self._run_one(stage, results, force)
         return results
 
+    def _verified(self, stage: Stage) -> bool:
+        try:
+            return bool(stage.verify(self.ctx))  # type: ignore[misc]
+        except Exception:  # noqa: BLE001 - cannot confirm the artifact: run the stage
+            return False
+
     def _record(self, name: str, **kw: Any) -> None:
         entry = self.manifest.stages.setdefault(name, {})
         entry.update(kw)
@@ -202,9 +211,15 @@ class StageRunner:
 
     def _run_one(self, stage: Stage, results: dict[str, Status], force: bool) -> Status:
         name = stage.name
-        blocked = [d for d in stage.deps if results.get(d) == Status.FAILED or d in self._blocked]
+        blocked = [d for d in stage.deps if results.get(d) in (Status.FAILED, Status.AWAITING_APPROVAL) or d in self._blocked]
         if blocked:
             self._blocked.add(name)
+            waiting = any(results.get(d) == Status.AWAITING_APPROVAL or d in self._waiting for d in blocked)
+            if waiting:
+                self._waiting.add(name)
+                self._record(name, status=str(Status.SKIPPED), decision="awaiting_approval", error=None)
+                self.logger.event(name, Status.SKIPPED, message="waiting for plan approval")
+                return Status.SKIPPED
             self._record(name, status=str(Status.SKIPPED), decision="dependency_failed",
                          error=f"dependency failed: {', '.join(blocked)}")
             self.logger.event(name, Status.SKIPPED, message=f"dependency failed: {', '.join(blocked)}")
@@ -217,7 +232,8 @@ class StageRunner:
                 self.logger.event(name, Status.RUNNING, message=f"input hash unavailable: {e}")
         prev = self.manifest.stage(name)
         if (not force and not stage.always_run and input_hash is not None and prev.get("status") == Status.SUCCEEDED
-                and prev.get("input_hash") == input_hash):
+                and prev.get("input_hash") == input_hash
+                and (stage.verify is None or self._verified(stage))):
             self._record(name, decision="cache_hit", last_checked_at=utc_now_iso())
             self.logger.event(name, Status.SKIPPED, cache="hit", message="inputs unchanged")
             return Status.SKIPPED

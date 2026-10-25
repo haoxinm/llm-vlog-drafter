@@ -13,6 +13,8 @@ project:
   music_policy: "user_supplied_only"   # none | user_supplied_only
   preserve_natural_audio: true
   target_loudness_lufs: null
+  duration_tolerance_pct: 5      # total duration may differ from the target by max(5%, 2 s)
+  duration_tolerance_seconds: 2
 
 editorial:
   must_include: []
@@ -46,11 +48,17 @@ media:
   thumbnail_max_side: 480
   contact_sheet_frames: 6        # frames per video contact sheet (0 = off)
   export_gps: false              # GPS is private; keep it out of JSONL exports
+  # Phase 2 segmentation / baseline planning
+  segment_min_seconds: 1.5       # shorter candidate segments are merged with a neighbour
+  scene_threshold: 0.30          # ffmpeg scene-cut score
+  silence_threshold_db: -35      # audio below this level counts as silence
+  still_duration_seconds: 3.0    # default on-screen time of a photo
 
 workflow:
   approval: "stop_after_outline" # stop_after_outline | auto_approve
+  planner: "baseline"            # baseline (no LLM); "llm" arrives in Phase 3/4
 
-filmcraft:                       # not used until Phase 2
+filmcraft:
   mode: "mcp"                    # mcp | cli | bridge
   executable: null
   control_host: "127.0.0.1"
@@ -58,7 +66,20 @@ filmcraft:                       # not used until Phase 2
   project_name: "Trip Vlog Draft"
   sequence_name: "Main Draft"
   prefer_native_project: true
-  interchange_formats: ["otio", "fcp7_xml"]
+  interchange_formats: ["fcp7_xml", "otio"]   # fcp7_xml primary, otio secondary; fcpxml/edl/aaf crashed or froze Resolve 21.1
+  request_timeout_seconds: 120   # per FilmCraft command
+  preview_scale: 1.0             # 1.0 = full size; e.g. 0.5 renders a smaller draft
+  handle_policy: "error"         # dissolve without source handles: error | cut (downgrade, recorded)
+  ambient_low_gain_db: -12       # gain applied to clips with audio_policy "ambient_low"
+
+qc:
+  min_still_seconds: 1.5
+  black_min_seconds: 0.5
+  black_picture_threshold: 0.98
+  black_pixel_threshold: 0.10
+  contact_sheet_columns: 4
+  contact_sheet_max_frames: 48
+  contact_sheet_tile_width: 320
 
 outputs:                         # relative to the output workspace
   project_file: "filmcraft/TripVlog.fcproj"

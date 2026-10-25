@@ -20,6 +20,7 @@ class Status(StrEnum):
     PARTIAL = "partial"
     FAILED = "failed"
     SKIPPED = "skipped"
+    AWAITING_APPROVAL = "awaiting_approval"
 
 
 MASK = "***"

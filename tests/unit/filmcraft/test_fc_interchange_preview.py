@@ -90,7 +90,7 @@ def test_export_through_fake_rewrites_validates_and_reports_losses(fc, monkeypat
     spec = fcsupport.sample_spec(media)
     adapter.build_project(spec)
     rep = adapter.export_interchange(spec=spec)
-    assert [f.format for f in rep.formats] == ["otio", "fcp7_xml"] and rep.ok
+    assert [f.format for f in rep.formats] == ["fcp7_xml", "otio"] and rep.ok
     otio = next(f for f in rep.formats if f.format == "otio")
     assert otio.role == "primary" and otio.postprocess and otio.engine_report and any("Titles are not carried" in l for l in otio.loses)
     assert Path(otio.path) == ws / "resolve_handoff" / "timeline.otio"

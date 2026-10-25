@@ -42,6 +42,9 @@ class ProjectConfig(_Model):
     music_policy: Literal["none", "user_supplied_only"] = "user_supplied_only"
     preserve_natural_audio: bool = True
     target_loudness_lufs: float | None = Field(None, ge=-70, le=0)
+    # total duration may differ from the target by max(pct% of target, seconds); used by plan validation and QC
+    duration_tolerance_pct: float = Field(5.0, ge=0, le=100)
+    duration_tolerance_seconds: float = Field(2.0, ge=0, le=600)
 
     @field_validator("aspect_ratio")
     @classmethod
@@ -99,6 +102,11 @@ class MediaConfig(_Model):
     thumbnail_max_side: int = Field(480, ge=64, le=2048)
     contact_sheet_frames: int = Field(6, ge=0, le=16)  # 0 disables per-video sheets
     export_gps: bool = False  # GPS is private: kept in SQLite, omitted from JSONL exports unless true
+    # Phase 2 deterministic segmentation / baseline planning
+    segment_min_seconds: float = Field(1.5, gt=0, le=60)       # shorter candidate segments are merged with a neighbour
+    scene_threshold: float = Field(0.30, gt=0, lt=1)           # ffmpeg scene-cut score
+    silence_threshold_db: float = Field(-35.0, ge=-120, le=0)  # audio below this level counts as silence
+    still_duration_seconds: float = Field(3.0, gt=0, le=600)   # default on-screen time of a photo
 
     @model_validator(mode="after")
     def _check(self) -> "MediaConfig":
@@ -113,6 +121,7 @@ class MediaConfig(_Model):
 
 class WorkflowConfig(_Model):
     approval: Literal["stop_after_outline", "auto_approve"] = "stop_after_outline"
+    planner: Literal["baseline", "llm"] = "baseline"  # "llm" arrives in Phase 3/4 and is rejected until then
 
 
 class FilmCraftConfig(_Model):
@@ -123,7 +132,13 @@ class FilmCraftConfig(_Model):
     project_name: str = "Trip Vlog Draft"
     sequence_name: str = "Main Draft"
     prefer_native_project: bool = True
-    interchange_formats: list[Literal["otio", "fcp7_xml"]] = ["otio", "fcp7_xml"]
+    # FCP7 XML is the primary handoff format (imported cleanly in Resolve 21.1 with the Phase 0 fixture), OTIO secondary.
+    # fcpxml/edl/aaf are accepted only when named explicitly: they crashed, froze or could not be opened in Resolve 21.1.
+    interchange_formats: list[Literal["fcp7_xml", "otio", "fcpxml", "edl", "aaf"]] = ["fcp7_xml", "otio"]
+    request_timeout_seconds: float = Field(120.0, gt=0, le=3600)  # per FilmCraft command (renders get a longer budget)
+    preview_scale: float = Field(1.0, gt=0, le=1)                  # 1.0 = full sequence size; <1 renders a smaller draft
+    handle_policy: Literal["error", "cut"] = "error"               # dissolve without source handles: fail, or downgrade to a recorded cut
+    ambient_low_gain_db: float = Field(-12.0, ge=-60, le=0)        # gain of clips whose audio_policy is "ambient_low"
 
     @field_validator("control_host")
     @classmethod
@@ -131,6 +146,16 @@ class FilmCraftConfig(_Model):
         if v.lower() not in LOOPBACK_HOSTS:
             raise ValueError("control_host must be a loopback address (127.0.0.1, ::1, localhost)")
         return v
+
+
+class QcConfig(_Model):
+    min_still_seconds: float = Field(1.5, gt=0, le=60)       # stills shorter than this fail QC
+    black_min_seconds: float = Field(0.5, gt=0, le=60)       # blackdetect: minimum black run to report
+    black_picture_threshold: float = Field(0.98, gt=0, le=1)  # blackdetect pic_th
+    black_pixel_threshold: float = Field(0.10, ge=0, lt=1)    # blackdetect pix_th
+    contact_sheet_columns: int = Field(4, ge=1, le=12)
+    contact_sheet_max_frames: int = Field(48, ge=2, le=200)
+    contact_sheet_tile_width: int = Field(320, ge=64, le=1280)
 
 
 class OutputsConfig(_Model):
@@ -164,6 +189,7 @@ class Config(_Model):
     media: MediaConfig = MediaConfig()
     workflow: WorkflowConfig = WorkflowConfig()
     filmcraft: FilmCraftConfig = FilmCraftConfig()
+    qc: QcConfig = QcConfig()
     outputs: OutputsConfig = OutputsConfig()
 
     def to_dict(self) -> dict[str, Any]:

@@ -211,8 +211,10 @@ def test_cli_index_status_resume_draft(media_dir, workspace, capsys):
     assert json.loads(capsys.readouterr().out)["catalog"]["assets_present"] == 5
     assert main(["resume", "--output", str(workspace)]) == 0  # media root comes from the manifest
     assert "probe       skipped" in capsys.readouterr().out
-    assert main(["draft", "--media", str(media_dir), "--output", str(workspace), "--duration", "90", "--aspect", "9:16"]) == 0
-    assert "Phase 2" in capsys.readouterr().out
+    # draft runs the whole pipeline; 90 s is far more than the fixtures hold, so the plan stage fails and nothing reaches FilmCraft
+    assert main(["draft", "--media", str(media_dir), "--output", str(workspace), "--duration", "90", "--aspect", "9:16"]) == 1
+    out = capsys.readouterr().out
+    assert "plan" in out and "failed" in out and not list(workspace.rglob("*.fcproj"))
     assert "target_duration_seconds: 90" in (workspace / "project.yaml").read_text(encoding="utf-8")
     assert main(["status", "--output", str(workspace / "nowhere")]) == 2
 

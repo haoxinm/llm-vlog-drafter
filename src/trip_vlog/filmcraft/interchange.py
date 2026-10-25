@@ -69,7 +69,7 @@ FORMAT_ALIASES = {"xml": "fcp7_xml", "fcp7": "fcp7_xml", "fcpxml": "fcpxml", "ot
                   "fcp7_xml": "fcp7_xml"}
 GLOBAL_LIMITS = (
     "No interchange format carries editable titles; recreate them in Resolve from the title list below (or use the preview MP4).",
-    "Resolve import has not been verified by this tool; run `trip-vlog verify-resolve` on a machine with Resolve to confirm fidelity.",
+    "Resolve import has not been verified by this tool; run `python tools/resolve_verify.py` on a machine with Resolve to confirm fidelity.",
     "Media is referenced by absolute path: keep the original media at the same location (or relink).",
 )
 
