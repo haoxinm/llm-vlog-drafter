@@ -6,6 +6,16 @@
 coherent, editable first-draft vlog using FilmCraft, then hand the
 project to a human for finishing in DaVinci Resolve.
 
+**Revision 1.1 (approved changes):** early deterministic end-to-end slice
+(§20); LLM selects moments while code computes exact source ranges (§8.3,
+§10); deterministic candidate-moment segmentation with vision labeling
+(§7.2); configurable vision sampling defaulting to 1 fps (§4.1, §7.2);
+path-based asset IDs with content-fingerprint versions (§6.1); SQLite as
+the single catalog store (§5.1, §6); default LLM provider plus
+record/replay provider (§22, §19); explicit approval stop after the
+outline (§9.5); handoff fallback from FilmCraft read-back state and a
+user-run Resolve verification script (§15).
+
 ------------------------------------------------------------------------
 
 ## 1. Executive summary
@@ -224,14 +234,20 @@ editorial:
 media:
   recursive: true
   follow_symlinks: false
-  hash_files: true
+  fingerprint: "fast"            # fast | sha256
   proxy_policy: "on_demand"
-  frame_sampling_seconds: 2.0
-  fine_sampling_seconds: 0.5
+  vision_sampling_fps: 1.0       # frames per second sent to the vision model
+  fine_sampling_fps: 4.0         # optional dense pass for boundary refinement
+  fine_sampling_enabled: false
+  segment_window_seconds: 6.0    # max length of a deterministic candidate segment
   transcribe_speech: true
-  vision_provider: "configured_by_user"
-  llm_provider: "configured_by_user"
+  vision_provider: "anthropic"   # anthropic | replay | <other adapter>
+  llm_provider: "anthropic"      # anthropic | replay | <other adapter>
+  llm_model: null                # set via config or env; never hard-coded
   local_only: false
+
+workflow:
+  approval: "stop_after_outline" # stop_after_outline | auto_approve
 
 filmcraft:
   mode: "mcp"
@@ -332,8 +348,12 @@ skipped.
 4.  **Media analyzer** --- creates thumbnails/contact sheets, detects
     scenes, extracts audio, transcribes speech, and requests visual
     descriptions.
-5.  **Catalog store** --- SQLite or JSONL plus image artifacts; stable
-    IDs and source provenance.
+5.  **Catalog store** --- SQLite (`media_index/catalog.sqlite`) is the
+    single source of truth for assets, segments, moments, transcripts,
+    and analysis cache entries, with stable IDs and source provenance.
+    JSONL files (`assets.jsonl`, `moments.jsonl`, `transcripts.jsonl`)
+    are human-readable exports regenerated from SQLite and are never
+    read back as authoritative input.
 6.  **LLM gateway** --- provider-neutral interface for structured
     outputs, retries, token budgeting, and schema validation.
 7.  **Editorial planner** --- creates outline and edit plan from catalog
@@ -364,10 +384,10 @@ vlog-project/
   manifest.json
   README.md
   media_index/
-    assets.jsonl
-    moments.jsonl
-    transcripts.jsonl
-    analysis_cache.sqlite
+    catalog.sqlite          # authoritative catalog + analysis cache
+    assets.jsonl            # export (read-only view)
+    moments.jsonl           # export (read-only view)
+    transcripts.jsonl       # export (read-only view)
     contact_sheets/
     thumbnails/
     proxies/
@@ -401,17 +421,27 @@ source files and optionally generate proxies.
 
 ### 6.1 Stable IDs
 
--   `asset_id`: stable ID derived from a normalized relative path plus a
-    content hash (or another documented collision-resistant strategy).
-    Do not use bare filenames as IDs.
+-   `asset_id`: stable ID derived from the normalized relative path
+    (POSIX separators, Unicode NFC) under the media root, e.g.
+    `asset_` + first 16 hex chars of SHA-256 of that path. Do not use
+    bare filenames as IDs. The ID survives an in-place content change so
+    existing plans keep resolving.
+-   `content_version`: a content fingerprint stored alongside the asset.
+    Default `fast` = SHA-256 over (file size, mtime, first 4 MiB, last
+    4 MiB); `sha256` = full-file hash. A changed fingerprint marks the
+    asset's analysis stale and flags plans that reference it for
+    revalidation; it does not change `asset_id`.
+-   A file whose fingerprint matches a previously indexed asset at a
+    different path is reported as a probable move/duplicate; it is not
+    silently merged.
 -   `moment_id`: stable ID for a candidate interval within an asset.
 -   `scene_id`: stable ID for an editorial scene.
 -   `clip_instance_id`: unique ID for one use of an asset/moment in the
     timeline. The same source can appear more than once intentionally.
 -   Keep source path, source hash, file size, modification time, and
     metadata in the manifest.
--   Detect a changed file by hash or configured fast fingerprint;
-    invalidate only dependent cached analysis.
+-   Detect a changed file by its `content_version`; invalidate only
+    dependent cached analysis.
 -   Never infer a missing source from a similar filename.
 
 ### 6.2 Asset record
@@ -421,7 +451,8 @@ source files and optionally generate proxies.
   "asset_id": "asset_...",
   "relative_path": "day-02/IMG_1042.MOV",
   "media_type": "video",
-  "sha256": "...",
+  "content_version": "fast:...",
+  "sha256": null,
   "duration_seconds": 42.4,
   "width": 3840,
   "height": 2160,
@@ -478,7 +509,8 @@ phrase was identified unless there is evidence.
 -   Skip hidden/system files and unsupported formats with a report.
 -   Do not follow symlinks by default.
 -   Never overwrite originals.
--   Compute content hashes when enabled.
+-   Compute the configured content fingerprint (fast by default, full
+    SHA-256 when enabled).
 -   Probe metadata with FFprobe or an equivalent reliable tool.
 -   Handle corrupt, variable-frame-rate, rotated, HDR, high-frame-rate,
     and phone-recorded clips gracefully.
@@ -487,17 +519,30 @@ phrase was identified unless there is evidence.
 
 ### 7.2 Frame and scene analysis
 
-Use a coarse-to-fine strategy:
+Candidate moments are found deterministically; the vision model labels
+and scores them rather than discovering intervals itself:
 
-1.  Extract a low-resolution thumbnail near the midpoint and sample at a
-    configurable interval.
-2.  Detect scene boundaries where practical; do not assume every scene
-    cut is a new editorial moment.
-3.  Create contact sheets with asset ID, timestamp, and thumbnail.
-4.  Let a vision model describe sampled frames and propose candidate
-    intervals.
-5.  For promising moments, sample more densely and inspect adjacent
-    frames to find the true start/end.
+1.  Extract a low-resolution thumbnail near the midpoint of each asset.
+2.  **Deterministic segmentation:** split each video into candidate
+    segments using scene-cut detection (e.g. FFmpeg scene score or
+    PySceneDetect), audio-energy changes (onsets, silence boundaries),
+    and a maximum window length (`segment_window_seconds`). Segments
+    shorter than a minimum usable length are merged with a neighbour.
+    Each segment gets a stable `segment_id` derived from `asset_id` and
+    its frame-rounded bounds. Do not assume every scene cut is a new
+    editorial moment.
+3.  Sample frames at `vision_sampling_fps` (default 1 fps,
+    configurable) within each segment, and create contact sheets with
+    asset ID, segment ID, timestamp, and thumbnail.
+4.  **Vision labeling:** the vision model receives segments (contact
+    sheets or individual frames) and returns, per segment, a grounded
+    description, tags, quality/interest scores, and optionally a
+    sub-range *expressed as sampled-frame indices* it considers the best
+    part. Code converts those indices to seconds. Labeled segments become
+    candidate moments (`moment_id`).
+5.  **Optional refinement:** when `fine_sampling_enabled`, sample more
+    densely (`fine_sampling_fps`) around boundaries of high-scoring
+    moments to tighten start/end. Off by default for cost.
 6.  Preserve the sampled timestamp and evidence artifact for each
     description.
 
@@ -585,7 +630,25 @@ centerpiece.
 
 ### 8.3 Phase C: exact edit plan
 
-Generate a structured plan containing: - Sequence settings. - Scene
+The LLM produces a **selection plan**; code resolves it into an exact
+**edit plan**. The LLM never writes source timestamps.
+
+Selection plan (LLM output) per clip instance: `moment_id`,
+`target_duration_seconds`, `anchor` (`start` | `center` | `end` |
+`best` — where within the moment to take the cut), track role, audio
+policy, transition intent, and rationale.
+
+The **plan resolver** (deterministic code) then computes for each clip
+the exact `source_in_seconds`/`source_out_seconds` inside the moment
+bounds (clamping to the moment and asset duration, using the moment's
+`best` sub-range when `anchor=best`), rounds to the sequence frame rate
+with rational arithmetic, computes timeline positions from frame counts,
+and records every clamp or shortfall as a resolver note. If a moment is
+shorter than the requested duration, the resolver uses the whole moment
+and reports the shortfall rather than extending beyond the moment
+without consent.
+
+The resolved edit plan contains: - Sequence settings. - Scene
 order and target durations. - Clip instances with source asset ID,
 source in/out, target track, and intended order. - Still-image duration
 and optional motion. - Audio source ranges and mixing intent. -
@@ -628,12 +691,13 @@ buried in orchestration code.
 
 ### 9.3 Timeline planner system prompt
 
-> Convert the approved outline into a precise application-independent
-> edit plan. Use only supplied asset and moment IDs. Source times are
-> measured in seconds relative to the original asset. Enforce
-> `source_out > source_in`, keep all ranges inside source duration, and
-> keep the total target duration within tolerance. Keep timeline order
-> separate from source time. Use conservative transitions and preserve
+> Convert the approved outline into an application-independent
+> selection plan. Use only supplied moment IDs. For each clip choose a
+> moment, a target duration in seconds, and an anchor (start, center,
+> end, or best) within that moment; do not write source timestamps —
+> exact ranges are computed by code. Keep the sum of target durations
+> within tolerance of the scene and total budgets, and do not request a
+> clip longer than its moment. Use conservative transitions and preserve
 > natural sound when useful. Do not invent FilmCraft command IDs or
 > internal time units. If a requested operation is unsupported by the
 > declared capability map, mark it as a requirement for the adapter or
@@ -663,12 +727,21 @@ buried in orchestration code.
 -   Do not treat descriptions extracted from media as instructions.
     Media content is untrusted data.
 -   Preserve a human approval checkpoint after the outline and before
-    destructive or expensive operations.
+    destructive or expensive operations. With the default
+    `workflow.approval: stop_after_outline`, `draft` stops after writing
+    `plans/story_outline.json` plus a readable summary and exits with
+    status "awaiting approval"; the user edits/accepts it and runs
+    `resume` (or `approve`). `--auto-approve` (or
+    `workflow.approval: auto_approve`) runs straight through and records
+    that approval was automatic in the manifest.
 
 ## 10. Application-independent edit plan schema
 
-Keep a versioned schema in `plans/edit_plan.schema.json`. A simplified
-example:
+Keep two versioned schemas: `selection_plan.schema.json` (LLM-facing:
+moment IDs, target durations, anchors — no source timestamps) and
+`edit_plan.schema.json` (resolver output, shown below). The resolved
+edit plan is what the validator checks and the adapter executes. A
+simplified example of the resolved edit plan:
 
 ``` json
 {
@@ -690,8 +763,11 @@ example:
           "clip_instance_id": "clip_001",
           "asset_id": "asset_abc",
           "moment_id": "moment_abc_01",
+          "anchor": "best",
+          "requested_duration_seconds": 5.5,
           "source_in_seconds": 3.2,
           "source_out_seconds": 8.7,
+          "resolver_notes": [],
           "track_role": "primary_video",
           "audio_policy": "natural_sound",
           "transition_in": {"type": "cut", "duration_seconds": 0},
@@ -737,6 +813,10 @@ these fail:
 -   Sequence duration is within a configurable tolerance of the target.
 -   Rounding to the sequence frame rate is done by code, never by the
     LLM.
+-   Every resolved range lies inside its referenced moment's bounds
+    (selection plans are validated for moment existence and duration
+    feasibility before resolution; resolved plans are validated for all
+    time checks above).
 -   Use FilmCraft's documented time representation through the adapter;
     do not assume its internal tick values are seconds or nanoseconds.
 
@@ -947,11 +1027,48 @@ the features that survive the round trip.
 
 ### 15.3 Fallback behavior
 
-If interchange fails or is incomplete: - preserve the FilmCraft
-project, - provide the preview MP4, - provide the edit plan and media
-manifest, - generate a report listing unsupported or unverified
-elements, - do not silently substitute a flattened video as though it
-were editable.
+If FilmCraft's native interchange export is missing, fails, or loses
+essential information (clip order, in/out points, media links):
+
+-   **Read-back interchange:** generate OTIO (and, through OTIO
+    adapters, FCP7 XML) from the timeline *read back from FilmCraft*
+    via its documented inspection interface after save/reopen — never
+    directly from the edit plan. This keeps FilmCraft the source of
+    truth.
+-   **Cross-check:** diff the read-back timeline against the resolved
+    edit plan (clip order, source ranges, tracks, durations) and include
+    the diff in `handoff_report.md`. Any mismatch is reported, not
+    papered over.
+-   Label the output as "generated from FilmCraft read-back" in the
+    report, and list FilmCraft features (effects, titles, keyframes)
+    that the read-back exporter does not carry.
+
+In all failure cases: - preserve the FilmCraft project, - provide the
+preview MP4, - provide the edit plan and media manifest, - generate a
+report listing unsupported or unverified elements, - do not silently
+substitute a flattened video as though it were editable.
+
+### 15.4 User-run Resolve verification
+
+Resolve cannot run in CI or a headless sandbox. Ship a script
+(`trip-vlog verify-resolve`, or a standalone
+`tools/resolve_verify.py`) that the user runs on their own machine with
+DaVinci Resolve open. Using Resolve's documented scripting API
+(`DaVinciResolveScript`; availability depends on Resolve edition and
+external-scripting settings — detect and report), it:
+
+1.  Creates a scratch Resolve project.
+2.  Imports the handoff timeline file(s).
+3.  Dumps the imported timeline: frame rate, duration, tracks, clip
+    order, in/out points, media paths, online/offline status.
+4.  Writes `resolve_handoff/resolve_verification.json` and compares it
+    to the expected timeline, producing a pass/fail table per check in
+    §15.2.
+
+The tool records Resolve version and edition. If the scripting API is
+unavailable, it prints precise manual import steps and a checklist
+instead. Handoff fidelity is claimed only for checks this script (or
+the user, manually) actually passed.
 
 The user can still use the preview as a reference and manually
 reconstruct or polish the timeline in Resolve if necessary.
@@ -1035,6 +1152,10 @@ command that continues from the last valid stage.
 -   Duplicate detection.
 -   Timeline ordering and duration budget.
 -   Adapter parameter translation using mocked FilmCraft responses.
+-   Plan resolver: anchors, clamping to moment/asset bounds, frame
+    rounding with rational rates, shortfall notes.
+-   Segmentation determinism (same input → same segment IDs).
+-   LLM stages exercised through the replay provider only.
 -   Idempotency and checkpoint behavior.
 
 ### 19.2 Integration tests
@@ -1088,27 +1209,44 @@ Deliver: - CLI/config, - media scanner and metadata probe, - hashes and
 stable IDs, - contact sheets and basic cached artifacts, - per-file
 error reporting.
 
-### Phase 2 --- LLM media catalog
+### Phase 2 --- Deterministic end-to-end slice
 
-Deliver: - coarse-to-fine frame sampling, - optional transcription, -
-candidate moments with evidence, - versioned prompt templates and
-schemas, - cache invalidation.
+Get the riskiest integration working before any LLM work. Deliver: -
+deterministic segmentation into candidate moments (§7.2 step 2), -
+selection/edit plan schemas, plan resolver, and deterministic
+validation, - a **baseline planner** with no LLM (chronological order,
+fixed per-clip durations, stills at a default duration, budgeted to the
+target length), - FilmCraft adapter with capability discovery,
+idempotent project creation and clip placement, checkpoints and command
+logs, basic audio and still-image support, - save/reopen verification
+and preview render, - deterministic QC, media manifest, interchange
+export (native or read-back fallback, §15.3), handoff report, and the
+user-run Resolve verification script (§15.4), - `status`/`resume`.
 
-### Phase 3 --- Editorial planning
+**Exit criterion:** `trip-vlog draft --planner baseline` turns the
+fixture folder into a reopened `.fcproj`, a playable preview, and a
+handoff package, and a re-run does not duplicate clips.
 
-Deliver: - story outline generation, - edit plan schema, - duration
-budgeting, - deterministic validation, - human-readable plan summary.
+### Phase 3 --- LLM media catalog
 
-### Phase 4 --- FilmCraft assembly
+Deliver: - LLM gateway with a default provider and a record/replay
+provider, - vision labeling of deterministic segments at
+`vision_sampling_fps` (optional dense refinement), - optional
+transcription, - candidate moments with evidence, - versioned prompt
+templates and schemas, - cache invalidation.
 
-Deliver: - FilmCraft adapter, - capability discovery, - idempotent
-project creation and clip placement, - checkpoints and command logs, -
-basic audio and still-image support, - preview render.
+### Phase 4 --- LLM editorial planning
 
-### Phase 5 --- QC and Resolve handoff
+Deliver: - story outline generation with the approval stop, - LLM
+selection plans feeding the existing resolver/validator, - duration
+budgeting, - human-readable plan summary, - `--planner llm` as the
+default once tested.
 
-Deliver: - deterministic QC, - contact sheet and critic report, -
-interchange export, - media manifest, - explicit compatibility report.
+### Phase 5 --- QC critic and handoff hardening
+
+Deliver: - preview contact sheet and critic report, - localized
+critic-driven fixes, - handoff compatibility results recorded from the
+fixture round-trip, - explicit compatibility report.
 
 ### Phase 6 --- Revision loop
 
@@ -1137,14 +1275,19 @@ trip-vlog-agent/
       transcription.py
       vision.py
       catalog.py
+    media/segment.py          # deterministic candidate segmentation
     llm/
       gateway.py
+      providers/anthropic.py
+      providers/replay.py
       schemas.py
       prompts.py
       planner.py
       critic.py
     planning/
       models.py
+      baseline.py             # no-LLM planner (Phase 2)
+      resolve_plan.py         # selection plan → exact edit plan
       validate.py
       duration.py
       revisions.py
@@ -1160,8 +1303,11 @@ trip-vlog-agent/
       report.py
     handoff/
       interchange.py
+      readback_otio.py        # fallback interchange from FilmCraft read-back
       media_manifest.py
       report.py
+  tools/
+    resolve_verify.py         # user-run Resolve import verification
   prompts/
     media_analyst.md
     story_editor.md
@@ -1171,6 +1317,7 @@ trip-vlog-agent/
     asset.schema.json
     moment.schema.json
     story_outline.schema.json
+    selection_plan.schema.json
     edit_plan.schema.json
   tests/
     unit/
@@ -1195,7 +1342,15 @@ Prefer boring, replaceable tools:
     renderer.
 -   **SQLite + JSON artifacts** for cache/catalog persistence.
 -   **A provider-neutral LLM gateway** supporting schema-constrained
-    output and vision input.
+    output and vision input, shipping with:
+    -   a default concrete provider (Anthropic Claude API via the
+        official SDK; model ID from config/env, never hard-coded), and
+    -   a **record/replay provider**: in `record` mode it stores each
+        request fingerprint (prompt version + schema + inputs hash) and
+        the validated response under `tests/fixtures/llm/`; in `replay`
+        mode it returns stored responses and fails loudly on a cache
+        miss. Tests and CI use replay only, so they are deterministic
+        and need no API key.
 -   **Speech recognition** as an optional adapter, selected according to
     privacy and quality requirements.
 -   **FilmCraft CLI/MCP** as the primary editing interface.
