@@ -245,15 +245,27 @@ def build_index_runner(ctx: RunContext) -> StageRunner:
     return runner
 
 
-def build_analyze_runner(ctx: RunContext, *, with_analyze: bool = True) -> StageRunner:
-    """index stages + deterministic segmentation + vision labeling (`trip-vlog analyze`)."""
-    from trip_vlog.analysis.stage import analyze_inputs, analyze_stage
+def build_transcribe_runner(ctx: RunContext, *, with_speech: bool = True) -> StageRunner:
+    """index stages + segmentation + audio features + speech transcription (`trip-vlog transcribe`)."""
     from trip_vlog.media.segment import segment_assets, segment_inputs
+    from trip_vlog.speech.stage import audio_inputs, audio_stage, transcribe_inputs, transcribe_stage
 
     runner = build_index_runner(ctx)
     runner.register("segment", segment_assets, deps=("catalog",), inputs=segment_inputs)
+    if with_speech:
+        runner.register("audio", audio_stage, deps=("segment",), inputs=audio_inputs)
+        runner.register("transcribe", transcribe_stage, deps=("audio",), inputs=transcribe_inputs)
+    return runner
+
+
+def build_analyze_runner(ctx: RunContext, *, with_analyze: bool = True) -> StageRunner:
+    """index stages + segmentation + audio features + transcription (a no-op without a speech backend) + vision labeling
+    (`trip-vlog analyze`). Transcripts must exist before labeling because they are part of the labeling request."""
+    from trip_vlog.analysis.stage import analyze_inputs, analyze_stage
+
+    runner = build_transcribe_runner(ctx, with_speech=with_analyze)
     if with_analyze:
-        runner.register("analyze", analyze_stage, deps=("segment",), inputs=analyze_inputs,
+        runner.register("analyze", analyze_stage, deps=("transcribe",), inputs=analyze_inputs,
                         verify=lambda c: c.workspace.moments_jsonl.is_file())
     return runner
 
@@ -316,6 +328,15 @@ def run_analyze(media: Path | str | None, output: Path | str, config_path: Path 
                     analyze_limit=limit, dry_run=dry_run)
 
 
+def run_transcribe(media: Path | str | None, output: Path | str, config_path: Path | str | None = None,
+                   overrides: Mapping[str, Any] | None = None, *, limit: int | None = None, dry_run: bool = False,
+                   echo: Callable[[str], None] = print, command: str = "transcribe") -> IndexResult:
+    """Index + segment + audio features + speech transcription (Phase 3c). `limit` covers the first N assets (by path); `dry_run`
+    reports what would be extracted and sent (see `IndexResult.dry_run`) without extracting audio or contacting any backend."""
+    return _execute(media, output, config_path, overrides, echo=echo, command=command, pipeline="transcribe",
+                    analyze_limit=limit, dry_run=dry_run)
+
+
 def _execute(media: Path | str | None, output: Path | str, config_path: Path | str | None,
              overrides: Mapping[str, Any] | None, *, echo: Callable[[str], None], command: str, pipeline: str,
              analyze_limit: int | None = None, dry_run: bool = False) -> IndexResult:
@@ -353,6 +374,8 @@ def _execute(media: Path | str | None, output: Path | str, config_path: Path | s
         manifest.set(pipeline="draft", planner=config.workflow.planner)
     elif pipeline == "analyze" and manifest.get("pipeline") != "draft":
         manifest.set(pipeline="analyze")
+    elif pipeline == "transcribe" and manifest.get("pipeline") in (None, "index"):
+        manifest.set(pipeline="transcribe")
     manifest.save()
     atomic_write_text(ws.readme, WORKSPACE_README.format(version=__version__))
     logger.event("run", Status.RUNNING, command=command, tool_version=__version__)
@@ -366,18 +389,23 @@ def _execute(media: Path | str | None, output: Path | str, config_path: Path | s
     try:
         with Catalog(ws.catalog_path) as catalog:
             ctx = RunContext(config, paths, ws, logger, manifest, catalog, ffprobe, ffmpeg, ffprobe_ver, ffmpeg_ver, echo=echo)
-            ctx.data["analyze_limit"] = analyze_limit
+            ctx.data["analyze_limit" if pipeline != "transcribe" else "transcribe_limit"] = analyze_limit
             if pipeline == "draft":
                 from trip_vlog.draft_stages import build_draft_runner
                 runner = build_draft_runner(ctx)
             elif pipeline == "analyze":
                 runner = build_analyze_runner(ctx, with_analyze=not dry_run)
+            elif pipeline == "transcribe":
+                runner = build_transcribe_runner(ctx, with_speech=not dry_run)
             else:
                 runner = build_index_runner(ctx)
             statuses = runner.run()
             if pipeline == "analyze" and dry_run:
                 from trip_vlog.analysis.stage import dry_run_report
                 dry_report = dry_run_report(ctx, analyze_limit)
+            if pipeline == "transcribe" and dry_run:
+                from trip_vlog.speech.stage import dry_run_report as speech_dry_run
+                dry_report = speech_dry_run(ctx)
             manifest.set(run_finished_at=utc_now_iso(), catalog_schema_version=catalog.schema_version())
             manifest.save()
             assets = catalog.list_assets()

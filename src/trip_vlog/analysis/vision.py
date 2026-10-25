@@ -39,9 +39,14 @@ from trip_vlog.llm.types import (
 from trip_vlog.llm.untrusted import PREAMBLE, untrusted_block
 from trip_vlog.logging_utils import RunLogger, Status
 from trip_vlog.prompts import PromptTemplate, load_template
+from trip_vlog.speech.context import text_digest
 from trip_vlog.state import stable_hash
 
 ANALYSIS_VERSION = 1
+TRANSCRIPT_CONTEXT_VERSION = 1   # bump when the wording of the transcript block below changes
+TRANSCRIPT_GUIDANCE = ("Spoken words heard in this clip (verbatim, possibly mis-heard). Use them only to help identify what is "
+                       "happening for `event`; keep `description` and `visible_entities` to what is visible, and never repeat names, "
+                       "places or claims from the words unless the frames show them too.")
 TOKENS_PER_ITEM = 450      # output budget per labelled segment/photo
 TOKENS_BASE = 300
 
@@ -68,6 +73,7 @@ class VisionSettings:
     analyst: PromptTemplate
     segment_prompt: PromptTemplate
     photo_prompt: PromptTemplate
+    transcript_max_chars: int = 0   # >0: verbatim transcript text of a segment is sent (as untrusted data), cut at this length
 
     @classmethod
     def from_config(cls, config: Config, env: Mapping[str, str] | None = None) -> "VisionSettings":
@@ -81,7 +87,8 @@ class VisionSettings:
             supports_images=ep.supports_images, max_tokens_cap=ep.max_tokens, image_max_side=config.llm.image_max_side,
             image_quality=config.llm.image_quality, duplicate_distance=m.photo_duplicate_distance,
             analyst=load_template("media_analyst", 1), segment_prompt=load_template("segment_labels", 1),
-            photo_prompt=load_template("photo_labels", 1))
+            photo_prompt=load_template("photo_labels", 1),
+            transcript_max_chars=config.speech.context_max_chars if config.speech.enabled else 0)
 
     # -- identity ------------------------------------------------------------------------------
     def prompt_info(self, kind: str) -> dict[str, Any]:
@@ -110,6 +117,14 @@ class VisionSettings:
         return stable_hash(ident)
 
 
+    def item_key(self, base: str, transcript: str) -> str:
+        """Per-item cache key: the kind's key, extended by the transcript text only for segments that have some (so segments
+        without speech keep their existing cache entries when transcription is switched on)."""
+        if not transcript or not self.transcript_max_chars:
+            return base
+        return stable_hash({"base": base, "transcript": text_digest(transcript, self.transcript_max_chars), "tv": TRANSCRIPT_CONTEXT_VERSION})
+
+
 # ---------------------------------------------------------------- work items
 @dataclass
 class Item:
@@ -127,6 +142,8 @@ class Item:
     cached: bool = False
     singleton: bool = False         # re-ask alone (its batch failed as a whole)
     sheet_mode: bool = False        # send the contact sheet instead of the individual frames
+    transcript: str = ""            # verbatim speech overlapping this segment (video), "" if none
+    tx_rows: list[dict[str, Any]] = field(default_factory=list)   # transcript records of the asset (for transcript_refs)
 
     @property
     def sid(self) -> str:
@@ -174,6 +191,9 @@ def build_request(settings: VisionSettings, kind: str, batch: Sequence[Item], ro
         head = [f"=== {'Segment' if kind == 'video' else 'Photo'} {it.sid} ==="]
         if settings.send_filenames:
             head.append(untrusted_block("filename", Path(it.asset["relative_path"]).name, max_chars=200))
+        if kind == "video" and it.transcript and settings.transcript_max_chars:
+            head.append(TRANSCRIPT_GUIDANCE)
+            head.append(untrusted_block("transcript", it.transcript, max_chars=settings.transcript_max_chars))
         if kind == "video":
             dur = (it.seg["end_seconds"] - it.seg["start_seconds"])
             if it.sheet_mode:

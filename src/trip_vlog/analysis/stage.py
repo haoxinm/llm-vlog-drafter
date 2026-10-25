@@ -25,7 +25,8 @@ from trip_vlog.llm.gateway import Gateway
 from trip_vlog.llm.types import LLMConfigError
 from trip_vlog.logging_utils import Status
 from trip_vlog.media.segment import moments_from_segments
-from trip_vlog.state import StageResult
+from trip_vlog.speech import context as sc
+from trip_vlog.state import StageResult, stable_hash
 
 # Test hook: replace to inject a gateway built on a fake transport (`lambda ctx: make_gateway(..., transport=fake)`).
 gateway_factory: Callable[[Any], Gateway] | None = None
@@ -66,12 +67,15 @@ def build_work(ctx: Any, limit: int | None = None) -> Work:
         segs = [json.loads(s["data_json"]) for s in cat.list_segments(aid) if s["content_version"] == cv]
         base = {m["segment_id"]: m for m in moments_from_segments(segs, cv)}
         key = settings.cache_key(kind)
+        tx_rows = sc.rows_for(cat, aid, cv) if (kind == "video" and ctx.config.speech.enabled) else []
         src = ctx.paths.media_root / Path(*row["relative_path"].split("/"))
         for seg in segs:
             if kind == "video" and seg.get("start_frame") is None:
                 continue
-            it = Item(kind, row, seg, base[seg["segment_id"]], src, key, sheet_mode=kind == "video" and settings.input_mode == "contact_sheet")
-            rec = cat.cache_get(aid, ANALYZER + seg["segment_id"], key, cv)
+            text = sc.text_for(tx_rows, seg["start_seconds"], seg["end_seconds"]) if settings.transcript_max_chars else ""
+            it = Item(kind, row, seg, base[seg["segment_id"]], src, settings.item_key(key, text),
+                      sheet_mode=kind == "video" and settings.input_mode == "contact_sheet", transcript=text, tx_rows=tx_rows)
+            rec = cat.cache_get(aid, ANALYZER + seg["segment_id"], it.key, cv)
             if rec is not None:
                 it.label, it.frames, it.sheet, it.model, it.cached = rec["label"], rec.get("frames", []), rec.get("contact_sheet"), rec.get("model", ""), True
             elif kind == "video":
@@ -91,7 +95,7 @@ def dry_run_report(ctx: Any, limit: int | None = None) -> dict[str, Any]:
     return {
         "endpoint": s.endpoint, "where": "local" if s.is_local else "remote", "model": s.model or None, "supports_images": s.supports_images,
         "assets": len(w.assets), "limit": limit,
-        "video_segments": len(w.videos), "video_segments_cached": len(w.videos) - len(tv), "video_segments_to_label": len(tv),
+        "video_segments": len(w.videos), "segments_with_transcript": sum(1 for i in w.videos if i.transcript), "video_segments_cached": len(w.videos) - len(tv), "video_segments_to_label": len(tv),
         "photos": len(w.photos), "photos_cached": len(w.photos) - len(tp), "photos_to_label": len(tp),
         "frames": sum(len(i.frames) for i in tv), "input": s.input_mode,
         "images": sum(i.n_images for i in [*tv, *tp]), "requests": len(batches_v) + len(batches_p),
@@ -105,6 +109,7 @@ def format_dry_run(rep: dict[str, Any]) -> str:
         f"  assets considered     : {rep['assets']}" + (f" (--limit {rep['limit']})" if rep["limit"] else ""),
         f"  video segments        : {rep['video_segments']} ({rep['video_segments_cached']} already labeled, {rep['video_segments_to_label']} to label)",
         f"  photos                : {rep['photos']} ({rep['photos_cached']} already labeled, {rep['photos_to_label']} to label)",
+        f"  with transcript text  : {rep['segments_with_transcript']} video segment(s) (spoken words are sent as untrusted context)",
         f"  frames to sample      : {rep['frames']} at {rep['sampling_fps']:g} fps, at most {rep['max_frames_per_segment']} per segment",
         f"  images to send        : {rep['images']} ({rep['input']} for videos, one image per photo)",
         f"  requests              : {rep['requests']} (up to {rep['batch_max_images']} images each)",
@@ -123,7 +128,15 @@ def analyze_inputs(ctx: Any) -> Any:
     cat = ctx.catalog
     return {"assets": [(r["asset_id"], r["content_version"], r["media_type"]) for r in _eligible(cat, ctx.data.get("analyze_limit"))],
             "segments": [(r["segment_id"], r["content_version"]) for r in cat.list_segments()],
-            "keys": [s.cache_key("video"), s.cache_key("photo")], "dup": s.duplicate_distance, "limit": ctx.data.get("analyze_limit")}
+            "keys": [s.cache_key("video"), s.cache_key("photo")], "dup": s.duplicate_distance,
+            "tx": _transcript_digest(ctx, s), "limit": ctx.data.get("analyze_limit")}
+
+
+def _transcript_digest(ctx: Any, s: VisionSettings) -> str | None:
+    """Changes when the transcript text the labeler would see changes (only relevant while it is sent at all)."""
+    if not s.transcript_max_chars:
+        return None
+    return stable_hash([(r["transcript_id"], r["content_version"], r["text"]) for r in ctx.catalog.list_transcripts()] + [s.transcript_max_chars])
 
 
 def _default_gateway(ctx: Any) -> Gateway:
@@ -200,10 +213,17 @@ def analyze_stage(ctx: Any) -> StageResult:
 
 def _moment(it: Item, s: VisionSettings, dup_group: str | None) -> dict[str, Any]:
     if it.label is None:
-        return unlabeled_moment(it.baseline, it.error, dup_group)
+        return _with_refs(it, unlabeled_moment(it.baseline, it.error, dup_group))
     sheet = it.sheet
-    return labeled_moment(it.baseline, it.seg, it.label, frames=it.frames, content_version=it.asset["content_version"], model=it.model,
-                          prompt=s.prompt_info(it.kind), contact_sheet=sheet, duplicate_group=dup_group)
+    return _with_refs(it, labeled_moment(it.baseline, it.seg, it.label, frames=it.frames, content_version=it.asset["content_version"],
+                                         model=it.model, prompt=s.prompt_info(it.kind), contact_sheet=sheet, duplicate_group=dup_group))
+
+
+def _with_refs(it: Item, m: dict[str, Any]) -> dict[str, Any]:
+    """transcript_refs follow the moment's final range (a labeled moment may be narrower than its segment)."""
+    if it.tx_rows:
+        m["transcript_refs"] = sc.refs_for(it.tx_rows, m.get("source_in_seconds"), m.get("source_out_seconds"))
+    return m
 
 
 def photo_groups(ctx: Any, photos: list[Item], distance: int) -> dict[str, str]:
@@ -234,8 +254,9 @@ def _finalize(ctx: Any, work: Work) -> int:
     for it in work.items:
         by_asset.setdefault(it.asset["asset_id"], []).append(it)
     fallback = 0
-    keys = {work.settings.cache_key("video"), work.settings.cache_key("photo")}
+    base_keys = {work.settings.cache_key("video"), work.settings.cache_key("photo")}
     for aid, items in by_asset.items():
+        keys = base_keys | {it.key for it in items}  # items with transcript text have their own key
         cv = items[0].asset["content_version"]
         moments = []
         for it in items:

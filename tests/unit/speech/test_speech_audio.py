@@ -102,7 +102,6 @@ def test_baseline_moments_carry_audio_when_present():
 
 # ---------------------------------------------------------------- real ffmpeg on generated fixtures
 
-pytestmark_ffmpeg = pytest.mark.integration
 
 
 def gen(ffmpeg, path, source, seconds=3, *, filters=None, fmt="pcm_s16le"):

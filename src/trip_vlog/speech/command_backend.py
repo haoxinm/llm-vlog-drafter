@@ -60,11 +60,6 @@ class CommandTranscriber:
         self.cfg, self.language = cfg, language
         self.executable = resolve_executable(cfg.executable or "")
 
-    def identity(self) -> dict[str, Any]:
-        c = self.cfg
-        exe = Path(self.executable).name
-        return {"backend": self.name, "executable": exe, "args": list(c.args), "format": c.output_format, "language": self.language}
-
     def transcribe(self, audio_path: Path, duration: float | None) -> Transcription:
         with tempfile.TemporaryDirectory(prefix="trip-vlog-asr-") as tmp:
             out_dir = Path(tmp)

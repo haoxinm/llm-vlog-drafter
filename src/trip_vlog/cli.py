@@ -1,4 +1,4 @@
-"""Command line interface: index / analyze / llm-check / draft / approve / status / resume.
+"""Command line interface: index / analyze / transcribe / llm-check / draft / approve / status / resume.
 
 Exit codes
   0    success (pipeline finished; QC findings are reported, not errors)
@@ -23,7 +23,7 @@ import yaml
 from trip_vlog import __version__
 from trip_vlog.config import ConfigError
 from trip_vlog.draft_stages import DRAFT_STAGES
-from trip_vlog.orchestrator import IndexResult, approve_plan, read_status, run_analyze, run_draft, run_index, ApprovalRefused
+from trip_vlog.orchestrator import IndexResult, approve_plan, read_status, run_analyze, run_draft, run_index, run_transcribe, ApprovalRefused
 
 
 def _common(p: argparse.ArgumentParser, *, media_required: bool) -> None:
@@ -54,12 +54,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true",
                    help="print how many segments, frames, images and requests would be sent, and to which endpoint; sends nothing")
 
+    p = sub.add_parser("transcribe", help="measure audio features and transcribe speech with the configured backend (runs index + segment first; "
+                                          "speech.backend defaults to none = skipped)")
+    _common(p, media_required=False)
+    p.add_argument("--limit", type=int, metavar="N", help="cover only the first N assets (sorted by path)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="print how many assets / minutes of audio would be transcribed, by which backend, local or remote; extracts and sends nothing")
+
     p = sub.add_parser("llm-check", help="send one tiny live request per configured endpoint (text, then image) and print a result table")
     p.add_argument("--output", type=Path, help="workspace whose project.yaml configures the endpoints")
     p.add_argument("--config", type=Path, help="project.yaml (default: <output>/project.yaml if present, else defaults)")
     p.add_argument("--set", dest="sets", action="append", default=[], metavar="SECTION.FIELD=VALUE", help="override any config field (repeatable)")
     p.add_argument("--endpoint", metavar="NAME", help="check this endpoint profile only (default: those used by llm.text and llm.vision)")
     p.add_argument("--no-image", action="store_true", help="skip the image request")
+    p.add_argument("--speech", action="store_true",
+                   help="also send a generated 1-second tone to the speech.* transcription backend and report reachability (empty text is fine)")
+    p.add_argument("--no-llm", action="store_true", help="with --speech: check only the transcription backend, not the LLM endpoints")
 
     p = sub.add_parser("status", help="show the last run's stage status")
     p.add_argument("--output", type=Path, required=True)
@@ -228,6 +238,47 @@ def _cmd_analyze(args: argparse.Namespace, command: str = "analyze") -> int:
     return res.exit_code
 
 
+def _print_transcribe_result(res: IndexResult) -> None:
+    from trip_vlog.state import Manifest, Workspace
+
+    print(f"run {res.run_id} -> {res.workspace}")
+    if res.dry_run is not None:
+        from trip_vlog.speech.stage import format_dry_run
+
+        print(format_dry_run(res.dry_run))
+        return
+    m = Manifest.load(Workspace(res.workspace).manifest_path)
+    for name, status in res.stage_status.items():
+        st = m.stage(name)
+        if status == "skipped" and st.get("decision") == "cache_hit":
+            status = "cached"
+        print(f"  {name:<11} {status}")
+        if status == "failed" and st.get("error"):
+            print(f"      {str(st['error']).splitlines()[0]}")
+    a = m.stage("audio").get("summary", {})
+    if a and not a.get("skipped"):
+        print(f"audio features: {a.get('assets_measured', 0)} measured, {a.get('cache_hits', 0)} cached, {a.get('no_audio_stream', 0)} without audio, {a.get('failed', 0)} failed")
+    s = m.stage("transcribe").get("summary", {})
+    if s.get("skipped"):
+        print(f"transcription skipped: {s.get('reason')}")
+    elif s:
+        sk = ", ".join(f"{n} {why}" for why, n in (s.get("skipped_assets") or {}).items())
+        print(f"transcribed {s.get('transcribed', 0)} new, {s.get('cached', 0)} already done, {s.get('failed', 0)} failed"
+              + (f"; skipped: {sk}" if sk else "") + f"; backend {s.get('backend')} ({'local' if s.get('local') else 'remote'}), "
+              f"{s.get('segments', 0)} transcript segment(s), {s.get('moments_with_transcript', 0)} moment(s) with speech")
+        for e in s.get("errors", [])[:5]:
+            print(f"  - {e.get('path')}: {e.get('error')}")
+        print(f"transcripts: {res.workspace / 'media_index' / 'transcripts.jsonl'}")
+
+
+def _cmd_transcribe(args: argparse.Namespace, command: str = "transcribe") -> int:
+    if args.limit is not None and args.limit < 1:
+        raise ConfigError("--limit must be at least 1")
+    res = run_transcribe(args.media, args.output, args.config, _overrides(args), limit=args.limit, dry_run=args.dry_run, command=command)
+    _print_transcribe_result(res)
+    return res.exit_code
+
+
 def _cmd_llm_check(args: argparse.Namespace) -> int:
     from trip_vlog.config import load_config
     from trip_vlog.llm.check import format_table, run_llm_check
@@ -237,7 +288,13 @@ def _cmd_llm_check(args: argparse.Namespace) -> int:
         cand = Path(args.output).expanduser() / "project.yaml"
         cfg_path = cand if cand.is_file() else None
     config = load_config(cfg_path, _parse_sets(args.sets))
-    rows = run_llm_check(config, endpoint=args.endpoint, include_image=not args.no_image)
+    if args.no_llm and not args.speech:
+        raise ConfigError("--no-llm only makes sense together with --speech")
+    rows = [] if args.no_llm else run_llm_check(config, endpoint=args.endpoint, include_image=not args.no_image)
+    if args.speech:
+        from trip_vlog.speech.check import check_speech
+
+        rows.extend(check_speech(config))
     print(format_table(rows))
     return 0 if all(r.ok for r in rows) else 1
 
@@ -251,6 +308,9 @@ def _cmd_resume(args: argparse.Namespace) -> int:
     if m.get("pipeline") == "analyze":
         args.limit, args.dry_run = None, False
         return _cmd_analyze(args, "resume")
+    if m.get("pipeline") == "transcribe":
+        args.limit, args.dry_run = None, False
+        return _cmd_transcribe(args, "resume")
     res = run_index(args.media, args.output, args.config, _overrides(args), command="resume")
     _print_index_result(res)
     return res.exit_code
@@ -285,8 +345,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
     print(f"last run  : {m.get('run_id')} ({m.get('command')}) started {m.get('run_started_at')} finished {m.get('run_finished_at') or '-'}")
     print("stages:")
     stages = m.get("stages", {})
-    canonical = ("scan", "probe", "catalog", "thumbnails", "segment", "analyze", *DRAFT_STAGES[5:])
-    order = ([n for n in canonical if n in stages or (m.get("pipeline") == "draft" and n != "analyze")]
+    canonical = ("scan", "probe", "catalog", "thumbnails", "segment", "audio", "transcribe", "analyze", *DRAFT_STAGES[5:])
+    order = ([n for n in canonical if n in stages or (m.get("pipeline") == "draft" and n not in ("analyze", "audio", "transcribe"))]
              + [n for n in stages if n not in canonical])
     for name in order:
         st = stages.get(name, {})
@@ -321,7 +381,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
         print(f"resolve   : {rf.get('status')} - Resolve project '{rs.get('project')}' ({rs.get('titles_failed', 0)} title(s) need manual work); "
               f"report {rs.get('report')}")
     unfinished = [n for n in order if n != "resolve_finish" and stages.get(n, {}).get("status", "pending") not in ("succeeded", "partial")
-                  and not (stages.get(n, {}).get("decision") == "cache_hit")]
+                  and not (stages.get(n, {}).get("decision") == "cache_hit")
+                  and not (stages.get(n, {}).get("status") == "skipped" and stages[n].get("summary", {}).get("skipped"))]  # e.g. no speech backend
     if stages.get("approval", {}).get("status") == "awaiting_approval":
         print(f"next: review plans/plan_summary.md, then `trip-vlog approve --output {info['workspace']}` and `trip-vlog resume --output {info['workspace']}`")
     elif unfinished:
@@ -338,7 +399,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return {"index": _cmd_index, "status": _cmd_status, "resume": _cmd_resume, "draft": _cmd_draft,
-                "approve": _cmd_approve, "resolve-finish": _cmd_resolve_finish, "analyze": _cmd_analyze,
+                "approve": _cmd_approve, "resolve-finish": _cmd_resolve_finish, "analyze": _cmd_analyze, "transcribe": _cmd_transcribe,
                 "llm-check": _cmd_llm_check}[args.command](args)
     except ConfigError as e:
         print(f"error: {e}", file=sys.stderr)

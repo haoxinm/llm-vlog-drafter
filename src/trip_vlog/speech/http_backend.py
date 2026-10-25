@@ -89,12 +89,6 @@ class OpenAITranscriptions:
         self.url = endpoint.url
         self.is_local = endpoint.is_local
 
-    def identity(self) -> dict[str, Any]:
-        """What changes the transcript (cache key). No URLs, headers, keys or timeouts."""
-        e = self.ep
-        return {"backend": self.name, "model": self.model, "language": self.language, "format": e.response_format,
-                "granularities": list(e.timestamp_granularities), "params": e.params}
-
     def build_body(self, audio: bytes, filename: str, content_type: str, boundary: str | None = None) -> tuple[bytes, str]:
         return encode_multipart(form_fields(self.ep, self.model or "", self.language), file_field="file", filename=filename,
                                 content=audio, content_type=content_type, boundary=boundary)

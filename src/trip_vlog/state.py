@@ -83,6 +83,10 @@ class Workspace:
     @property
     def moments_jsonl(self) -> Path: return self.media_index / "moments.jsonl"
     @property
+    def transcripts_jsonl(self) -> Path: return self.media_index / "transcripts.jsonl"
+    @property
+    def audio_dir(self) -> Path: return self.media_index / "audio"
+    @property
     def logs_dir(self) -> Path: return self.root / "logs"
     @property
     def run_log(self) -> Path: return self.logs_dir / "run.jsonl"
