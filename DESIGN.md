@@ -15,7 +15,9 @@ the single catalog store (§5.1, §6); default LLM provider plus
 record/replay provider (§22, §19); explicit approval stop after the
 outline (§9.5); handoff fallback from FilmCraft read-back state and a
 user-run Resolve verification script (§15); Windows and macOS as
-first-class platforms (§22.1).
+first-class platforms (§22.1); Resolve 21.1 observed results, FCP7 XML
+as primary handoff, and an optional Studio-only `resolve-finish` step
+via Resolve's scripting API (§15.5, §15.6).
 
 ------------------------------------------------------------------------
 
@@ -258,7 +260,7 @@ filmcraft:
   project_name: "Trip Vlog Draft"
   sequence_name: "Main Draft"
   prefer_native_project: true
-  interchange_formats: ["otio", "fcp7_xml"]
+  interchange_formats: ["fcp7_xml", "otio"]   # FCP7 XML primary (§15.5)
 
 outputs:
   project_file: "filmcraft/TripVlog.fcproj"
@@ -1073,6 +1075,59 @@ the user, manually) actually passed.
 
 The user can still use the preview as a reference and manually
 reconstruct or polish the timeline in Resolve if necessary.
+
+### 15.5 Observed Resolve results and format policy
+
+Manual import of the Phase 0 fixture into **DaVinci Resolve Studio 21.1
+on Windows** (user-reported): FCP7 XML imports cleanly; OTIO imports
+but its media is unlinked (relative `target_url` written by FilmCraft
+when media and export share a top-level directory); FCPXML crashed
+Resolve; EDL froze Resolve; AAF could not be opened. Policy:
+
+-   Default `interchange_formats` is `["fcp7_xml", "otio"]`, FCP7 XML
+    primary. OTIO is post-processed to absolute media paths and stays
+    secondary until a Windows import with absolute paths is verified.
+-   FCPXML, EDL and AAF are never exported by default; if configured
+    explicitly, the handoff report carries a prominent warning with the
+    observed results.
+-   Third-party measurements (see `docs/research/resolve-mcp.md`) report
+    that FCP7 XML import drops markers and that titles arrive as
+    media-less clips; the handoff report lists both so they can be
+    recreated, and §15.6 automates that.
+
+### 15.6 Optional `resolve-finish` step (Studio only)
+
+An optional command, run by the user on their own machine with Resolve
+Studio open, that finishes the handoff inside Resolve through Resolve's
+documented scripting API (`DaVinciResolveScript`, the same discovery as
+§15.4). It is a deterministic, allowlisted adapter, like the FilmCraft
+adapter:
+
+1.  Create a uniquely named Resolve project (never modify or delete an
+    existing user project) and set frame rate and resolution from the
+    edit plan before import.
+2.  Import the FCP7 XML handoff timeline with a unique timeline name;
+    detect offline media and relink against the media manifest's
+    absolute paths.
+3.  Re-add scene markers from the edit plan / FilmCraft read-back.
+4.  Recreate titles as editable Resolve titles (Text+/Fusion title)
+    on the intended track and frame range, using only documented API
+    calls; if a title cannot be placed reliably, leave it listed in the
+    report rather than approximate it.
+5.  Read the Resolve timeline back and compare with the FilmCraft
+    read-back (order, record/source in-out ±1 frame, fps, duration,
+    media online, markers, titles), writing
+    `resolve_handoff/resolve_finish_report.json` and `.md`.
+
+Rules: no MCP layer and no third-party Resolve server is required; the
+built-in Resolve 21.1 MCP server is not used by the pipeline because it
+exposes arbitrary script execution rather than typed operations, and
+the pipeline never lets an LLM issue Resolve commands (§17). Users may
+still use Resolve's MCP with an assistant for manual polish outside
+the pipeline. Requires Studio with external scripting set to Local;
+check the Python version supported by the installed Resolve's
+scripting library and report a clear error on mismatch. Without
+Studio the plain FCP7 XML handoff (§15.1) remains the supported path.
 
 ## 16. Natural-language revisions
 
