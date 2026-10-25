@@ -210,6 +210,7 @@ def moments_from_segments(segments: Sequence[dict[str, Any]], content_version: s
     """Phase 2 baseline: each segment is one candidate moment (no description; tags from features). DESIGN §6.3 shape."""
     out = []
     for s in segments:
+        audio = (s.get("features") or {}).get("audio")  # Phase 3c measurements, present once the `audio` stage ran
         out.append({
             "moment_id": moment_id_for(s["segment_id"]), "asset_id": s["asset_id"], "segment_id": s["segment_id"],
             "media_type": s["media_type"], "source_in_seconds": s["start_seconds"], "source_out_seconds": s["end_seconds"],
@@ -217,6 +218,7 @@ def moments_from_segments(segments: Sequence[dict[str, Any]], content_version: s
             "quality": {"sharpness": None, "stability": None, "exposure": None},
             "editorial_tags": moment_tags(s), "confidence": None, "evidence": [],
             "features": s.get("features", {}), "content_version": content_version, "source": "baseline",
+            **({"audio": audio, "audio_tags": list(audio.get("audio_tags", []))} if audio else {}),
         })
     return out
 
