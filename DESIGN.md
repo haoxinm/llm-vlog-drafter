@@ -1374,6 +1374,11 @@ ships with tests like any other phase. Deliver:
     supports it and the result is verified.
 -   **Audio ducking:** lower music under natural sound or speech
     (§13.3), verified in the read-back and the preview.
+-   **Fine sampling refinement (§7.2 step 5):** when
+    `fine_sampling_enabled`, resample at `fine_sampling_fps` around the
+    best-frame boundaries of high-scoring moments and tighten them with
+    a second, smaller request (own prompt, schema and cache). Phase 3
+    ships without it; enabling it only adds a warning.
 -   **Captions and subtitles from transcripts (§13.4):** captions only
     from transcript text, never paraphrased, exported in a form the
     handoff can carry (e.g. an SRT alongside the timeline) and verified
