@@ -6,6 +6,7 @@ Exit codes
   2    usage or configuration error (bad flag, unusable paths, planner not implemented)
   3    stopped at the approval gate: review plans/plan_summary.md, then `approve` and `resume` (or `draft --auto-approve`)
   4    `approve` refused: the plan is missing, failed validation, or the plan stage did not succeed
+       (`resolve-finish`: 0 finished, 1 required checks failed, 2 preconditions/arguments, 3 Resolve scripting unavailable)
   130  interrupted (Ctrl-C); `resume` continues
 """
 
@@ -71,6 +72,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("approve", help="approve the current plans/edit_plan.json so `resume` can build the FilmCraft project")
     p.add_argument("--output", type=Path, required=True)
+
+    p = sub.add_parser("resolve-finish", help="optional: finish the handoff inside DaVinci Resolve Studio "
+                                              "(new project, import, relink stills, markers, experimental titles, report)")
+    p.add_argument("--output", type=Path, required=True, help="the draft workspace (needs a completed handoff)")
+    p.add_argument("--project-name", help="name of the NEW Resolve project (default: '<title> (trip-vlog vNNN)'); "
+                                          "an existing project is never reused")
+    p.add_argument("--dry-run", action="store_true", help="print the planned steps; nothing is created or changed in Resolve")
+    p.add_argument("--keep-on-failure", action="store_true",
+                   help="leave a title that could not be verified in the timeline instead of rolling it back")
     return ap
 
 
@@ -185,6 +195,13 @@ def _cmd_approve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_resolve_finish(args: argparse.Namespace) -> int:
+    from trip_vlog.resolve.finish import run_finish
+
+    return run_finish(args.output, project_name=args.project_name, dry_run=args.dry_run,
+                      keep_on_failure=args.keep_on_failure).exit_code
+
+
 def _cmd_status(args: argparse.Namespace) -> int:
     info = read_status(args.output)
     if args.json:
@@ -225,7 +242,12 @@ def _cmd_status(args: argparse.Namespace) -> int:
             print(f"  probable duplicates: {', '.join(d['paths'])}")
         for mv in cat["probable_moves"]:
             print(f"  probable move: {mv['from']} -> {mv['to']}")
-    unfinished = [n for n in order if stages.get(n, {}).get("status", "pending") not in ("succeeded", "partial")
+    rf = stages.get("resolve_finish")
+    if rf:
+        rs = rf.get("summary", {})
+        print(f"resolve   : {rf.get('status')} - Resolve project '{rs.get('project')}' ({rs.get('titles_failed', 0)} title(s) need manual work); "
+              f"report {rs.get('report')}")
+    unfinished = [n for n in order if n != "resolve_finish" and stages.get(n, {}).get("status", "pending") not in ("succeeded", "partial")
                   and not (stages.get(n, {}).get("decision") == "cache_hit")]
     if stages.get("approval", {}).get("status") == "awaiting_approval":
         print(f"next: review plans/plan_summary.md, then `trip-vlog approve --output {info['workspace']}` and `trip-vlog resume --output {info['workspace']}`")
@@ -243,7 +265,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return {"index": _cmd_index, "status": _cmd_status, "resume": _cmd_resume, "draft": _cmd_draft,
-                "approve": _cmd_approve}[args.command](args)
+                "approve": _cmd_approve, "resolve-finish": _cmd_resolve_finish}[args.command](args)
     except ConfigError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
