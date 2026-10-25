@@ -12,28 +12,34 @@ from typing import Literal
 from trip_vlog.llm.store import ResponseStore, usage_of
 from trip_vlog.llm.types import LLMStoreError, ProviderRequest, ProviderResponse, ReplayMissError
 
-LLMMode = Literal["replay", "record", "off"]
-LLM_MODES = ("replay", "record", "off")
+LLMMode = Literal["live", "record", "replay"]
+LLM_MODES = ("live", "record", "replay")
 
 
 class ReplayProvider:
     name = "replay"
     supports_schema_retry = False
 
-    def __init__(self, store: ResponseStore | Path | str, *, model: str = ""):
+    is_local = True  # nothing leaves the machine
+
+    def __init__(self, store: ResponseStore | Path | str, *, model: str = "", endpoint: str = "replay",
+                 fingerprint_extra: dict | None = None):
         self.store = store if isinstance(store, ResponseStore) else ResponseStore(store)
         self.model = model
+        self.endpoint = endpoint
+        # must equal the live provider's, so a record made against one host replays under the same profile
+        self.fingerprint_extra = fingerprint_extra or {}
 
     def complete(self, request: ProviderRequest) -> ProviderResponse:
         rec = self.store.get(request.fingerprint)
         if rec is None:
             hint = ""
             if not request.model:
-                hint = " (no model id is configured; fingerprints include the model, so set media.llm_model or TRIP_VLOG_LLM_MODEL to the value used when recording)"
+                hint = " (no model id is configured; fingerprints include the model, so set llm.endpoints.<name>.model or its model_env variable to the value used when recording)"
             raise ReplayMissError(
                 f"no recorded LLM response for template {request.template_id} v{request.template_version} "
                 f"(fingerprint {request.fingerprint}, model {request.model!r}) in {self.store.directory}{hint}. "
-                "Re-record with TRIP_VLOG_LLM_MODE=record and a real provider.",
+                "Re-record with TRIP_VLOG_LLM_MODE=record against a real endpoint.",
                 fingerprint=request.fingerprint, template=f"{request.template_id}.v{request.template_version}")
         r = rec["response"]
         try:

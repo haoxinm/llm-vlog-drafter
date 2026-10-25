@@ -45,7 +45,7 @@ def test_frame_rate_accepts_numbers_and_rationals():
     {"filmcraft": {"control_port": 70000}},
     {"media": {"unknown_field": 1}},
     {"nonsense": {}},
-    {"media": {"local_only": True}},  # default provider is a cloud provider
+    {"media": {"local_only": True}},  # the default llm endpoint is a remote host
     {"media": {"fine_sampling_enabled": True, "fine_sampling_fps": 0.5}},
 ])
 def test_invalid_values_rejected(raw):
@@ -53,8 +53,9 @@ def test_invalid_values_rejected(raw):
         parse_config(raw)
 
 
-def test_local_only_with_replay_provider_ok():
-    c = parse_config({"media": {"local_only": True, "vision_provider": "replay", "llm_provider": "replay"}})
+def test_local_only_with_loopback_endpoint_ok():
+    ep = {"api": "openai_chat", "base_url": "http://127.0.0.1:8080", "api_key_env": None}
+    c = parse_config({"media": {"local_only": True}, "llm": {"endpoints": {"main": ep}}})
     assert c.media.local_only
 
 

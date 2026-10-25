@@ -170,41 +170,92 @@ Nothing in Phase 1 or 2 contacts the network; FilmCraft runs locally and is conf
 
 ## LLM provider
 
-Phase 3a adds the provider-neutral LLM gateway in `src/trip_vlog/llm/`. No CLI command uses it yet (vision labeling and transcription come next);
-the baseline `draft` flow still never contacts the network.
+Phase 3a adds a provider-neutral LLM gateway (`src/trip_vlog/llm/`). It speaks plain HTTP (Python standard library only; no `anthropic` or `openai`
+package and no extra install) to any server that implements an Anthropic- or OpenAI-style API, with a fully configurable endpoint. No CLI command uses it
+yet (vision labeling and transcription come next); the baseline `draft` flow never contacts the network.
 
-```sh
-pip install -e ".[llm]"                  # installs the optional official `anthropic` SDK (imported lazily)
-export ANTHROPIC_API_KEY=...             # macOS / Linux
+Configure endpoint *profiles* under `llm:` in `project.yaml` and pick one for text and one for vision:
+
+```yaml
+llm:
+  mode: live                 # live | record | replay   (env TRIP_VLOG_LLM_MODE overrides)
+  text: main                 # profile used for text/planning calls
+  vision: main               # profile used for frame/vision calls
+  endpoints:
+    main:
+      api: anthropic_messages        # anthropic_messages | openai_chat | openai_responses
+      base_url: https://api.anthropic.com
+      path: null                     # null = adapter default (/v1/messages, /v1/chat/completions, /v1/responses)
+      model: null                    # else the env var named by model_env; no built-in default
+      model_env: TRIP_VLOG_LLM_MODEL
+      api_key_env: ANTHROPIC_API_KEY # NAME of the env var holding the key; null = no auth (local servers)
+      headers: {}                    # extra headers; values may use ${VAR}; never logged
+      timeout_seconds: 120
+      max_retries: 2                 # transport retries on 429/5xx/connection errors (backoff + Retry-After)
+      structured_output: native      # native | json_prompt | none
+      max_tokens: 4096               # cap on a request's max_tokens
+      max_tokens_field: null         # e.g. max_completion_tokens for newer OpenAI models
+      supports_images: true
+      params: {}                     # merged into the request body (temperature, top_p, seed, reasoning, store, ...)
+      allow_insecure_http: false     # plain http to a non-loopback host is refused unless true
 ```
 
-```powershell
-pip install -e ".[llm]"
-$env:ANTHROPIC_API_KEY="..."             # Windows PowerShell (current session only)
+Examples (set only the profile fields that differ from the defaults; keys always come from the environment):
+
+```yaml
+# Anthropic  (export ANTHROPIC_API_KEY=...   PowerShell: $env:ANTHROPIC_API_KEY="...")
+llm: {endpoints: {main: {api: anthropic_messages, model: <your model id>}}}
+
+# OpenAI chat completions  (OPENAI_API_KEY)
+llm: {endpoints: {main: {api: openai_chat, model: <id>, max_tokens_field: max_completion_tokens}}}
+
+# OpenAI Responses API; store:false asks the service not to retain the exchange
+llm: {endpoints: {main: {api: openai_responses, model: <id>, params: {store: false}}}}
+
+# OpenAI-compatible cloud host (base_url + path as the host documents; its own key variable)
+llm:
+  endpoints:
+    main: {api: openai_chat, base_url: "https://api.example-host.com", path: /openai/v1/chat/completions,
+           api_key_env: EXAMPLE_HOST_KEY, model: <id>, structured_output: json_prompt}
+
+# Local server (Ollama, llama.cpp server, LM Studio, vLLM): no key, loopback only. Ollama and LM Studio serve /v1/...
+llm:
+  endpoints:
+    main: {api: openai_chat, base_url: "http://127.0.0.1:11434", api_key_env: null, model: <local model name>,
+           structured_output: json_prompt, supports_images: false}      # set true for a vision model
+media: {local_only: true}
 ```
 
-- **Credentials** are read by the SDK from the environment only. They are never accepted from `project.yaml`, never logged and never stored.
-- **Model id** is never hard-coded. It comes from `media.llm_model` if set, otherwise from the `TRIP_VLOG_LLM_MODEL` environment variable (config wins, so a
-  project pins its model; the env var is a per-machine default). With neither, the Anthropic provider fails with a clear message.
-- **Providers**: `media.vision_provider` (frames) and `media.llm_provider` (text) accept `anthropic` or `replay`. `media.local_only: true` rejects cloud providers.
-- **Settings** under `media`: `llm_max_retries` (SDK transport retries, 2), `llm_schema_retries` (re-asks with validation errors, 2), `llm_timeout_seconds`,
-  `llm_image_max_side` (1568), `llm_image_quality` (85), `llm_cache_dir` (`cache/llm`, relative to the workspace), `llm_fixture_dir` (record/replay store; default = cache dir).
-- **Structured output**: every request carries a JSON schema. The provider is sent a sanitized copy (no `minimum`/`maxLength`/..., `additionalProperties: false`),
-  and the gateway validates the full original client-side; on failure it retries by sending back the validation errors (no extra media).
-  Refusals and `max_tokens` truncation raise typed errors (`LLMRefusalError`, `LLMTruncatedError`); output is never silently cut.
-- **Response cache**: results are stored per request fingerprint in `<workspace>/cache/llm/<fingerprint>.json`. The fingerprint is a SHA-256 over the prompt
-  template id + version, system text, schema, text parts, the hash of each image as actually sent, model id, `max_tokens` and effort (no paths), so a changed
-  frame, prompt version, schema or model is a miss and everything else is a hit with no API call.
-- **Record / replay** (tests and CI use replay only, no key needed): `TRIP_VLOG_LLM_MODE=replay` returns stored responses and raises `ReplayMissError`
-  (naming the fingerprint and template) on a miss. `TRIP_VLOG_LLM_MODE=record` calls the real provider and also saves each validated response to the fixture dir
-  (`media.llm_fixture_dir` or `TRIP_VLOG_LLM_FIXTURE_DIR`; tests use `tests/fixtures/llm/`). The default mode is `off`. The `replay` provider name always replays.
-  Replay must use the same model string as the recording, since the model is part of the fingerprint.
-- **Prompts** live in `src/trip_vlog/prompts/<id>.v<N>.md` with `id`/`version` front matter that must match the file name; the version is logged and fingerprinted.
-  Text derived from media (file names, EXIF, transcripts) is wrapped by `llm.untrusted_section(...)` as inert data blocks.
-- **Cost and privacy**: with a cloud provider, the sampled frames, prompts and any transcripts you include are sent to that provider. Frames are downscaled,
-  re-encoded as JPEG and stripped of EXIF/GPS before upload; original files are never modified. Each call logs prompt id/version, model, token usage (input, output,
-  cache read/creation), latency, attempts and request id to `logs/run.jsonl` (stage `llm`), never keys or image bytes. Use `local_only` or `replay` to avoid any upload.
-  The response cache holds model output and the text sent (not image bytes); treat the workspace as private.
+- **Credentials** are read only from the environment variable named by `api_key_env`; a literal `api_key` in the YAML is refused. Keys are never logged,
+  stored in caches, or sent anywhere but the configured endpoint (redirects are not followed). Loopback servers are contacted directly, bypassing proxy variables.
+- **Model id** is never hard-coded: `model` in the profile wins, else the environment variable named by `model_env` (default `TRIP_VLOG_LLM_MODEL`); with
+  neither, live and record modes fail with a clear message.
+- **Wire formats** (`api`): `anthropic_messages` (`x-api-key`, `anthropic-version`, `output_config.format`), `openai_chat` (`Authorization: Bearer`,
+  `response_format`), `openai_responses` (`instructions`/`input`, `text.format`). They follow the providers' public API docs but could not be tested against live
+  servers here; verify against yours and adapt with `path`, `params`, `max_tokens_field` and `structured_output`. `params` may not set `model`, `messages`,
+  `input`, `system` or `instructions`; fields the gateway controls (model, messages, token limit, structured output) win over `params`.
+- **Structured output**: `native` sends the provider's JSON-schema option (a sanitized copy: `additionalProperties: false`, no `minimum`/`maxLength`/...; OpenAI
+  strict mode also wants every property listed in `required`). `json_prompt` sends no schema parameter and instead appends the schema to the prompt (most local
+  servers need this); `none` sends nothing. In every mode the gateway extracts the first JSON value from the reply (fences and prose tolerated), validates it
+  against the full schema, and on failure re-asks with the validation errors only (`llm.schema_retries`, default 2; no extra media is re-sent).
+  Refusals, content-filter stops and `max_tokens` truncation raise typed errors (`LLMRefusalError`, `LLMTruncatedError`); output is never silently cut.
+- **Local-only**: an endpoint whose `base_url` host is loopback (`127.x`, `localhost`, `::1`) is "local". `media.local_only: true` requires the profiles used by
+  `llm.text` and `llm.vision` to be local (checked when the config loads). Each call's log record includes `endpoint` and `local`.
+- **Response cache**: `<workspace>/cache/llm/<fingerprint>.json` (`llm.cache_dir`). The fingerprint is a SHA-256 over the prompt template id + version, system text,
+  schema, text parts, each image's *source file* hash plus the preparation settings (`image_max_side`, `image_quality`, prep version; not the re-encoded bytes,
+  which can differ across OSes), model id, `max_tokens`, effort, and the profile's `api` and `params`. It excludes `base_url`, `path`, headers, timeouts and keys,
+  so a recording made against one host replays against another. A changed frame, prompt version, schema, model or params is a miss; everything else is a hit with no call.
+- **Record / replay** (tests and CI use replay only, no key needed): `TRIP_VLOG_LLM_MODE=replay` (or `llm.mode: replay`) returns stored responses and raises
+  `ReplayMissError` naming the fingerprint and template on a miss. `record` calls the real endpoint and also saves each validated response to the fixture dir
+  (`llm.fixture_dir` or `TRIP_VLOG_LLM_FIXTURE_DIR`; default the cache dir; tests use `tests/fixtures/llm/`). Replay must use the same model string as the recording.
+- **Images** are downscaled (longest side `llm.image_max_side`, default 1568), re-encoded as JPEG (`llm.image_quality`, default 85) and stripped of EXIF/GPS before
+  upload; originals are never modified.
+- **Prompts** live in `src/trip_vlog/prompts/<id>.v<N>.md` with `id`/`version` front matter that must match the file name. Text derived from media (file names, EXIF,
+  transcripts) is wrapped by `llm.untrusted_section(...)` as inert data blocks.
+- **Cost and privacy**: with a remote endpoint, sampled frames, prompts and any transcripts you include are sent to that provider (and some services retain
+  requests by default; see `params: {store: false}` above). Each call logs prompt id/version, model, token usage (input, output, cache read/creation), latency,
+  attempts, request id, endpoint and local/remote to `logs/run.jsonl` (stage `llm`), never keys or image bytes. The response cache holds model output and the text
+  sent (not image bytes); treat the workspace as private. Use a loopback endpoint with `local_only` or `replay` to avoid any upload.
 
 ## Platform notes
 

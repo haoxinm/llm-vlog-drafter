@@ -3,21 +3,21 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import re
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Mapping
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from trip_vlog.paths import check_portable_component, is_within
 
-CLOUD_PROVIDERS = {"anthropic"}
 LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
-_PROVIDER_RE = r"^[A-Za-z0-9_.-]+$"
 
 
 class ConfigError(ValueError):
@@ -106,18 +106,7 @@ class MediaConfig(_Model):
     fine_sampling_enabled: bool = False
     segment_window_seconds: float = Field(6.0, gt=0, le=120)
     transcribe_speech: bool = True
-    vision_provider: str = Field("anthropic", pattern=_PROVIDER_RE)
-    llm_provider: str = Field("anthropic", pattern=_PROVIDER_RE)
-    llm_model: str | None = None   # wins over env TRIP_VLOG_LLM_MODEL when set; no built-in default (DESIGN §4.1)
-    local_only: bool = False
-    # Phase 3a LLM gateway (credentials are NEVER configured here: the SDK reads them from the environment)
-    llm_max_retries: int = Field(2, ge=0, le=10)             # SDK transport retries (429/5xx/connection)
-    llm_schema_retries: int = Field(2, ge=0, le=5)           # re-asks with validation errors after a schema failure
-    llm_timeout_seconds: float = Field(600.0, gt=0, le=3600)
-    llm_image_max_side: int = Field(1568, ge=256, le=8000)   # longest side of frames sent to the provider
-    llm_image_quality: int = Field(85, ge=30, le=100)        # JPEG quality of those frames
-    llm_cache_dir: str = "cache/llm"                         # response cache; relative to the workspace, must stay inside it
-    llm_fixture_dir: str | None = None                       # record/replay store; default: llm_cache_dir (env TRIP_VLOG_LLM_FIXTURE_DIR)
+    local_only: bool = False       # true: every LLM endpoint used for text and vision must be loopback (see `llm.endpoints`)
     # Phase 1 additions
     ffprobe_path: str | None = None
     ffmpeg_path: str | None = None
@@ -131,27 +120,148 @@ class MediaConfig(_Model):
     silence_threshold_db: float = Field(-35.0, ge=-120, le=0)  # audio below this level counts as silence
     still_duration_seconds: float = Field(3.0, gt=0, le=600)   # default on-screen time of a photo
 
-    @field_validator("llm_model")
-    @classmethod
-    def _model_not_blank(cls, v: str | None) -> str | None:
-        if v is not None and not v.strip():
-            raise ValueError("llm_model must not be blank (use null to fall back to TRIP_VLOG_LLM_MODEL)")
-        return v.strip() if v is not None else v
-
-    @field_validator("llm_cache_dir")
-    @classmethod
-    def _cache_dir_inside_workspace(cls, v: str) -> str:
-        return _workspace_relative(v, "llm_cache_dir")
-
     @model_validator(mode="after")
     def _check(self) -> "MediaConfig":
         if self.fine_sampling_enabled and self.fine_sampling_fps < self.vision_sampling_fps:
             raise ValueError("fine_sampling_fps must be >= vision_sampling_fps when fine sampling is enabled")
-        if self.local_only:
-            for name in ("vision_provider", "llm_provider"):
-                if getattr(self, name) in CLOUD_PROVIDERS:
-                    raise ValueError(f"local_only is true but {name}={getattr(self, name)!r} is a cloud provider")
         return self
+
+
+API_KINDS = ("anthropic_messages", "openai_chat", "openai_responses")
+RESERVED_PARAMS = frozenset({"model", "messages", "input", "system", "instructions"})
+_API_DEFAULTS = {  # api -> (base_url, api_key_env)
+    "anthropic_messages": ("https://api.anthropic.com", "ANTHROPIC_API_KEY"),
+    "openai_chat": ("https://api.openai.com", "OPENAI_API_KEY"),
+    "openai_responses": ("https://api.openai.com", "OPENAI_API_KEY"),
+}
+_ENV_NAME_RE = r"^[A-Za-z_][A-Za-z0-9_]*$"
+
+
+def is_loopback_host(host: str | None) -> bool:
+    """127.0.0.0/8, ::1 and 'localhost' (any case, optional trailing dot)."""
+    if not host:
+        return False
+    h = host.strip("[]").rstrip(".").lower()
+    if h == "localhost" or h.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
+
+
+class EndpointConfig(_Model):
+    """One LLM endpoint profile. Credentials are referenced by environment-variable NAME, never stored."""
+
+    api: Literal["anthropic_messages", "openai_chat", "openai_responses"] = "anthropic_messages"
+    base_url: str | None = None          # default depends on `api`
+    path: str | None = None              # null -> the adapter's default path
+    model: str | None = None
+    model_env: str | None = Field("TRIP_VLOG_LLM_MODEL", pattern=_ENV_NAME_RE)
+    api_key_env: str | None = Field(None, pattern=_ENV_NAME_RE)   # unset -> default per api; null -> no auth (local servers)
+    headers: dict[str, str] = {}         # values may reference env vars as ${VAR}; values are never logged
+    timeout_seconds: float = Field(120.0, gt=0, le=3600)
+    max_retries: int = Field(2, ge=0, le=10)                      # transport retries (429/5xx/connection)
+    structured_output: Literal["native", "json_prompt", "none"] = "native"
+    max_tokens: int = Field(4096, ge=1)                           # upper bound on a request's max_tokens
+    max_tokens_field: str | None = None
+    supports_images: bool = True
+    params: dict[str, Any] = {}          # merged into the request body (gateway-controlled fields win)
+    allow_insecure_http: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _no_literal_keys(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            for k in data:
+                if str(k).lower() in ("api_key", "apikey", "key", "token", "authorization"):
+                    raise ValueError(f"never put a credential in the config: remove {k!r} and set api_key_env to the NAME of an environment variable")
+        return data
+
+    @field_validator("model")
+    @classmethod
+    def _model_not_blank(cls, v: str | None) -> str | None:
+        if v is not None and not v.strip():
+            raise ValueError("model must not be blank (use null to fall back to model_env)")
+        return v.strip() if v is not None else v
+
+    @field_validator("path")
+    @classmethod
+    def _path(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        if not v.strip() or "://" in v or any(c in v for c in " \t\r\n"):
+            raise ValueError("path must be a URL path such as '/v1/chat/completions', not a full URL")
+        return v if v.startswith("/") else "/" + v
+
+    @field_validator("headers")
+    @classmethod
+    def _headers(cls, v: dict[str, str]) -> dict[str, str]:
+        for k in v:
+            if not re.fullmatch(r"[A-Za-z0-9-]+", k):
+                raise ValueError(f"invalid header name {k!r}")
+        return v
+
+    @field_validator("params")
+    @classmethod
+    def _params(cls, v: dict[str, Any]) -> dict[str, Any]:
+        bad = sorted(RESERVED_PARAMS & set(v))
+        if bad:
+            raise ValueError(f"params must not set reserved request fields: {', '.join(bad)}")
+        return v
+
+    @model_validator(mode="after")
+    def _finish(self) -> "EndpointConfig":
+        default_url, default_key = _API_DEFAULTS[self.api]
+        if "base_url" not in self.model_fields_set or self.base_url is None:
+            self.__dict__["base_url"] = default_url
+        if "api_key_env" not in self.model_fields_set:
+            self.__dict__["api_key_env"] = default_key
+        parts = urlsplit(self.base_url or "")
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise ValueError(f"base_url must be an http(s) URL with a host, got {self.base_url!r}")
+        if parts.username or parts.password:
+            raise ValueError("base_url must not contain credentials")
+        if parts.scheme == "http" and not self.is_local and not self.allow_insecure_http:
+            raise ValueError(f"base_url {self.base_url!r} uses plain http to a non-loopback host; use https or set allow_insecure_http: true")
+        return self
+
+    @property
+    def host(self) -> str:
+        return urlsplit(self.base_url or "").hostname or ""
+
+    @property
+    def is_local(self) -> bool:
+        return is_loopback_host(self.host)
+
+
+class LLMConfig(_Model):
+    mode: Literal["live", "record", "replay"] = "live"   # env TRIP_VLOG_LLM_MODE overrides
+    text: str = "main"      # endpoint profile for text/planning calls
+    vision: str = "main"    # endpoint profile for vision calls
+    endpoints: dict[str, EndpointConfig] = Field(default_factory=lambda: {"main": EndpointConfig()})
+    schema_retries: int = Field(2, ge=0, le=5)           # re-asks with validation errors after a schema failure
+    image_max_side: int = Field(1568, ge=256, le=8000)   # longest side of frames sent to a model
+    image_quality: int = Field(85, ge=30, le=100)
+    cache_dir: str = "cache/llm"                         # response cache, relative to the workspace, must stay inside it
+    fixture_dir: str | None = None                       # record/replay store; default cache_dir (env TRIP_VLOG_LLM_FIXTURE_DIR)
+
+    @field_validator("cache_dir")
+    @classmethod
+    def _cache_dir_inside_workspace(cls, v: str) -> str:
+        return _workspace_relative(v, "cache_dir")
+
+    @model_validator(mode="after")
+    def _profiles_exist(self) -> "LLMConfig":
+        for purpose in ("text", "vision"):
+            name = getattr(self, purpose)
+            if name not in self.endpoints:
+                raise ValueError(f"llm.{purpose} refers to unknown endpoint profile {name!r} (defined: {', '.join(sorted(self.endpoints)) or 'none'})")
+        return self
+
+    def endpoint_for(self, purpose: Literal["text", "vision"]) -> tuple[str, EndpointConfig]:
+        name = self.text if purpose == "text" else self.vision
+        return name, self.endpoints[name]
 
 
 class WorkflowConfig(_Model):
@@ -222,10 +332,34 @@ class Config(_Model):
     project: ProjectConfig = ProjectConfig()
     editorial: EditorialConfig = EditorialConfig()
     media: MediaConfig = MediaConfig()
+    llm: LLMConfig = Field(default_factory=LLMConfig)
     workflow: WorkflowConfig = WorkflowConfig()
     filmcraft: FilmCraftConfig = FilmCraftConfig()
     qc: QcConfig = QcConfig()
     outputs: OutputsConfig = OutputsConfig()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_media_keys(cls, data: Any) -> Any:
+        media = data.get("media") if isinstance(data, dict) else None
+        if isinstance(media, dict):
+            old = sorted(k for k in ("llm_provider", "vision_provider", "llm_model") if k in media)
+            if old:
+                raise ValueError(
+                    f"media.{', media.'.join(old)} no longer exist: configure an endpoint profile under `llm:` "
+                    "(llm.endpoints.<name>.api/base_url/model, selected by llm.text and llm.vision). See README \"LLM provider\".")
+        return data
+
+    @model_validator(mode="after")
+    def _local_only(self) -> "Config":
+        if self.media.local_only:
+            for purpose in ("text", "vision"):
+                name, ep = self.llm.endpoint_for(purpose)
+                if not ep.is_local:
+                    raise ValueError(
+                        f"media.local_only is true but llm.{purpose} uses endpoint {name!r} whose host {ep.host!r} is not a loopback address "
+                        "(127.x, ::1, localhost); point it at a local server or turn local_only off")
+        return self
 
     def to_dict(self) -> dict[str, Any]:
         return self.model_dump(mode="json")

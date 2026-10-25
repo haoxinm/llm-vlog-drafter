@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from PIL import Image
 
+from trip_vlog.config import parse_config
+from trip_vlog.llm.http_provider import HttpProvider
+from trip_vlog.llm.transport import HttpResponse
 from trip_vlog.llm.types import ImagePart, LLMRequest, ProviderRequest, ProviderResponse, TextPart, Usage
 
 SCHEMA: dict[str, Any] = {
@@ -55,51 +58,64 @@ class ScriptedProvider:
         return item
 
 
-# ---- fake anthropic SDK ---------------------------------------------------
-class _APIError(Exception):
-    def __init__(self, message="boom", *, status_code=None, request_id=None):
-        super().__init__(message)
-        self.message = message
-        self.status_code = status_code
-        self.request_id = request_id
+# ---- fake HTTP transport -----------------------------------------------------------------------------
+class FakeTransport:
+    """Records HttpRequests; returns queued HttpResponses (or raises queued exceptions). No network."""
 
-
-class _APIStatusError(_APIError): ...
-class _BadRequestError(_APIStatusError): ...
-class _AuthenticationError(_APIStatusError): ...
-class _PermissionDeniedError(_APIStatusError): ...
-class _NotFoundError(_APIStatusError): ...
-class _RateLimitError(_APIStatusError): ...
-class _InternalServerError(_APIStatusError): ...
-class _APIConnectionError(_APIError): ...
-class _APITimeoutError(_APIConnectionError): ...
-
-
-FAKE_SDK = SimpleNamespace(
-    APIStatusError=_APIStatusError, BadRequestError=_BadRequestError, AuthenticationError=_AuthenticationError,
-    PermissionDeniedError=_PermissionDeniedError, NotFoundError=_NotFoundError, RateLimitError=_RateLimitError,
-    InternalServerError=_InternalServerError, APIConnectionError=_APIConnectionError, APITimeoutError=_APITimeoutError,
-)
-
-
-def sdk_message(text=GOOD, stop="end_turn", model="test-model-resolved", rid="req_abc", usage=None, content=None, stop_details=None):
-    usage = usage or SimpleNamespace(input_tokens=11, output_tokens=7, cache_read_input_tokens=3, cache_creation_input_tokens=None)
-    content = content if content is not None else [SimpleNamespace(type="text", text=text)]
-    return SimpleNamespace(stop_reason=stop, content=content, usage=usage, model=model, _request_id=rid, stop_details=stop_details)
-
-
-class FakeClient:
     def __init__(self, *responses):
         self.queue = list(responses)
-        self.calls: list[dict[str, Any]] = []
-        self.messages = SimpleNamespace(create=self._create)
+        self.requests = []
 
-    def _create(self, **kwargs):
-        self.calls.append(kwargs)
+    def send(self, request):
+        self.requests.append(request)
         item = self.queue.pop(0)
         if isinstance(item, BaseException):
             raise item
         return item
+
+    @property
+    def last_body(self):
+        return json.loads(self.requests[-1].body.decode("utf-8"))
+
+
+def http_json(obj, status=200, headers=None) -> HttpResponse:
+    return HttpResponse(status, {k.lower(): v for k, v in (headers or {}).items()}, json.dumps(obj).encode("utf-8"))
+
+
+def anthropic_reply(text=GOOD, stop="end_turn", model="test-model-resolved", **extra):
+    return http_json({"id": "msg_1", "type": "message", "model": model, "stop_reason": stop,
+                      "content": [{"type": "text", "text": text}] if text is not None else [],
+                      "usage": {"input_tokens": 11, "output_tokens": 7, "cache_read_input_tokens": 3, "cache_creation_input_tokens": 2},
+                      **extra}, headers={"request-id": "req_hdr"})
+
+
+def chat_reply(text=GOOD, finish="stop", model="test-model-resolved", refusal=None):
+    msg = {"role": "assistant", "content": text}
+    if refusal:
+        msg["refusal"] = refusal
+    return http_json({"id": "chatcmpl-1", "model": model, "choices": [{"index": 0, "message": msg, "finish_reason": finish}],
+                      "usage": {"prompt_tokens": 11, "completion_tokens": 7, "prompt_tokens_details": {"cached_tokens": 3}}})
+
+
+def responses_reply(text=GOOD, status="completed", incomplete=None, refusal=None, model="test-model-resolved"):
+    content = [{"type": "refusal", "refusal": refusal}] if refusal else [{"type": "output_text", "text": text}]
+    d = {"id": "resp_1", "model": model, "status": status, "output": [{"type": "reasoning", "summary": []},
+         {"type": "message", "role": "assistant", "content": content}],
+         "usage": {"input_tokens": 11, "output_tokens": 7, "input_tokens_details": {"cached_tokens": 3}}}
+    if incomplete:
+        d["incomplete_details"] = {"reason": incomplete}
+    return http_json(d)
+
+
+def endpoint_config(api="anthropic_messages", local=False, **ep):
+    base = {"api": api, "base_url": "http://127.0.0.1:9999" if local else {
+        "anthropic_messages": "https://api.anthropic.com"}.get(api, "https://api.openai.com"), "model": "test-model"}
+    return parse_config({"llm": {"endpoints": {"main": {**base, **ep}}}})
+
+
+def provider_for(cfg, transport, env=None, sleep=None, profile="main"):
+    return HttpProvider(profile, cfg.llm.endpoints[profile], model="test-model", env=env if env is not None else {"ANTHROPIC_API_KEY": "sk-ant-test-key-1",
+                        "OPENAI_API_KEY": "sk-openai-test-key-2"}, transport=transport, sleep=sleep or (lambda s: None))
 
 
 @pytest.fixture

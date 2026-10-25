@@ -1,43 +1,40 @@
-"""Provider selection: `make_gateway(config, workspace, purpose)` (DESIGN §4.1, §22)."""
+"""Gateway construction from the `llm:` config section: `make_gateway(config, workspace, purpose)` (DESIGN §4.1, §22)."""
 
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
-from typing import Any, Literal, Mapping
+from typing import Callable, Literal, Mapping
 
-from trip_vlog.config import CLOUD_PROVIDERS, Config
-from trip_vlog.llm.anthropic_provider import AnthropicProvider
+from trip_vlog.config import Config, EndpointConfig
 from trip_vlog.llm.gateway import Gateway
+from trip_vlog.llm.http_provider import HttpProvider
 from trip_vlog.llm.replay import LLM_MODES, ReplayProvider
 from trip_vlog.llm.store import ResponseStore
+from trip_vlog.llm.transport import Transport
 from trip_vlog.llm.types import LLMConfigError
 from trip_vlog.logging_utils import RunLogger
 
-ENV_MODEL = "TRIP_VLOG_LLM_MODEL"
 ENV_MODE = "TRIP_VLOG_LLM_MODE"
 ENV_FIXTURE_DIR = "TRIP_VLOG_LLM_FIXTURE_DIR"
 
 
-def resolve_model(config: Config, env: Mapping[str, str] | None = None) -> str | None:
-    """Model id precedence: `media.llm_model` if set, else env TRIP_VLOG_LLM_MODEL, else None. No built-in default."""
-    if config.media.llm_model:
-        return config.media.llm_model
+def resolve_model(endpoint: EndpointConfig, env: Mapping[str, str] | None = None) -> str | None:
+    """Model id: `model` in the profile if set, else the env var named by `model_env`, else None. No built-in default."""
+    if endpoint.model:
+        return endpoint.model
     env = os.environ if env is None else env
-    return (env.get(ENV_MODEL) or "").strip() or None
+    return ((env.get(endpoint.model_env) or "").strip() or None) if endpoint.model_env else None
 
 
-def resolve_mode(provider_name: str, mode: str | None, env: Mapping[str, str] | None = None) -> str:
-    """`replay` provider -> replay. Otherwise explicit `mode`, else env TRIP_VLOG_LLM_MODE, else `off`."""
+def resolve_mode(config: Config, env: Mapping[str, str] | None = None) -> str:
+    """env TRIP_VLOG_LLM_MODE (live|record|replay) overrides `llm.mode`."""
     env = os.environ if env is None else env
-    if provider_name == "replay":
-        if mode == "record" or (mode is None and env.get(ENV_MODE, "").strip() == "record"):
-            raise LLMConfigError("record mode needs a real provider; set media.llm_provider/vision_provider to a real one, not 'replay'")
-        return "replay"
-    chosen = (mode or env.get(ENV_MODE, "") or "off").strip()
-    if chosen not in LLM_MODES:
-        raise LLMConfigError(f"{ENV_MODE} must be one of {', '.join(LLM_MODES)}, got {chosen!r}")
-    return chosen
+    mode = (env.get(ENV_MODE) or "").strip() or config.llm.mode
+    if mode not in LLM_MODES:
+        raise LLMConfigError(f"{ENV_MODE} / llm.mode must be one of {', '.join(LLM_MODES)}, got {mode!r}")
+    return mode
 
 
 def _dir(value: str, workspace: Path) -> Path:
@@ -53,42 +50,40 @@ def make_gateway(
     mode: str | None = None,
     env: Mapping[str, str] | None = None,
     logger: RunLogger | None = None,
-    sdk: Any = None,
-    client: Any = None,
+    transport: Transport | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> Gateway:
-    """Build the gateway for `purpose`: media.vision_provider for "vision", media.llm_provider for "text".
+    """Gateway for `purpose`, using the endpoint profile named by llm.vision / llm.text.
 
-    `sdk`/`client` are injection points for tests. The anthropic SDK is imported lazily.
+    live: real calls (+ workspace response cache). record: like live, and every validated response is also saved to the
+    fixture dir. replay: stored responses only, no network, no key needed. `transport`/`sleep` are test injection points.
     """
     if purpose not in ("vision", "text"):
         raise ValueError("purpose must be 'vision' or 'text'")
     env = os.environ if env is None else env
-    media = config.media
+    llm = config.llm
     workspace = Path(workspace)
-    name = media.vision_provider if purpose == "vision" else media.llm_provider
-    resolved_mode = resolve_mode(name, mode, env)
-    if name not in CLOUD_PROVIDERS | {"replay"}:
-        raise LLMConfigError(f"unknown LLM provider {name!r} (available: anthropic, replay)")
-    if media.local_only and name in CLOUD_PROVIDERS:
-        raise LLMConfigError(f"media.local_only is true but the {purpose} provider {name!r} is a cloud provider")
+    resolved = mode or resolve_mode(config, env)
+    if resolved not in LLM_MODES:
+        raise LLMConfigError(f"mode must be one of {', '.join(LLM_MODES)}, got {resolved!r}")
+    profile, ep = llm.endpoint_for(purpose)
+    if config.media.local_only and not ep.is_local:  # defence in depth: Config already validates this at load time
+        raise LLMConfigError(f"media.local_only is true but endpoint {profile!r} ({ep.host}) is not local")
 
-    cache_dir = _dir(media.llm_cache_dir, workspace)
-    fixture_value = media.llm_fixture_dir or env.get(ENV_FIXTURE_DIR) or None
+    cache_dir = _dir(llm.cache_dir, workspace)
+    fixture_value = llm.fixture_dir or env.get(ENV_FIXTURE_DIR) or None
     fixture_dir = _dir(fixture_value, workspace) if fixture_value else cache_dir
-    model = resolve_model(config, env)
-    common: dict[str, Any] = dict(
-        schema_retries=media.llm_schema_retries, image_max_side=media.llm_image_max_side,
-        image_quality=media.llm_image_quality, image_cache_dir=cache_dir / "images", logger=logger,
-    )
-    if resolved_mode == "replay":
-        return Gateway(ReplayProvider(ResponseStore(fixture_dir), model=model or ""), **common)
-    if name != "anthropic":  # pragma: no cover - guarded above
-        raise LLMConfigError(f"provider {name!r} cannot run in mode {resolved_mode!r}")
+    model = resolve_model(ep, env)
+    common = dict(schema_retries=llm.schema_retries, image_max_side=llm.image_max_side, image_quality=llm.image_quality,
+                  image_cache_dir=cache_dir / "images", logger=logger)
+    if resolved == "replay":
+        provider = ReplayProvider(ResponseStore(fixture_dir), model=model or "", endpoint=profile,
+                                  fingerprint_extra={"api": ep.api, "params": ep.params})
+        return Gateway(provider, **common)  # type: ignore[arg-type]
     if not model:
         raise LLMConfigError(
-            f"no LLM model configured: set media.llm_model in project.yaml or the {ENV_MODEL} environment variable "
-            "(there is no built-in default)")
-    provider = AnthropicProvider(model, client=client, sdk=sdk, max_retries=media.llm_max_retries,
-                                 timeout_seconds=media.llm_timeout_seconds)
-    recorder = ResponseStore(fixture_dir) if resolved_mode == "record" else None
-    return Gateway(provider, cache=ResponseStore(cache_dir), recorder=recorder, **common)
+            f"no model configured for endpoint {profile!r}: set llm.endpoints.{profile}.model"
+            + (f" or the {ep.model_env} environment variable" if ep.model_env else "") + " (there is no built-in default)")
+    provider = HttpProvider(profile, ep, model=model, env=env, transport=transport, sleep=sleep)
+    recorder = ResponseStore(fixture_dir) if resolved == "record" else None
+    return Gateway(provider, cache=ResponseStore(cache_dir), recorder=recorder, **common)  # type: ignore[arg-type]

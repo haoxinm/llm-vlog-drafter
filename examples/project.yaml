@@ -37,10 +37,7 @@ media:
   fine_sampling_enabled: false
   segment_window_seconds: 6.0
   transcribe_speech: true
-  vision_provider: "anthropic"   # anthropic | replay | <other adapter>
-  llm_provider: "anthropic"
-  llm_model: null                # set via config or env; never hard-coded
-  local_only: false
+  local_only: false              # true: every endpoint used by llm.text / llm.vision must be loopback
   # Phase 1 inventory settings
   ffprobe_path: null             # else $FFPROBE, PATH, standard install dirs
   ffmpeg_path: null              # else $FFMPEG, PATH, standard install dirs
@@ -86,3 +83,16 @@ outputs:                         # relative to the output workspace
   preview_file: "preview/draft.mp4"
   edit_plan_file: "plans/edit_plan.json"
   interchange_dir: "resolve_handoff"
+
+# LLM gateway (README "LLM provider"). API keys are read from the environment variable NAMED here, never from this file.
+llm:
+  mode: live                     # live | record | replay (env TRIP_VLOG_LLM_MODE overrides)
+  text: main                     # endpoint profile for text/planning calls
+  vision: main                   # endpoint profile for vision calls
+  endpoints:
+    main:
+      api: anthropic_messages    # anthropic_messages | openai_chat | openai_responses
+      base_url: https://api.anthropic.com
+      model: null                # or the env var named by model_env; there is no built-in default
+      model_env: TRIP_VLOG_LLM_MODEL
+      api_key_env: ANTHROPIC_API_KEY

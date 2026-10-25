@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Union
 
-__all__ = ["ContentPart", "EFFORTS", "Effort", "IMAGE_MEDIA_TYPES", "ImagePart", "LLMAuthError", "LLMBadRequestError", "LLMConfigError", "LLMConnectionError", "LLMError", "LLMInputError", "LLMNotFoundError", "LLMPermissionError", "LLMProviderError", "LLMRateLimitError", "LLMRefusalError", "LLMRequest", "LLMResponse", "LLMSchemaError", "LLMStoreError", "LLMTruncatedError", "PreparedImage", "ProviderMessage", "ProviderRequest", "ProviderResponse", "ReplayMissError", "TextPart", "Usage"]
+__all__ = ["ContentPart", "EFFORTS", "Effort", "IMAGE_MEDIA_TYPES", "ImagePart", "LLMAuthError", "LLMBadRequestError", "LLMConfigError", "LLMConnectionError", "LLMTimeoutError", "LLMError", "LLMInputError", "LLMNotFoundError", "LLMPermissionError", "LLMProviderError", "LLMRateLimitError", "LLMRefusalError", "LLMRequest", "LLMResponse", "LLMSchemaError", "LLMStoreError", "LLMTruncatedError", "PreparedImage", "ProviderMessage", "ProviderRequest", "ProviderResponse", "ReplayMissError", "TextPart", "Usage"]
 
 Effort = Literal["low", "medium", "high"]
 EFFORTS = ("low", "medium", "high")
@@ -69,6 +69,7 @@ class LLMPermissionError(LLMProviderError): ...
 class LLMNotFoundError(LLMProviderError): ...
 class LLMRateLimitError(LLMProviderError): ...
 class LLMConnectionError(LLMProviderError): ...
+class LLMTimeoutError(LLMProviderError): ...
 
 
 class ReplayMissError(LLMError):
