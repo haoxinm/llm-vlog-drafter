@@ -76,6 +76,9 @@ trip-vlog llm-check [--output /path/to/vlog-project | --config project.yaml] [--
 # Phase 3c: audio features + optional speech transcription (backend none by default; see "Speech transcription")
 trip-vlog transcribe --output /path/to/vlog-project [--media /path/to/trip-media] [--limit N] [--dry-run]
 
+# Phase 4a: LLM story outline from the labeled moments, then a stop for your approval (see "Story outline"; runs index ... analyze first)
+trip-vlog outline --output /path/to/vlog-project [--media /path/to/trip-media] [--duration 180] [--dry-run] [--auto-approve]
+
 # Optional, Resolve Studio only: finish the handoff inside Resolve (see "Finish in Resolve" below)
 trip-vlog resolve-finish --output /path/to/vlog-project [--dry-run] [--project-name NAME] [--keep-on-failure]
 ```
@@ -90,7 +93,7 @@ trip-vlog resolve-finish --output /path/to/vlog-project [--dry-run] [--project-n
 - `resume` continues the pipeline recorded in `manifest.json`; the media folder is taken from there. Settings persist in `<output>/project.yaml`.
 
 Exit codes: `0` finished (QC warnings and unprobeable files are reported, not fatal), `1` a stage failed, `2` bad configuration/arguments (including
-`--planner llm`), `3` stopped at the approval gate, `4` `approve` refused (no plan yet, or the plan is invalid), `130` interrupted.
+`--planner llm`), `3` stopped at the approval gate, `4` `approve` refused (nothing to approve yet, or the plan/outline is invalid), `130` interrupted.
 
 Configuration: copy [examples/project.yaml](examples/project.yaml), edit, pass with `--config`. Command-line overrides win:
 `--duration`, `--aspect`, `--fingerprint sha256`, `--no-recursive`, `--ffprobe PATH`, or any field via `--set media.thumbnail_max_side=320`.
@@ -266,7 +269,7 @@ media: {local_only: true}
 ## Vision labeling (`analyze`)
 
 `trip-vlog analyze` turns the deterministic segments into candidate moments with a vision model (DESIGN §7.2, §7.4). It runs `index` and `segment` first,
-then the resumable `analyze` stage. `draft --planner baseline` never needs it; `draft --planner llm` is still rejected until Phase 4 (which will run `analyze` for you).
+then the resumable `analyze` stage. `draft --planner baseline` never needs it; `draft --planner llm` is still rejected until the selection phase (`outline` already runs `analyze` for you).
 
 ```sh
 trip-vlog analyze --output ./vlog --media ./trip --dry-run          # counts only: segments, frames, images, requests, endpoint, local/remote
@@ -315,6 +318,66 @@ trip-vlog llm-check --config .\project.yaml --endpoint main
 One tiny live request per check (a 2-field JSON reply; then a generated red square, which must be recognised), bypassing every cache and never recorded to fixtures. The table
 shows endpoint, api, URL (no query string or secrets), local/remote, model, structured-output mode, ok/FAIL, latency, tokens and the error class with a short message. Exit
 0 if all checks pass, 1 if any fails, 2 for a bad configuration or unknown `--endpoint`.
+
+## Story outline (`outline`)
+
+`trip-vlog outline` is the first half of LLM editorial planning (DESIGN §8.1, §9.2, §9.5): from the labeled moments it asks a text model for a **story outline** (premise,
+ordered scenes with a role, tone, duration budget and candidate moment IDs, optional opening hook, missing coverage, things to confirm) and then **stops for your approval**.
+It selects no clips and touches no FilmCraft; turning the approved outline into a selection plan, titles and a draft is the next phase (`draft --planner llm` is still rejected).
+The text model is the endpoint named by `llm.text` (see "LLM provider").
+
+```sh
+trip-vlog outline --output ./vlog --media ./trip --duration 180 --dry-run     # moments in the prompt, estimated size, endpoint, local/remote; sends nothing
+trip-vlog outline --output ./vlog --media ./trip --duration 180               # index, segment, audio, transcribe, analyze, outline -> stops (exit 3)
+#   read  ./vlog/plans/story_outline.md        (what the story editor proposed, per scene with the moment descriptions)
+#   edit  ./vlog/plans/story_outline.json      (optional: titles, order, durations, moment IDs)
+trip-vlog approve --output ./vlog                                             # says "approved story outline ..."
+trip-vlog resume  --output ./vlog                                             # later phases continue from the approved outline
+```
+```powershell
+$env:ANTHROPIC_API_KEY = "..."      # the variable named by api_key_env of the llm.text endpoint
+trip-vlog outline --output C:\vlogs\lisbon --media D:\Trips\Lisbon --duration 180 --dry-run
+trip-vlog outline --output C:\vlogs\lisbon --media D:\Trips\Lisbon --duration 180
+notepad C:\vlogs\lisbon\plans\story_outline.json                           # optional edits
+trip-vlog approve --output C:\vlogs\lisbon
+trip-vlog resume  --output C:\vlogs\lisbon
+```
+
+- **Workflow**: `outline` -> review/edit -> `approve` -> `resume` -> (next phase) selection, resolve, validate, assemble. With `--auto-approve` (or `workflow.approval: auto_approve`)
+  the stop is skipped and `manifest.json` records `outline_approval.mode = "automatic"`. Approval is bound to the SHA-256 of the outline *content*: reformatting the file keeps it,
+  any real edit withdraws it, and the next `resume` stops again ("outline changed since approval").
+- **`approve` approves whatever is waiting and says which**: the story outline when `outline_approval` stopped (or the workspace ran `outline`), else the edit plan of the baseline
+  `draft` path (unchanged). If both were ever waiting, the outline comes first. `approve --outline` / `approve --plan` force the choice. It refuses (exit 4) when nothing
+  succeeded yet or the file is invalid; the message lists the findings.
+- **What the model sees** (`planning.*`): one compact record per candidate moment of a present video/photo asset, in chronological order: a JSON header with only code-made fields
+  (`id`, `n`, `kind`, `when` = local capture time without any GPS, `day`, `at`/`dur` seconds, `orient`, `interest`, `conf`, `quality`, `tags`, `audio` hints, `dup` group, `uncertain`, `unlabeled`,
+  `speech`) and, when there is any, one `<untrusted_media_data>` block with the description, a verbatim speech excerpt (`planning.transcript_excerpt_chars`, default 160; 0 = none)
+  and the file's base name (`media.vision_send_filenames`). Text from the media is always inside such a block and the prompt says it is data, never instructions. No images are sent.
+  Settings (title, target duration, story mode, style, audience) and the editorial constraints follow; prompts: `story_editor.v1` (system, DESIGN §9.2) and `story_editor_input.v1`.
+- **Too many moments**: above `planning.max_moments_in_prompt` (default 400) the catalog is reduced deterministically: `must_exclude` moments are removed, every `must_include` moment is kept,
+  then the best-interest moment of each time cluster (`planning.cluster_gap_seconds`, default 300 s) among duplicate-group representatives, then the other group representatives, then the
+  rest, by interest. What was left out and why is in `plans/story_outline_report.json` (`selection`) and in `story_outline.md`.
+- **`must_include` / `must_exclude`** are lists of references, not free text: a `moment_id`, `segment_id`, `asset_id`, a path relative to the media folder (`day2/hike.mp4`), a glob
+  (`day2/*.mp4`) or a folder with a trailing slash (`day2/`). A `must_include` reference is satisfied when at least one moment it resolves to is in the outline; one that matches
+  nothing is reported under `missing_coverage`. `preferred_topics` is free text and is passed to the story editor as a preference.
+- **Validation and repair** (deterministic, `planning/outline.py`). Repaired and recorded in the report (and shown under "Checks" in the summary): unknown moment IDs, moments not offered
+  to the model, duplicates (a moment is used by one scene; the hook moment may appear once more in its chronological scene), moments matching `must_exclude`, an opening hook longer
+  than `editorial.opening_hook_seconds` (shortened), scene budgets outside `project.duration_tolerance_pct`/`_seconds` of the target (all non-hook scenes scaled proportionally to the
+  exact target), hook fields left over when no hook is used, scene IDs (`scene_01`, ... assigned by code). Reported as warnings: `story_mode_used` differing from `project.story_mode`,
+  an out-of-order scene when `story_mode: chronological`, a `must_include` that matches nothing (also added to `missing_coverage`). Everything that would change the story is an **error** instead: a scene left without moments,
+  a hook that is not allowed (`allow_nonlinear_hook: false`) or whose scene/moment is inconsistent, an uncovered `must_include`. Errors are sent back to the model **once**
+  (`planning.outline_retries`) with the previous reply; if they remain the stage fails with the findings and writes `plans/story_outline_report.json`. Schema violations are retried by the
+  gateway first (`llm.schema_retries`).
+- **Your edits are checked, not rewritten**: when you edit `story_outline.json`, `resume` re-validates it without the LLM (any usable moment may be used, not only those that fit in the
+  prompt; budgets off target are a warning). Errors fail the `outline_approval` stage and `approve` refuses; fix the file and run `resume`.
+- **Caching**: the `outline` stage is keyed by the exact request text (catalog, settings including the target duration, constraints), prompt versions, response schema, model and endpoint
+  `api`/`params`, tolerance and retry settings. Unchanged re-runs make no request and never touch an edited outline. Changing `--duration` (or a label, a transcript, the model...) creates a new
+  outline; if you had edited the previous one, a copy is kept as `plans/story_outline.<hash>.bak.json`. The gateway's response cache sits underneath.
+- **Files** (in `plans/`): `story_outline.json` (the document you approve), `story_outline.md` (read this), `story_outline_report.json` (model, prompt versions, tokens, each attempt's findings
+  and repairs, selection), `story_outline.schema.json` and `story_outline_response.schema.json` (also in `schemas/`; the reply schema has no `scene_id`/`schema_version`, every property is required
+  and optional values are nullable, so it works with strict structured-output backends).
+- **Privacy**: a remote `llm.text` endpoint receives descriptions, local capture times, speech excerpts and base file names (no images, no GPS). `outline --dry-run` shows the endpoint and says
+  `remote`/`local`; `media.local_only: true` forces a loopback endpoint. Descriptions and transcripts are personal data: treat the workspace as private.
 
 ## Speech transcription (optional)
 
@@ -456,7 +519,7 @@ with Python 3.11 and 3.13. Only Linux has been exercised locally so far; treat W
 
 ## Known limitations
 
-- **Phase 3 is only partly implemented (LLM gateway, vision labeling, optional transcription and audio features exist):** no LLM outline/selection planning, critic or natural-language revisions. The baseline planner
+- **Phase 4 is only partly implemented (LLM gateway, vision labeling, optional transcription, audio features and the approved story outline exist):** no LLM selection planning, titles, critic or natural-language revisions. The baseline planner
   is chronological with fixed clip lengths, stills at a default duration, no music or narration, hard cuts, and no titles.
 - Resolve import is unverified by this tool (see above). Titles are not carried by any interchange format; audio fades appear as dissolves in OTIO;
   FCPXML drops non-V1 transitions; EDL carries one video track. Only the FilmCraft 0.13.0 / Linux combination has been run; Windows and macOS are unverified until CI has run.
