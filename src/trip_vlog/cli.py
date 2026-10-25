@@ -1,4 +1,4 @@
-"""Command line interface: index / draft / approve / status / resume.
+"""Command line interface: index / analyze / llm-check / draft / approve / status / resume.
 
 Exit codes
   0    success (pipeline finished; QC findings are reported, not errors)
@@ -23,7 +23,7 @@ import yaml
 from trip_vlog import __version__
 from trip_vlog.config import ConfigError
 from trip_vlog.draft_stages import DRAFT_STAGES
-from trip_vlog.orchestrator import IndexResult, approve_plan, read_status, run_draft, run_index, ApprovalRefused
+from trip_vlog.orchestrator import IndexResult, approve_plan, read_status, run_analyze, run_draft, run_index, ApprovalRefused
 
 
 def _common(p: argparse.ArgumentParser, *, media_required: bool) -> None:
@@ -47,6 +47,20 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("index", help="inventory media: scan, probe, catalog, thumbnails")
     _common(p, media_required=True)
 
+    p = sub.add_parser("analyze", help="label video segments and photos with the vision model -> candidate moments (runs index + segment first)")
+    _common(p, media_required=False)
+    p.add_argument("--limit", type=int, metavar="N", help="analyze only the first N assets (sorted by path)")
+    p.add_argument("--sampling-fps", type=float, metavar="FPS", help="frames sampled per second of video, > 0 and <= 30 (media.vision_sampling_fps)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="print how many segments, frames, images and requests would be sent, and to which endpoint; sends nothing")
+
+    p = sub.add_parser("llm-check", help="send one tiny live request per configured endpoint (text, then image) and print a result table")
+    p.add_argument("--output", type=Path, help="workspace whose project.yaml configures the endpoints")
+    p.add_argument("--config", type=Path, help="project.yaml (default: <output>/project.yaml if present, else defaults)")
+    p.add_argument("--set", dest="sets", action="append", default=[], metavar="SECTION.FIELD=VALUE", help="override any config field (repeatable)")
+    p.add_argument("--endpoint", metavar="NAME", help="check this endpoint profile only (default: those used by llm.text and llm.vision)")
+    p.add_argument("--no-image", action="store_true", help="skip the image request")
+
     p = sub.add_parser("status", help="show the last run's stage status")
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--json", action="store_true", help="machine-readable output")
@@ -64,6 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--duration", type=float, help="target duration in seconds (project.target_duration_seconds)")
     p.add_argument("--aspect", choices=["16:9", "9:16"], help="aspect ratio (project.aspect_ratio)")
     p.add_argument("--style", help="style (project.style)")
+    p.add_argument("--sampling-fps", type=float, metavar="FPS", help="frame sampling rate used when analysis runs, > 0 and <= 30 (media.vision_sampling_fps)")
     p.add_argument("--planner", choices=["baseline", "llm"], help="planner (workflow.planner); only 'baseline' exists yet")
     p.add_argument("--filmcraft", help="path to filmcraft-cli (filmcraft.executable; else $FILMCRAFT_CLI, PATH)")
     p.add_argument("--filmcraft-mode", choices=["mcp", "cli", "bridge"], help="filmcraft.mode")
@@ -103,7 +118,7 @@ def _overrides(args: argparse.Namespace) -> dict[str, Any]:
         "fingerprint": "media.fingerprint", "recursive": "media.recursive", "follow_symlinks": "media.follow_symlinks",
         "ffprobe": "media.ffprobe_path", "ffmpeg": "media.ffmpeg_path", "duration": "project.target_duration_seconds",
         "aspect": "project.aspect_ratio", "style": "project.style", "filmcraft_mode": "filmcraft.mode",
-        "filmcraft": "filmcraft.executable", "planner": "workflow.planner",
+        "filmcraft": "filmcraft.executable", "planner": "workflow.planner", "sampling_fps": "media.vision_sampling_fps",
     }
     for attr, key in mapping.items():
         if getattr(args, attr, None) is not None:
@@ -174,12 +189,68 @@ def _cmd_draft(args: argparse.Namespace, command: str = "draft") -> int:
     return res.exit_code
 
 
+def _print_analyze_result(res: IndexResult) -> None:
+    from trip_vlog.state import Manifest, Workspace
+
+    print(f"run {res.run_id} -> {res.workspace}")
+    if res.dry_run is not None:
+        from trip_vlog.analysis.stage import format_dry_run
+
+        print(format_dry_run(res.dry_run))
+        return
+    m = Manifest.load(Workspace(res.workspace).manifest_path)
+    for name, status in res.stage_status.items():
+        st = m.stage(name)
+        if status == "skipped" and st.get("decision") == "cache_hit":
+            status = "cached"
+        print(f"  {name:<11} {status}")
+        if status == "failed" and st.get("error"):
+            print(f"      {str(st['error']).splitlines()[0]}")
+    s = m.stage("analyze").get("summary", {})
+    if s:
+        print(f"labeled {s.get('labeled', 0)} new, {s.get('already_labeled', 0)} already labeled, {s.get('fallback_unlabeled', 0)} fell back to the "
+              f"baseline; {s.get('requests', 0)} request(s) to '{s.get('endpoint')}' ({'local' if s.get('local') else 'remote'}), "
+              f"{s.get('input_tokens', 0)} input / {s.get('output_tokens', 0)} output tokens")
+        for e in s.get("errors", [])[:5]:
+            print(f"  - {e.get('path') or e.get('segment_id')}: {e.get('error')}")
+        for w in s.get("warnings", []):
+            print(f"  warning: {w}")
+        if s.get("fallback_unlabeled"):
+            print("  unlabeled segments keep their baseline moment and are retried by the next `analyze`; details in logs/errors.jsonl")
+        print(f"moments: {res.workspace / 'media_index' / 'moments.jsonl'}")
+
+
+def _cmd_analyze(args: argparse.Namespace, command: str = "analyze") -> int:
+    if args.limit is not None and args.limit < 1:
+        raise ConfigError("--limit must be at least 1")
+    res = run_analyze(args.media, args.output, args.config, _overrides(args), limit=args.limit, dry_run=args.dry_run, command=command)
+    _print_analyze_result(res)
+    return res.exit_code
+
+
+def _cmd_llm_check(args: argparse.Namespace) -> int:
+    from trip_vlog.config import load_config
+    from trip_vlog.llm.check import format_table, run_llm_check
+
+    cfg_path = args.config
+    if cfg_path is None and args.output is not None:
+        cand = Path(args.output).expanduser() / "project.yaml"
+        cfg_path = cand if cand.is_file() else None
+    config = load_config(cfg_path, _parse_sets(args.sets))
+    rows = run_llm_check(config, endpoint=args.endpoint, include_image=not args.no_image)
+    print(format_table(rows))
+    return 0 if all(r.ok for r in rows) else 1
+
+
 def _cmd_resume(args: argparse.Namespace) -> int:
     from trip_vlog.state import Manifest, Workspace
 
     m = Manifest.load(Workspace(Path(args.output).expanduser().resolve()).manifest_path)
     if m.get("pipeline") == "draft":
         return _cmd_draft(args, "resume")
+    if m.get("pipeline") == "analyze":
+        args.limit, args.dry_run = None, False
+        return _cmd_analyze(args, "resume")
     res = run_index(args.media, args.output, args.config, _overrides(args), command="resume")
     _print_index_result(res)
     return res.exit_code
@@ -214,7 +285,9 @@ def _cmd_status(args: argparse.Namespace) -> int:
     print(f"last run  : {m.get('run_id')} ({m.get('command')}) started {m.get('run_started_at')} finished {m.get('run_finished_at') or '-'}")
     print("stages:")
     stages = m.get("stages", {})
-    order = [n for n in DRAFT_STAGES if m.get("pipeline") == "draft" or n in stages] + [n for n in stages if n not in DRAFT_STAGES]
+    canonical = ("scan", "probe", "catalog", "thumbnails", "segment", "analyze", *DRAFT_STAGES[5:])
+    order = ([n for n in canonical if n in stages or (m.get("pipeline") == "draft" and n != "analyze")]
+             + [n for n in stages if n not in canonical])
     for name in order:
         st = stages.get(name, {})
         extra = f" [{st['decision']}]" if st.get("decision") else ""
@@ -265,7 +338,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return {"index": _cmd_index, "status": _cmd_status, "resume": _cmd_resume, "draft": _cmd_draft,
-                "approve": _cmd_approve, "resolve-finish": _cmd_resolve_finish}[args.command](args)
+                "approve": _cmd_approve, "resolve-finish": _cmd_resolve_finish, "analyze": _cmd_analyze,
+                "llm-check": _cmd_llm_check}[args.command](args)
     except ConfigError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2

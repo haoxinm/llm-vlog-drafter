@@ -69,6 +69,10 @@ trip-vlog status  --output /path/to/vlog-project [--json]   # every stage incl. 
 # Inventory only (Phase 1)
 trip-vlog index --media /path/to/trip-media --output /path/to/vlog-project
 
+# Phase 3b: label video segments and photos with the vision model (runs index + segment first; needs an LLM endpoint, see "LLM provider")
+trip-vlog analyze --output /path/to/vlog-project [--media /path/to/trip-media] [--limit N] [--sampling-fps 1.0] [--dry-run]
+trip-vlog llm-check [--output /path/to/vlog-project | --config project.yaml] [--endpoint NAME] [--no-image]
+
 # Optional, Resolve Studio only: finish the handoff inside Resolve (see "Finish in Resolve" below)
 trip-vlog resolve-finish --output /path/to/vlog-project [--dry-run] [--project-name NAME] [--keep-on-failure]
 ```
@@ -94,7 +98,7 @@ Invalid values and unsafe paths (workspace inside the media folder, outputs esca
 ```
 vlog-project/
   project.yaml  manifest.json  README.md          # manifest: versions, approval, FilmCraft version, per-stage status
-  media_index/    catalog.sqlite (authoritative), assets.jsonl, moments.jsonl, inventory_report.json, thumbnails/, contact_sheets/
+  media_index/    catalog.sqlite (authoritative), assets.jsonl, moments.jsonl, inventory_report.json, thumbnails/, contact_sheets/, analysis/ (sampled frames + per-segment sheets)
   plans/          edit_plan.json, plan_summary.md, selection_plan.json, *.schema.json, validation_report.json
   filmcraft/      Trip Vlog Draft_v001.fcproj ..., capability_snapshot.json, command_log.jsonl, execution_journal.json, mapping_report.json
   preview/        draft.mp4, qc_report.json, contact_sheet_timeline.jpg, render_report.json
@@ -171,8 +175,7 @@ Nothing in Phase 1 or 2 contacts the network; FilmCraft runs locally and is conf
 ## LLM provider
 
 Phase 3a adds a provider-neutral LLM gateway (`src/trip_vlog/llm/`). It speaks plain HTTP (Python standard library only; no `anthropic` or `openai`
-package and no extra install) to any server that implements an Anthropic- or OpenAI-style API, with a fully configurable endpoint. No CLI command uses it
-yet (vision labeling and transcription come next); the baseline `draft` flow never contacts the network.
+package and no extra install) to any server that implements an Anthropic- or OpenAI-style API, with a fully configurable endpoint. `analyze` and `llm-check` use it; the baseline `draft` flow never contacts the network.
 
 Configure endpoint *profiles* under `llm:` in `project.yaml` and pick one for text and one for vision:
 
@@ -256,6 +259,59 @@ media: {local_only: true}
   requests by default; see `params: {store: false}` above). Each call logs prompt id/version, model, token usage (input, output, cache read/creation), latency,
   attempts, request id, endpoint and local/remote to `logs/run.jsonl` (stage `llm`), never keys or image bytes. The response cache holds model output and the text
   sent (not image bytes); treat the workspace as private. Use a loopback endpoint with `local_only` or `replay` to avoid any upload.
+
+## Vision labeling (`analyze`)
+
+`trip-vlog analyze` turns the deterministic segments into candidate moments with a vision model (DESIGN §7.2, §7.4). It runs `index` and `segment` first,
+then the resumable `analyze` stage. `draft --planner baseline` never needs it; `draft --planner llm` is still rejected until Phase 4 (which will run `analyze` for you).
+
+```sh
+trip-vlog analyze --output ./vlog --media ./trip --dry-run          # counts only: segments, frames, images, requests, endpoint, local/remote
+trip-vlog analyze --output ./vlog --media ./trip --limit 3          # first 3 assets (by path) as a cheap trial
+trip-vlog analyze --output ./vlog --sampling-fps 2                  # sample 2 frames per second (re-samples and re-labels videos)
+```
+```powershell
+$env:ANTHROPIC_API_KEY = "..."      # the variable named by api_key_env of your endpoint
+trip-vlog analyze --output C:\vlogs\lisbon --media D:\Trips\Lisbon --dry-run
+trip-vlog analyze --output C:\vlogs\lisbon --media D:\Trips\Lisbon --limit 3 --sampling-fps 1
+```
+
+- **Sampling**: `media.vision_sampling_fps` (default 1.0, 0 < fps <= 30; CLI `--sampling-fps FLOAT` on `analyze` and `draft` overrides it and is recorded in
+  `manifest.json` under `cli_overrides`). Each segment is cut into equal slices of about `1/fps` s and the frame at the centre of each slice is decoded with ffmpeg
+  (one process per segment, accurate seek, orientation corrected, longest side `llm.image_max_side`). More than `media.vision_max_frames_per_segment` (default 8) frames
+  are thinned evenly, keeping the first and last. Frames live in `media_index/analysis/frames/<asset>/` under names derived from the content version and the sampling
+  settings; per-segment contact sheets (labelled with segment ID, frame index and timestamp) in `media_index/analysis/sheets/`.
+  `media.fine_sampling_enabled` / `fine_sampling_fps` (denser resampling around the best part) are **not implemented yet** and only produce a warning.
+- **What the model receives** (`media.vision_input`): `frames` (default; one image per sampled frame, each announced by a text line with segment ID, frame index and
+  source time, better grounding) or `contact_sheet` (one grid image per segment, cheaper). Segments are batched up to `media.vision_batch_max_images` (default 16)
+  images and the endpoint's `max_tokens`; a segment's frames are never split across requests. Photos are sent one image each, batched the same way.
+  The model never produces timestamps: it may name a best run of frame *indices* (`best_frames`), which the code converts to frame-rounded source seconds clamped to the
+  segment. A different sub-range becomes the moment's `source_in/out_seconds` (the segment bounds stay in `segment_start/end_seconds`; `moment_id` and `segment_id`
+  are the baseline ones). Label schemas: `schemas/segment_labels.schema.json`, `schemas/photo_labels.schema.json`; prompts `segment_labels.v1`, `photo_labels.v1` on top of `media_analyst.v1`.
+- **Validation and fallback**: unknown segment IDs are ignored, out-of-range or reversed `best_frames` reject that item (recorded in `logs/errors.jsonl`), the rest of the
+  reply is kept. Missing or rejected items are re-asked once (fresh request, bypassing the response cache); what still fails keeps its deterministic baseline moment with
+  `labeled: false` and `label_error`, and is retried by the next `analyze`. A fatal endpoint error (auth, connection, config) stops the stage; finished batches are kept.
+- **Photos**: near-duplicates are found with a 64-bit dHash (Pillow only; `media.photo_duplicate_distance`, default 6 bits) and share a `duplicate_group` on their moments.
+- **Caching**: a label is cached per segment by asset content version, segment bounds, prompt id/version/text hash, schema hash, model, endpoint `api`/`params`, sampling
+  settings (fps, frame cap, image size) and `vision_input`; the gateway's response cache sits underneath. Re-runs send nothing; changing only the target duration or
+  story settings does not re-run analysis. Moments are in `catalog.sqlite` and exported to `media_index/moments.jsonl` (no GPS; GPS is never sent either).
+- **Cost and privacy**: with a remote endpoint, up to `vision_max_frames_per_segment` frames per segment (or one sheet) and each photo are sent, downscaled and stripped of
+  EXIF/GPS, plus the file's *base name* (never folders) wrapped as untrusted data (`media.vision_send_filenames: false` omits it). Use `--dry-run` to see the numbers first
+  and a loopback endpoint with `media.local_only: true` to keep everything on the machine. Tokens used are logged per request and summed in `status`.
+
+### Checking an endpoint (`llm-check`)
+
+```sh
+trip-vlog llm-check --output ./vlog                  # every endpoint used by llm.text / llm.vision: a text request, then an image request
+trip-vlog llm-check --config project.yaml --endpoint main --no-image
+```
+```powershell
+trip-vlog llm-check --config .\project.yaml --endpoint main
+```
+
+One tiny live request per check (a 2-field JSON reply; then a generated red square, which must be recognised), bypassing every cache and never recorded to fixtures. The table
+shows endpoint, api, URL (no query string or secrets), local/remote, model, structured-output mode, ok/FAIL, latency, tokens and the error class with a short message. Exit
+0 if all checks pass, 1 if any fails, 2 for a bad configuration or unknown `--endpoint`.
 
 ## Platform notes
 

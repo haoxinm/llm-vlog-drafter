@@ -35,6 +35,11 @@ media:
   vision_sampling_fps: 1.0
   fine_sampling_fps: 4.0
   fine_sampling_enabled: false
+  vision_max_frames_per_segment: 8   # frames beyond this are thinned evenly
+  vision_input: frames               # frames | contact_sheet
+  vision_batch_max_images: 16
+  vision_send_filenames: true        # base name only, wrapped as untrusted data
+  photo_duplicate_distance: 6
   segment_window_seconds: 6.0
   transcribe_speech: true
   local_only: false              # true: every endpoint used by llm.text / llm.vision must be loopback
