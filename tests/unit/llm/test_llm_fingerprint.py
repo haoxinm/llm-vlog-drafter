@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import shutil
 
 from llm_helpers import img, ScriptedProvider, make_image, make_request, presp
@@ -7,7 +8,7 @@ from PIL import Image
 
 from trip_vlog.llm import Gateway
 from trip_vlog.llm.gateway import fingerprint_of, request_summary
-from trip_vlog.llm.images import prepare_image
+from trip_vlog.llm.images import IMAGE_PREP_VERSION, prepare_image
 from trip_vlog.llm.types import ImagePart
 
 
@@ -30,8 +31,10 @@ def test_summary_has_no_paths_or_bytes(img):
     s = request_summary(make_request([img]), prepared + [], "test-model")
     text = str(s)
     assert str(img.parent) not in text and img.name not in text
-    assert s["parts"][0] == {"type": "image", "media_type": "image/jpeg", "sha256": prepared[0].sha256}
-    assert set(s) == {"fingerprint_version", "template_id", "template_version", "system", "schema", "parts", "model", "max_tokens", "effort"}
+    assert s["parts"][0] == {"type": "image", "source_sha256": hashlib.sha256(img.read_bytes()).hexdigest(), "max_side": 1568,
+                             "quality": 85, "prep_version": IMAGE_PREP_VERSION}
+    assert set(s) == {"fingerprint_version", "template_id", "template_version", "system", "schema", "parts", "model", "max_tokens",
+                      "effort", "provider"}
     assert len(fingerprint_of(s)) == 64 and gw.model == "test-model"
 
 
@@ -57,7 +60,37 @@ def test_dict_key_order_and_newline_style_do_not_matter(img):
     assert fp(make_request([img], text="a\r\nb")) == fp(make_request([img], text="a\nb"))
 
 
-def test_fingerprint_uses_bytes_actually_sent(tmp_path):
+def test_fingerprint_hashes_source_bytes_not_reencoded_bytes(img, monkeypatch):
+    base = fp(make_request([img]))
+    sent = prepare_image(ImagePart(img)).data
+    real_save = Image.Image.save
+
+    def other_encoder(self, target, format=None, **kw):  # simulate a different JPEG encoder build on another OS
+        return real_save(self, target, format=format, optimize=True, progressive=True, **kw)
+
+    monkeypatch.setattr(Image.Image, "save", other_encoder)
+    assert prepare_image(ImagePart(img)).data != sent  # the re-encoded bytes really differ
+    assert fp(make_request([img])) == base
+
+
+def test_provider_settings_are_fingerprinted_but_not_endpoint_location(img):
+    def f(extra):
+        p = ScriptedProvider()
+        p.fingerprint_extra = extra
+        return Gateway(p).fingerprint(make_request([img]))
+
+    base = f({"api": "openai_chat", "params": {"temperature": 0}})
+    assert f({"api": "openai_chat", "params": {"temperature": 0}}) == base
+    assert f({"api": "openai_chat", "params": {"temperature": 1}}) != base
+    assert f({"api": "anthropic_messages", "params": {"temperature": 0}}) != base
+
+
+def test_fingerprint_depends_on_prep_parameters(img):
+    assert fp(make_request([img]), image_max_side=700) != fp(make_request([img]))
+    assert fp(make_request([img]), image_quality=70) != fp(make_request([img]))
+
+
+def test_image_is_resized_and_sent_as_jpeg(tmp_path):
     big = tmp_path / "big.png"
     Image.new("RGB", (4000, 3000), (10, 120, 200)).save(big)
     gw = Gateway(ScriptedProvider(), image_max_side=800)

@@ -184,8 +184,12 @@ class LLMResponse:
 @dataclass(frozen=True)
 class PreparedImage:
     media_type: str
-    data: bytes
-    sha256: str
+    data: bytes             # the re-encoded, metadata-stripped bytes that are actually sent
+    sha256: str             # hash of `data` (informational; NOT used by the fingerprint, see source_sha256)
+    source_sha256: str = ""  # hash of the original file bytes
+    max_side: int = 0
+    quality: int = 0
+    prep_version: str = ""
 
 
 @dataclass(frozen=True)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -46,6 +47,10 @@ class Provider(Protocol):
     name: str
     model: str                      # model id requested ("" for a replay provider with no configured model)
     supports_schema_retry: bool     # False for replay: a stored answer cannot change on a second call
+    # Optional attributes read with getattr defaults:
+    #   fingerprint_extra: dict  output-relevant settings (api kind, params); never URLs/headers/keys
+    #   endpoint: str            profile name, for logs
+    #   is_local: bool           True when the endpoint is loopback / nothing leaves the machine
 
     def complete(self, request: ProviderRequest) -> ProviderResponse: ...
 
@@ -55,14 +60,18 @@ def _norm(text: str) -> str:
     return nfc(text.replace("\r\n", "\n").replace("\r", "\n"))
 
 
-def request_summary(req: LLMRequest, prepared: list[TextPart | PreparedImage], model: str) -> dict[str, Any]:
-    """The fingerprint inputs. Images appear as content hashes only; no paths, no bytes."""
+def request_summary(req: LLMRequest, prepared: list[TextPart | PreparedImage], model: str,
+                    extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The fingerprint inputs. Images appear as SOURCE-byte hashes + preparation parameters (never paths or bytes, and
+    not the re-encoded bytes, which can differ across OSes). `extra` is the provider's output-relevant settings
+    (api kind, params) and never contains URLs, headers, timeouts or keys."""
     parts: list[dict[str, str]] = []
     for p in prepared:
         if isinstance(p, TextPart):
             parts.append({"type": "text", "text": _norm(p.text)})
         else:
-            parts.append({"type": "image", "media_type": p.media_type, "sha256": p.sha256})
+            parts.append({"type": "image", "source_sha256": p.source_sha256, "max_side": p.max_side, "quality": p.quality,
+                          "prep_version": p.prep_version})
     return {
         "fingerprint_version": FINGERPRINT_VERSION,
         "template_id": req.template_id,
@@ -73,6 +82,7 @@ def request_summary(req: LLMRequest, prepared: list[TextPart | PreparedImage], m
         "model": model,
         "max_tokens": req.max_tokens,
         "effort": req.effort,
+        "provider": extra or {},
     }
 
 
@@ -147,7 +157,7 @@ class Gateway:
                                               cache_dir=self.image_cache_dir))
             else:
                 prepared.append(p)
-        summary = request_summary(req, prepared, self.model)
+        summary = request_summary(req, prepared, self.model, getattr(self.provider, "fingerprint_extra", None))
         return prepared, fingerprint_of(summary), summary
 
     def _cache_lookup(self, req: LLMRequest, fp: str) -> dict[str, Any] | None:
@@ -214,7 +224,8 @@ class Gateway:
     # -- logging --------------------------------------------------------
     def _emit(self, status: Status, req: LLMRequest, resp: LLMResponse, *, cache: str | None) -> None:
         fields: dict[str, Any] = dict(
-            provider=self.provider.name, prompt_id=req.template_id, prompt_version=req.template_version,
+            provider=self.provider.name, endpoint=getattr(self.provider, "endpoint", None), local=getattr(self.provider, "is_local", None),
+            prompt_id=req.template_id, prompt_version=req.template_version,
             model=resp.model, fingerprint=resp.fingerprint, attempts=resp.attempts, request_id=resp.request_id,
             stop_reason=resp.stop_reason,
         )
@@ -229,7 +240,8 @@ class Gateway:
     def _emit_error(self, req: LLMRequest, fp: str | None, err: LLMError, duration_ms: float) -> None:
         _log.warning("llm %s v%s failed: %s", req.template_id, req.template_version, type(err).__name__)
         if self.logger is not None:
-            self.logger.event("llm", Status.FAILED, duration_ms=duration_ms, provider=self.provider.name, prompt_id=req.template_id,
+            self.logger.event("llm", Status.FAILED, duration_ms=duration_ms, provider=self.provider.name, endpoint=getattr(self.provider, "endpoint", None),
+                              local=getattr(self.provider, "is_local", None), prompt_id=req.template_id,
                               prompt_version=req.template_version, fingerprint=fp, error=f"{type(err).__name__}: {err}",
                               request_id=getattr(err, "request_id", None))
 
@@ -238,14 +250,34 @@ def _ms(t0: float) -> float:
     return (time.perf_counter() - t0) * 1000.0
 
 
-def _parse_and_validate(text: str, schema: dict[str, Any]) -> tuple[Any, list[str]]:
+def extract_json(text: str) -> Any:
+    """Parse model text as JSON: the whole text, a fenced block, or else the first JSON object/array embedded in prose.
+
+    Raises ValueError when nothing parses.
+    """
     body = text.strip()
-    if body.startswith("```"):  # tolerate a fenced reply from providers without constrained decoding
-        lines = body.splitlines()
-        if len(lines) >= 2 and lines[-1].strip() == "```":
-            body = "\n".join(lines[1:-1]).strip()
     try:
-        parsed = json.loads(body)
+        return json.loads(body)
+    except ValueError:
+        pass
+    fence = re.search(r"```[A-Za-z0-9_-]*[ \t]*\n(.*?)\n?```", body, re.S)
+    if fence:
+        try:
+            return json.loads(fence.group(1).strip())
+        except ValueError:
+            body = fence.group(1)
+    dec = json.JSONDecoder()
+    for m in re.finditer(r"[{\[]", body):
+        try:
+            return dec.raw_decode(body, m.start())[0]
+        except ValueError:
+            continue
+    raise ValueError("no JSON object found in the reply")
+
+
+def _parse_and_validate(text: str, schema: dict[str, Any]) -> tuple[Any, list[str]]:
+    try:
+        parsed = extract_json(text)
     except ValueError as e:
         return None, [f"reply is not valid JSON: {e}"]
     return parsed, validation_errors(parsed, schema)

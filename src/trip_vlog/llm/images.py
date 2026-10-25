@@ -1,7 +1,8 @@
 """Prepare local images for upload: orient, downscale, strip metadata, re-encode as JPEG (DESIGN §17).
 
 Re-encoding drops EXIF/GPS and other metadata, so location data is never sent with a frame. The bytes
-returned here are exactly the bytes sent to the provider, and they are what the request fingerprint hashes.
+returned here are exactly the bytes sent to the provider. The request fingerprint does NOT hash them (JPEG encoders may differ
+between OSes/Pillow builds); it hashes the source file bytes plus the preparation parameters instead.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from trip_vlog.llm.types import ImagePart, LLMInputError, PreparedImage
 
 DEFAULT_MAX_SIDE = 1568
 DEFAULT_QUALITY = 85
-_PREP_VERSION = "p1"  # bump when the encoding pipeline changes (part of the prepared-image cache key)
+IMAGE_PREP_VERSION = "p1"  # bump when the encoding pipeline changes (part of the prepared-image cache key and the fingerprint)
 
 
 def prepare_image(
@@ -32,11 +33,11 @@ def prepare_image(
     except OSError as e:
         raise LLMInputError(f"cannot read image {part.path.name}: {e.strerror or e}") from None
     src_hash = hashlib.sha256(raw).hexdigest()
-    cached = cache_dir / f"{src_hash}-{max_side}-{quality}-{_PREP_VERSION}.jpg" if cache_dir else None
+    cached = cache_dir / f"{src_hash}-{max_side}-{quality}-{IMAGE_PREP_VERSION}.jpg" if cache_dir else None
     if cached is not None:
         try:
             data = cached.read_bytes()
-            return PreparedImage("image/jpeg", data, hashlib.sha256(data).hexdigest())
+            return _prepared(data, src_hash, max_side, quality)
         except OSError:
             pass
     try:
@@ -65,4 +66,8 @@ def prepare_image(
             os.replace(tmp, cached)
         except OSError:
             pass  # the cache is an optimisation only
-    return PreparedImage("image/jpeg", data, hashlib.sha256(data).hexdigest())
+    return _prepared(data, src_hash, max_side, quality)
+
+
+def _prepared(data: bytes, src_hash: str, max_side: int, quality: int) -> PreparedImage:
+    return PreparedImage("image/jpeg", data, hashlib.sha256(data).hexdigest(), src_hash, max_side, quality, IMAGE_PREP_VERSION)
