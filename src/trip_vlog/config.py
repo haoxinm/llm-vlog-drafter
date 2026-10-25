@@ -119,6 +119,12 @@ class MediaConfig(_Model):
     scene_threshold: float = Field(0.30, gt=0, lt=1)           # ffmpeg scene-cut score
     silence_threshold_db: float = Field(-35.0, ge=-120, le=0)  # audio below this level counts as silence
     still_duration_seconds: float = Field(3.0, gt=0, le=600)   # default on-screen time of a photo
+    # Phase 3b vision labeling (the sampling fps itself is `vision_sampling_fps`)
+    vision_max_frames_per_segment: int = Field(8, ge=1, le=64)  # frames beyond this are thinned evenly
+    vision_input: Literal["frames", "contact_sheet"] = "frames"  # what the model receives per segment
+    vision_batch_max_images: int = Field(16, ge=1, le=100)       # images per request (segments are never split across requests)
+    vision_send_filenames: bool = True                          # send the file's base name (wrapped as untrusted data), never its folders
+    photo_duplicate_distance: int = Field(6, ge=0, le=32)        # max Hamming distance of 64-bit dHashes to call two photos near-duplicates
 
     @model_validator(mode="after")
     def _check(self) -> "MediaConfig":

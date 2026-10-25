@@ -237,22 +237,54 @@ class Catalog:
 
     def replace_moments(self, asset_id: str, content_version: str | None, moments: list[dict[str, Any]]) -> None:
         """Make `moments` the baseline moments of an asset. Moments enriched by later phases (data 'source' other than
-        'baseline') are never overwritten or removed here."""
+        'baseline') are never overwritten or removed here, with two exceptions that keep labels honest: vision-labeled
+        moments ('llm') whose segment disappeared are dropped, and enriched moments recorded for an older
+        content_version are replaced (their label described different pixels)."""
         keep = {m["moment_id"] for m in moments}
         with self.conn:
-            for r in self.conn.execute("SELECT moment_id, data_json FROM moments WHERE asset_id=?", (asset_id,)).fetchall():
+            for r in self.conn.execute("SELECT moment_id, content_version, data_json FROM moments WHERE asset_id=?", (asset_id,)).fetchall():
                 data = json.loads(r["data_json"] or "{}")
-                if data.get("source", "baseline") == "baseline" and r["moment_id"] not in keep:
+                src = data.get("source", "baseline")
+                if r["moment_id"] in keep:
+                    continue
+                if src in ("baseline", "llm"):
                     self.conn.execute("DELETE FROM moments WHERE moment_id=?", (r["moment_id"],))
             for m in moments:
-                old = self.conn.execute("SELECT data_json FROM moments WHERE moment_id=?", (m["moment_id"],)).fetchone()
-                if old is not None and json.loads(old["data_json"] or "{}").get("source", "baseline") != "baseline":
+                old = self.conn.execute("SELECT content_version, data_json FROM moments WHERE moment_id=?", (m["moment_id"],)).fetchone()
+                if (old is not None and json.loads(old["data_json"] or "{}").get("source", "baseline") != "baseline"
+                        and old["content_version"] == content_version):
                     continue
-                self.conn.execute(
-                    "INSERT OR REPLACE INTO moments(moment_id, asset_id, segment_id, source_in_seconds, source_out_seconds, content_version, data_json)"
-                    " VALUES (?,?,?,?,?,?,?)",
-                    (m["moment_id"], asset_id, m.get("segment_id"), m.get("source_in_seconds"), m.get("source_out_seconds"),
-                     content_version, json.dumps(m, sort_keys=True, ensure_ascii=False)))
+                self._put_moment(m, asset_id, content_version)
+
+    def _put_moment(self, m: dict[str, Any], asset_id: str, content_version: str | None) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO moments(moment_id, asset_id, segment_id, source_in_seconds, source_out_seconds, content_version, data_json)"
+            " VALUES (?,?,?,?,?,?,?)",
+            (m["moment_id"], asset_id, m.get("segment_id"), m.get("source_in_seconds"), m.get("source_out_seconds"),
+             content_version, json.dumps(m, sort_keys=True, ensure_ascii=False)))
+
+    def upsert_moments(self, asset_id: str, content_version: str | None, moments: list[dict[str, Any]]) -> None:
+        """Insert or overwrite moments whatever their source (vision labeling replaces a baseline moment of the same ID)."""
+        with self.conn:
+            for m in moments:
+                self._put_moment(m, asset_id, content_version)
+
+    def delete_moments(self, moment_ids: Iterable[str]) -> None:
+        with self.conn:
+            for mid in moment_ids:
+                self.conn.execute("DELETE FROM moments WHERE moment_id=?", (mid,))
+
+    def prune_cache(self, asset_id: str, analyzer_prefix: str, keep_keys: Iterable[str]) -> int:
+        """Delete analysis_cache rows of an asset whose analyzer starts with `analyzer_prefix` and whose key is not kept."""
+        keep = set(keep_keys)
+        n = 0
+        with self.conn:
+            for r in self.conn.execute("SELECT analyzer, cache_key FROM analysis_cache WHERE asset_id=?", (asset_id,)).fetchall():
+                if r["analyzer"].startswith(analyzer_prefix) and r["cache_key"] not in keep:
+                    self.conn.execute("DELETE FROM analysis_cache WHERE asset_id=? AND analyzer=? AND cache_key=?",
+                                      (asset_id, r["analyzer"], r["cache_key"]))
+                    n += 1
+        return n
 
     def list_moments(self, asset_id: str | None = None) -> list[sqlite3.Row]:
         q = "SELECT * FROM moments" + (" WHERE asset_id=?" if asset_id else "")
