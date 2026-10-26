@@ -496,8 +496,15 @@ class QcConfig(_Model):
     black_picture_threshold: float = Field(0.98, gt=0, le=1)  # blackdetect pic_th
     black_pixel_threshold: float = Field(0.10, ge=0, lt=1)    # blackdetect pix_th
     contact_sheet_columns: int = Field(4, ge=1, le=12)
-    contact_sheet_max_frames: int = Field(48, ge=2, le=200)
+    contact_sheet_max_frames: int = Field(48, ge=2, le=200)   # tiles per preview sheet; more cuts than fit make further sheets
+    contact_sheet_max_sheets: int = Field(8, ge=1, le=50)     # most sheets; beyond that, cuts are sampled evenly (recorded in the index)
     contact_sheet_tile_width: int = Field(320, ge=64, le=1280)
+    cut_sample_offset_seconds: float = Field(0.15, gt=0, le=2)  # sheet frames this long before / after each cut (clamped inside the clips)
+    # Deterministic heuristics (DESIGN 14.1). They only ever warn: a subjective finding never fails a draft.
+    speech_cut_tolerance_seconds: float = Field(0.25, ge=0, le=5)  # a clip edge this close to a transcript segment edge is not "through" it
+    audio_jump_db: float = Field(12.0, gt=0, le=60)                # warn at a cut when mean levels of two audible clips differ by this much
+    audio_active_ratio_min: float = Field(0.5, ge=0, le=1)         # "active natural sound": at least this share of windows above the silence threshold
+    music_max_gain_db: float = Field(-6.0, ge=-60, le=0)           # music under speech / active sound must be at or below this clip gain
 
 
 class OutputsConfig(_Model):
@@ -505,6 +512,7 @@ class OutputsConfig(_Model):
     preview_file: str = "preview/draft.mp4"
     edit_plan_file: str = "plans/edit_plan.json"
     interchange_dir: str = "resolve_handoff"
+    qc_dir: str = "qc"                    # preview_sheet.json: index of the preview contact sheets (for reviewers and the critic)
 
     @field_validator("*")
     @classmethod

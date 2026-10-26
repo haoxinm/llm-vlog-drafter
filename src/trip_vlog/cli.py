@@ -218,7 +218,8 @@ def _print_draft_result(res: IndexResult) -> None:
         print(f"edit plan approved from the {ap_rec.get('outline_approval_mode')} outline approval (no separate review; set workflow.plan_review: true to stop here)")
     qc = m.stage("qc").get("summary", {})
     if qc:
-        print(f"QC: {qc.get('status')} ({qc.get('pass', 0)} pass, {qc.get('warn', 0)} warn, {qc.get('fail', 0)} fail)"
+        print(f"QC: {qc.get('status')} ({qc.get('pass', 0)} pass, {qc.get('warn', 0)} warn, {qc.get('fail', 0)} fail"
+              + (f", {qc['skipped']} skipped" if qc.get("skipped") else "") + ")"
               + (f"; warnings: {', '.join(qc['warned_checks'])}" if qc.get("warned_checks") else "")
               + (f"; FAILED: {', '.join(qc['failed_checks'])}" if qc.get("failed_checks") else ""))
     pv = m.stage("preview").get("summary", {})
@@ -226,6 +227,19 @@ def _print_draft_result(res: IndexResult) -> None:
         print(f"preview: {ws / pv['preview']} ({pv.get('duration_seconds')} s)")
     if m.stage("handoff").get("status") in ("succeeded", "partial"):
         print(f"handoff: {ws / 'resolve_handoff' / 'handoff_report.md'}")
+        line = _compat_line(m.stage("handoff").get("summary", {}), ws)
+        if line:
+            print(line)
+
+
+def _compat_line(summary: dict, ws: Path) -> str:
+    cp = summary.get("compatibility")
+    if not cp:
+        return ""
+    return (f"compatibility: {cp['overall']} ({cp['verified']} verified, {cp['expected']} expected, {cp['manual']} manual, {cp['unsupported']} unsupported"
+            + (f", {cp['unknown']} unknown" if cp.get("unknown") else "") + "); "
+            f"XML round trip {'identical' if cp.get('xml_roundtrip_ok') else 'NOT checked' if cp.get('xml_roundtrip_ok') is None else 'has mismatches'}"
+            f"\n  report: {ws / 'resolve_handoff' / 'compatibility_report.md'}")
 
 
 def _cmd_draft(args: argparse.Namespace, command: str = "draft") -> int:
@@ -467,6 +481,9 @@ def _cmd_status(args: argparse.Namespace) -> int:
             print(f"  probable duplicates: {', '.join(d['paths'])}")
         for mv in cat["probable_moves"]:
             print(f"  probable move: {mv['from']} -> {mv['to']}")
+    cl = _compat_line(stages.get("handoff", {}).get("summary", {}), Path(info["workspace"]))
+    if cl:
+        print(cl.replace("compatibility:", "compat    :", 1))
     rf = stages.get("resolve_finish")
     if rf:
         rs = rf.get("summary", {})

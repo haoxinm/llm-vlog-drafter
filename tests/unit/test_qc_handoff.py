@@ -12,7 +12,6 @@ from trip_vlog.handoff.media_manifest import COLUMNS, manifest_rows, missing_use
 from trip_vlog.handoff.report import HandoffReportInputs, read_resolve_verification, render_handoff_report
 from trip_vlog.planning.resolve_plan import PlanSettings, resolve_selection_plan
 from trip_vlog.qc import checks as C
-from trip_vlog.qc.preview import sample_times
 
 CAT = make_catalog()
 
@@ -63,12 +62,6 @@ def test_project_reopens_and_overall():
     assert C.check_project_reopens(False, [], "boom").status == C.FAIL
     assert C.overall_status([C.CheckResult("a", C.PASS), C.CheckResult("b", C.WARN)]) == C.WARN
     assert C.overall_status([C.CheckResult("a", C.FAIL), C.CheckResult("b", C.WARN)]) == C.FAIL
-
-
-def test_sample_times_around_cuts_and_capped():
-    pts = sample_times([5.0, 9.0], 12.0, 48)
-    assert [round(t, 2) for t, _ in pts] == [0.0, 4.85, 5.15, 8.85, 9.15, 11.95]
-    assert len(sample_times([float(i) for i in range(1, 100)], 100.0, 20)) == 20
 
 
 def test_media_manifest_csv(tmp_path):

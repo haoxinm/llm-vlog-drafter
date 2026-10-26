@@ -68,7 +68,15 @@ jobs:
 
       - name: Install FFmpeg (Windows)
         if: runner.os == 'Windows'
-        run: choco install ffmpeg -y --no-progress
+        shell: bash
+        # choco can exit 0 without installing anything when its feed times out, so retry and check the binary.
+        run: |
+          for i in 1 2 3 4; do
+            choco install ffmpeg -y --no-progress || true
+            if [ -x /c/ProgramData/chocolatey/bin/ffmpeg.exe ]; then break; fi
+            echo "ffmpeg not installed (attempt $i); retrying"; sleep $((30 * i))
+          done
+          /c/ProgramData/chocolatey/bin/ffmpeg.exe -version | head -n 1
 
       - uses: actions/setup-python@v5
         with:

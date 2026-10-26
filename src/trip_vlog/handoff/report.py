@@ -57,6 +57,7 @@ class HandoffReportInputs:
     mapping_warnings: list[dict[str, Any]] = field(default_factory=list)
     verification: tuple[str, str] = ("absent", "")
     stage_notes: list[str] = field(default_factory=list)  # e.g. "preview failed: ..."
+    compatibility: dict[str, Any] | None = None           # handoff.compatibility.summary_of(...)
 
 
 def _esc(s: Any) -> str:
@@ -80,6 +81,17 @@ def render_handoff_report(i: HandoffReportInputs) -> str:
                  + (f" ({detail})" if detail else "") + ". Run the verification script on a machine with DaVinci Resolve open "
                  "(see Verification below); fidelity is not claimed until it passes.")
     L.append("")
+
+    cp = i.compatibility
+    if cp:
+        L += ["## Compatibility report", "",
+              f"See **`compatibility_report.md`** / `compatibility_report.json` in this folder: per feature the plan uses, what FilmCraft supports, "
+              f"whether the exported FCP7 XML carries it (checked by parsing `timeline.xml` against the plan), and the RECORDED Resolve result. "
+              f"Overall **{cp['overall']}**: {cp['verified']} verified, {cp['expected']} expected, {cp['manual']} needing a manual step, "
+              f"{cp['unsupported']} unsupported" + (f", {cp['unknown']} unknown (not checked)" if cp.get("unknown") else "") + ". XML round trip: "
+              + {True: "identical to the plan.", False: f"{cp['xml_mismatches']} mismatch(es) (listed there).",
+                 None: f"not checked ({cp['xml_status'].replace('_', ' ')})."}[cp["xml_roundtrip_ok"]]
+              + (" A real resolve-finish run was used for the Resolve column." if cp.get("finish_report_used") else ""), ""]
 
     if ex.dangerous_requested:
         L += ["> **WARNING: unsafe formats were explicitly requested.** " + "; ".join(
