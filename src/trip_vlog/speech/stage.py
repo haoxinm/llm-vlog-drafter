@@ -313,7 +313,7 @@ def transcribe_stage(ctx: Any) -> StageResult:
                     failures.append({"path": e.row["relative_path"], "error": msg})
                     ctx.logger.event("transcribe", Status.FAILED, asset_id=e.aid, error=msg, path=e.row["relative_path"])
                     unreachable = unreachable + 1 if isinstance(ex, (SpeechConnectionError, SpeechTimeoutError)) else 0
-                    bad_requests = bad_requests + 1 if isinstance(ex, SpeechBadRequestError) else 0
+                    bad_requests = bad_requests + 1 if isinstance(ex, SpeechBadRequestError) and getattr(ex, "status_code", None) in (400, 422) else 0
                     if bad_requests >= MAX_EARLY_BAD_REQUESTS and not summary["transcribed"]:
                         fatal = (f"stopping: the first {bad_requests} requests were rejected as invalid and none succeeded, so this is "
                                  f"probably a configuration problem (speech.endpoint model/params/response_format), not the files. Server said: {msg}")

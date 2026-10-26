@@ -137,10 +137,13 @@ class MediaConfig(_Model):
 
 API_KINDS = ("anthropic_messages", "openai_chat", "openai_responses")
 # Request-body fields the adapters set themselves; `params` may not override them (checked for every api, so a profile
-# stays valid if `api` is switched). `text`/`output_config` may be given (e.g. verbosity, effort) but not with a `format`.
-RESERVED_PARAMS = frozenset({"model", "messages", "input", "system", "instructions", "stream", "response_format",
+# stays valid if `api` is switched).
+RESERVED_PARAMS = frozenset({"model", "messages", "input", "system", "instructions", "stream",
                              "max_tokens", "max_completion_tokens", "max_output_tokens"})
-RESERVED_PARAM_SUBKEYS = {"text": "format", "output_config": "format"}
+# Only the adapters' structured-output fields: reserved while structured_output is "native" (the adapter writes them). With
+# json_prompt / none nothing is written there, so a local server may be given e.g. response_format {type: json_object}.
+NATIVE_RESERVED_PARAMS = frozenset({"response_format"})
+RESERVED_PARAM_SUBKEYS = {"text": "format", "output_config": "format"}   # text / output_config may carry other fields (verbosity, effort)
 _API_DEFAULTS = {  # api -> (base_url, api_key_env)
     "anthropic_messages": ("https://api.anthropic.com", "ANTHROPIC_API_KEY"),
     "openai_chat": ("https://api.openai.com", "OPENAI_API_KEY"),
@@ -216,12 +219,13 @@ class EndpointConfig(_Model):
 
     @field_validator("params")
     @classmethod
-    def _params(cls, v: dict[str, Any]) -> dict[str, Any]:
-        bad = sorted(RESERVED_PARAMS & set(v))
+    def _params(cls, v: dict[str, Any], info: Any) -> dict[str, Any]:
+        native = info.data.get("structured_output", "native") == "native"
+        bad = sorted((RESERVED_PARAMS | (NATIVE_RESERVED_PARAMS if native else frozenset())) & set(v))
         if bad:
             raise ValueError(f"params must not set reserved request fields: {', '.join(bad)}")
         for key, sub in RESERVED_PARAM_SUBKEYS.items():
-            if isinstance(v.get(key), dict) and sub in v[key]:
+            if native and isinstance(v.get(key), dict) and sub in v[key]:
                 raise ValueError(f"params must not set reserved request field {key}.{sub} (set structured_output instead)")
         for k, val in v.items():
             try:
@@ -416,9 +420,10 @@ class SpeechConfig(_Model):
             raise ValueError("speech.backend is 'command' but speech.command.args is empty (it must contain {input} and {output_dir})")
         if (self.backend == "openai_transcriptions" and self.audio_format == "wav" and not self.endpoint.is_local
                 and self.chunk_seconds > MAX_WAV_CHUNK_SECONDS):
-            raise ValueError(f"speech.chunk_seconds {self.chunk_seconds:g} would make WAV chunks over the 25 MB upload limit of hosted "
-                             f"transcription services (16 kHz mono WAV is about 1.9 MB per minute); use at most {MAX_WAV_CHUNK_SECONDS:g}, "
-                             "or set speech.audio_format: flac")
+            raise ValueError(f"speech.chunk_seconds {self.chunk_seconds:g} would make WAV chunks over the 25 MB upload limit that "
+                             "hosted transcription services enforce (16 kHz mono WAV is about 1.9 MB per minute). This applies to every "
+                             "non-loopback endpoint, LAN servers included; only 127.x / ::1 / localhost are exempt. Either set "
+                             f"speech.chunk_seconds to at most {MAX_WAV_CHUNK_SECONDS:g} or set speech.audio_format: flac")
         return self
 
     @property

@@ -256,7 +256,7 @@ media: {local_only: true}
   schema, text parts, each image's *source file* hash plus the preparation settings (`image_max_side`, `image_quality`, prep version; not the re-encoded bytes,
   which can differ across OSes), model id, `max_tokens`, effort, and the profile's `api`, `params`, `structured_output`, `max_tokens` cap and token field. Frames cut from video are named in the fingerprint by the asset content
   version, frame number and sampling settings rather than their (ffmpeg-build dependent) JPEG bytes; photos hash the original file. It excludes `base_url`, `path`, headers, timeouts and keys,
-  so a recording made against one host replays against another. A changed frame, prompt version, schema, model or params is a miss; everything else is a hit with no call.
+  so a recording made against one host replays against another. A changed frame, prompt version, schema, model or params is a miss, and so is a changed `content_version` (a re-copied or touched file is re-labelled, even if its pixels are identical); everything else is a hit with no call.
 - **Record / replay** (tests and CI use replay only, no key needed): `TRIP_VLOG_LLM_MODE=replay` (or `llm.mode: replay`) returns stored responses and raises
   `ReplayMissError` naming the fingerprint and template on a miss. `record` calls the real endpoint and also saves each validated response to the fixture dir
   (`llm.fixture_dir` or `TRIP_VLOG_LLM_FIXTURE_DIR`; default the cache dir; tests use `tests/fixtures/llm/`). Replay must use the same model string as the recording.
@@ -359,7 +359,7 @@ speech:
 ```
 
 `chunk_seconds` bounds each upload: 16 kHz mono 16-bit WAV is about 1.9 MB per minute, so against a remote (non-loopback) endpoint with `audio_format: wav` a value above 700 s
-(hosted services reject uploads over 25 MB) is a config error; use `flac` for longer chunks, or a local server, which has no such limit.
+(hosted services reject uploads over 25 MB) is a config error, as for any non-loopback server including LAN ones; use `flac` for longer chunks, or a local server, which has no such limit.
 
 **Backends**
 

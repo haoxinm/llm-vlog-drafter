@@ -357,3 +357,11 @@ def test_flat_photos_are_not_grouped_as_duplicates(tmp_path):
     st.analyze_stage(ctx)
     groups = {m["asset_id"]: m["duplicate_group"] for m in moments(ctx).values() if m["media_type"] == "image"}
     assert all(groups[asset_id_for(f"p{i}.jpg")] is None for i in range(3))
+
+
+def test_a_batch_400_and_its_singleton_retry_do_not_trip_the_breaker(tmp_path):
+    ctx, tr, _ = setup(tmp_path, photos=3)
+    bad = _four_hundred("this batch is too large")
+    tr.respond = lambda call, default: bad(call, default) if len(tr.calls) <= 2 else default
+    res = st.analyze_stage(ctx)          # request 1 = video batch rejected, request 2 = its first singleton retry also rejected
+    assert res.summary["labeled"] >= 3 and len(tr.calls) > 3

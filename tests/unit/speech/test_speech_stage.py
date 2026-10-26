@@ -332,3 +332,27 @@ def test_item_specific_bad_request_after_a_success_stays_recoverable(tmp_path, m
     be = FakeBackend(script=lambda n, p, d: SpeechBadRequestError("bad audio", status_code=400) if n in (2, 3, 4) else None)
     res = run(ctx, be)
     assert res.status == Status.PARTIAL and len(be.calls) == 5
+
+
+@pytest.mark.parametrize("status", [413, 415, None])
+def test_size_and_media_type_rejections_stay_per_item(tmp_path, monkeypatch, status):
+    from trip_vlog.speech.types import SpeechBadRequestError
+
+    install(monkeypatch)
+    ctx = make_speech_ctx(tmp_path)
+    for n in "abcd":
+        add_av(ctx, f"{n}.mp4", 6.0)
+    be = FakeBackend(script=lambda n, p, d: SpeechBadRequestError("too big", status_code=status) if n < 4 else None)
+    res = run(ctx, be)
+    assert res.status == Status.PARTIAL and len(be.calls) == 4
+
+
+def test_422_counts_toward_the_early_abort(tmp_path, monkeypatch):
+    from trip_vlog.speech.types import SpeechBadRequestError
+
+    install(monkeypatch)
+    ctx = make_speech_ctx(tmp_path)
+    for n in "abc":
+        add_av(ctx, f"{n}.mp4", 6.0)
+    be = FakeBackend(script=lambda n, p, d: SpeechBadRequestError("bad field", status_code=422))
+    assert run(ctx, be).status == Status.FAILED and len(be.calls) == 2

@@ -27,8 +27,9 @@ from trip_vlog.paths import long_path
 from trip_vlog.planning.duration import frames_to_float
 from trip_vlog.state import atomic_write_json, stable_hash
 
-FRAMES_VERSION = 1
+FRAMES_VERSION = 2   # 2: frame N is now the frame at N/fps (version 1 seeked half a frame late and produced frame N+1)
 SHEET_TILE_W = 320
+SHEET_VERSION = 1    # bump when the contact-sheet rendering (tile labels, layout) changes
 FRAMES_REL = "media_index/analysis/frames"
 SHEETS_REL = "media_index/analysis/sheets"
 
@@ -86,11 +87,16 @@ def frame_records(seg: dict[str, Any], content_version: str | None, settings: Sa
 
 
 def sheet_rel(seg: dict[str, Any], content_version: str | None, settings: SamplingSettings) -> str:
-    return f"{SHEETS_REL}/{seg['asset_id']}/{seg['segment_id']}_{_short(content_version, settings.key(), SHEET_TILE_W)}.jpg"
+    return f"{SHEETS_REL}/{seg['asset_id']}/{seg['segment_id']}_{_short(content_version, settings.key(), SHEET_TILE_W, SHEET_VERSION)}.jpg"
 
 
 def frames_present(root: Path, records: Sequence[dict[str, Any]]) -> bool:
-    return bool(records) and all((root / r["artifact"]).is_file() and (root / r["artifact"]).stat().st_size > 0 for r in records)
+    return bool(records) and all(_nonempty(root / r["artifact"]) for r in records)
+
+
+def _nonempty(p: Path) -> bool:
+    q = long_path(p)
+    return q.is_file() and q.stat().st_size > 0
 
 
 def _cleanup_stale(root: Path, records: Sequence[dict[str, Any]], seg: dict[str, Any]) -> None:
@@ -100,7 +106,7 @@ def _cleanup_stale(root: Path, records: Sequence[dict[str, Any]], seg: dict[str,
         for p in d.glob(pattern):
             if p.name not in keep:
                 try:
-                    p.unlink()
+                    long_path(p).unlink()
                 except OSError:
                     pass
 
@@ -145,18 +151,18 @@ def extract_segment_frames(ffmpeg: Path | None, src: Path, seg: dict[str, Any], 
     tmps = [out.with_name(f".{out.stem}.{os.getpid()}.tmp.jpg") for out, _ in targets]
     timeout = 60.0 + 15.0 * len(records)
     try:
-        targets[0][0].parent.mkdir(parents=True, exist_ok=True)
+        long_path(targets[0][0].parent).mkdir(parents=True, exist_ok=True)
         err = _extract(ffmpeg, src, [(t, tmp) for (_, t), tmp in zip(targets, tmps)], settings, timeout)
         if err is None:
-            missing = [i for i, tmp in enumerate(tmps) if not tmp.is_file() or tmp.stat().st_size == 0]
+            missing = [i for i, tmp in enumerate(tmps) if not _nonempty(tmp)]
             for i in missing:  # one retry per missing frame, a quarter frame earlier (still after the previous frame)
                 err = _extract(ffmpeg, src, [(max(0.0, targets[i][1] - float(half) / 2), tmps[i])], settings, 60.0)
-                if err or not tmps[i].is_file() or tmps[i].stat().st_size == 0:
+                if err or not _nonempty(tmps[i]):
                     return f"frame {i} (t={records[i]['timestamp_seconds']:.3f}s) could not be decoded" + (f": {err}" if err else "")
         else:
             return err
         for (out, _), tmp in zip(targets, tmps):
-            os.replace(tmp, out)
+            os.replace(long_path(tmp), long_path(out))
         atomic_write_json(root / (records[0]["artifact"].rsplit("_", 1)[0] + ".frames.json"),
                           {"segment_id": seg["segment_id"], "frames": list(records)})
         _cleanup_stale(root, records, seg)
@@ -164,7 +170,7 @@ def extract_segment_frames(ffmpeg: Path | None, src: Path, seg: dict[str, Any], 
     finally:
         for tmp in tmps:
             try:
-                tmp.unlink()
+                long_path(tmp).unlink()
             except OSError:
                 pass
 
@@ -172,20 +178,21 @@ def extract_segment_frames(ffmpeg: Path | None, src: Path, seg: dict[str, Any], 
 def make_segment_sheet(records: Sequence[dict[str, Any]], seg: dict[str, Any], root: Path, out_rel: str) -> str | None:
     """Grid of the sampled frames, each tile labelled with the segment ID, frame index and timestamp. Reuses the thumbnail helpers."""
     out = root / out_rel
-    if out.is_file() and out.stat().st_size > 0:
+    if _nonempty(out):
         return None
     try:
-        tiles = [thumbs._label_tile(root / r["artifact"], [seg["segment_id"], f"#{r['index']}  t={r['timestamp_seconds']:.2f}s"], SHEET_TILE_W)
+        tiles = [thumbs._label_tile(long_path(root / r["artifact"]), [seg["segment_id"], f"#{r['index']}  t={r['timestamp_seconds']:.2f}s"], SHEET_TILE_W)
                  for r in records]
         if not tiles:
             return "no frames for the contact sheet"
-        thumbs._compose(tiles, min(4, len(tiles)), SHEET_TILE_W, out)
+        long_path(out.parent).mkdir(parents=True, exist_ok=True)
+        thumbs._compose(tiles, min(4, len(tiles)), SHEET_TILE_W, long_path(out))
     except Exception as e:  # noqa: BLE001 - the sheet is an artifact; a failure is reported, not fatal
         return f"cannot create contact sheet: {type(e).__name__}: {e}"
     for p in out.parent.glob(f"{seg['segment_id']}_*.jpg"):
         if p.name != out.name:
             try:
-                p.unlink()
+                long_path(p).unlink()
             except OSError:
                 pass
     return None

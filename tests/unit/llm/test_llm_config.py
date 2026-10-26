@@ -103,3 +103,22 @@ def test_reserved_param_error_names_the_key_and_unserializable_is_a_config_error
     with pytest.raises(ConfigError, match=r"llm.endpoints.main.params.when \(date\)"):
         parse_config(ep(params={"when": __import__("datetime").date(2026, 1, 2)}))
     parse_config(ep(params={"text": {"verbosity": "low"}, "output_config": {"effort": "low"}, "temperature": 0}))  # non-format sub-fields are fine
+
+
+def test_response_format_is_reserved_only_for_native_structured_output():
+    for bad_params in ({"response_format": {"type": "json_object"}}, {"text": {"format": {}}}, {"output_config": {"format": {}}}):
+        with pytest.raises(ConfigError):
+            parse_config(ep(params=bad_params))
+        for mode in ("json_prompt", "none"):
+            parse_config(ep(structured_output=mode, params=bad_params))
+    for mode in ("native", "json_prompt", "none"):    # never overridable
+        for key in ("stream", "max_tokens", "max_completion_tokens"):
+            with pytest.raises(ConfigError, match=key):
+                parse_config(ep(structured_output=mode, params={key: 1}))
+
+
+def test_chunk_error_names_lan_servers_and_workarounds():
+    from trip_vlog.config import ConfigError as CE
+    with pytest.raises(CE, match=r"LAN.*flac|flac.*LAN|LAN[\s\S]*700[\s\S]*flac"):
+        parse_config({"speech": {"backend": "openai_transcriptions", "chunk_seconds": 900,
+                                 "endpoint": {"base_url": "http://192.168.1.5:8000", "allow_insecure_http": True, "model": "m"}}})

@@ -245,3 +245,11 @@ def test_command_temp_dir_is_removed_and_input_untouched(tool, wav, tmp_path):
     finally:
         cb.find_output = orig
     assert seen and not seen[0].exists() and wav.read_bytes().startswith(b"RIFF")
+
+
+def test_retry_after_beyond_the_cap_stops_retrying_and_reports_the_server_value(wav):
+    sleeps: list[float] = []
+    tr = Fake(HttpResponse(429, {"retry-after": "3600"}, b'{"error": {"message": "quota"}}'), ok())
+    with pytest.raises(SpeechRateLimitError, match=r"3600s \(Retry-After\).*quota"):
+        backend(tr, ep(max_retries=2), sleeps=sleeps).transcribe(wav, 1.0)
+    assert sleeps == [] and len(tr.requests) == 1

@@ -35,7 +35,7 @@ from trip_vlog.paths import nfc
 
 _log = logging.getLogger("trip_vlog.llm")
 
-FINGERPRINT_VERSION = 1
+FINGERPRINT_VERSION = 2   # 2: the provider block gained structured_output, the token cap and the token field
 _OK_STOPS = {"end_turn", "stop_sequence"}
 _TRUNCATED_STOPS = {"max_tokens", "model_context_window_exceeded"}
 

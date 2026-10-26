@@ -169,3 +169,45 @@ def test_extract_returns_exactly_the_requested_frame_including_the_last(ffmpeg_t
     for r in records:
         px = Image.open(root / r["artifact"]).convert("L").getpixel((32, 32))
         assert abs(px - (20 * r["frame"] + 10)) < 8, (r["frame"], px)
+
+
+def test_version_bumps_change_frame_names_and_sheet_identity(monkeypatch):
+    seg = {"asset_id": "a", "segment_id": "seg_1", "fps": "10", "start_frame": 0, "end_frame": 20}
+    st = fr.SamplingSettings()
+    names = [r["artifact"] for r in fr.frame_records(seg, "cv", st)]
+    sheet, key = fr.sheet_rel(seg, "cv", st), st.key()
+    monkeypatch.setattr(fr, "FRAMES_VERSION", fr.FRAMES_VERSION + 1)
+    assert [r["artifact"] for r in fr.frame_records(seg, "cv", st)] != names and st.key() != key and fr.sheet_rel(seg, "cv", st) != sheet
+    monkeypatch.undo()
+    monkeypatch.setattr(fr, "SHEET_VERSION", fr.SHEET_VERSION + 1)
+    assert fr.sheet_rel(seg, "cv", st) != sheet and [r["artifact"] for r in fr.frame_records(seg, "cv", st)] == names
+    it = _item(1, 3, sheet=True)
+    ident = _req_identity(it)
+    monkeypatch.setattr(fr, "SHEET_VERSION", fr.SHEET_VERSION + 1)
+    assert _req_identity(it) != ident
+
+
+def _req_identity(it):
+    req = build_request(VisionSettings.from_config(labeling_config(), {}), "video", [it], __import__("pathlib").Path("/ws"))
+    return [p.identity for p in req.parts if isinstance(p, ImagePart)]
+
+
+def test_frame_and_sheet_parts_carry_identity_so_jpeg_bytes_do_not_matter(tmp_path):
+    from llm_helpers import ScriptedProvider
+    from trip_vlog.llm import Gateway
+
+    settings = VisionSettings.from_config(labeling_config(), {})
+
+    def fingerprint(root, sheet, color):
+        it = _item(1, 3, sheet=sheet)
+        it.sheet = "sheet.jpg"
+        for name in ["sheet.jpg", *(f["artifact"] for f in it.frames)]:
+            Image.new("RGB", (40, 30), color).save(root / name)
+        return Gateway(ScriptedProvider()).fingerprint(build_request(settings, "video", [it], root))
+
+    for sheet in (False, True):
+        a, b = tmp_path / f"a{sheet}", tmp_path / f"b{sheet}"
+        a.mkdir(); b.mkdir()
+        assert fingerprint(a, sheet, (10, 10, 10)) == fingerprint(b, sheet, (240, 30, 30))
+    it = _item(1, 3)
+    assert all(p.identity for p in build_request(settings, "video", [it], tmp_path).parts if isinstance(p, ImagePart))
