@@ -144,6 +144,29 @@ def _default_gateway(ctx: Any) -> Gateway:
 
 
 # ---------------------------------------------------------------- stage
+HEIF_SUFFIXES = (".heic", ".heif")
+
+
+def _photo_problem(it: Item, gateway: Gateway) -> str | None:
+    """None when the photo can be sent; else why not. Decodes it through the same preparation the gateway will use (the result
+    lands in the prepared-image cache), so one undecodable file fails only itself instead of sinking the whole batch request."""
+    if not it.src.is_file():
+        return "photo file is missing"
+    from trip_vlog.llm.images import prepare_image
+    from trip_vlog.llm.types import ImagePart, LLMInputError
+    from trip_vlog.paths import long_path
+
+    try:
+        prepare_image(ImagePart(long_path(it.src)), max_side=gateway.image_max_side, quality=gateway.image_quality,
+                      cache_dir=gateway.image_cache_dir)
+    except LLMInputError as e:
+        name = it.src.name
+        if it.src.suffix.lower() in HEIF_SUFFIXES:
+            return f"cannot decode {name}; HEIC is not supported by the installed image library"
+        return f"cannot decode {name}: {str(e).rsplit(': ', 1)[-1]}"
+    return None
+
+
 def analyze_stage(ctx: Any) -> StageResult:
     t0 = time.perf_counter()
     cfg, cat, ws = ctx.config, ctx.catalog, ctx.workspace
@@ -161,7 +184,7 @@ def analyze_stage(ctx: Any) -> StageResult:
 
     def prepare(it: Item) -> str | None:
         if it.kind == "photo":
-            return None if it.src.is_file() else "photo file is missing"
+            return _photo_problem(it, lab.gateway)
         err = fr.extract_segment_frames(ctx.ffmpeg, it.src, it.seg, it.frames, root, s.sampling)
         if err:
             return f"frame extraction failed: {err}"

@@ -292,3 +292,16 @@ def test_stale_llm_moments_are_dropped_when_segments_change(tmp_path):
     ctx.catalog.replace_moments(aid, "fast:a.mp4", moments_from_segments(new, "fast:a.mp4"))
     ms = moments(ctx)
     assert len(ms) == len(new) and all(m["source"] == "baseline" for m in ms.values())
+
+
+def test_undecodable_photo_fails_alone_and_is_left_out_of_the_batch(tmp_path):
+    ctx, tr, _ = setup(tmp_path, photos=2)
+    add_photo(ctx.catalog, "IMG_0001.HEIC")
+    (ctx.paths.media_root / "IMG_0001.HEIC").write_bytes(b"\x00\x00\x00\x18ftypheic" + b"\x00" * 64)   # no decoder for this
+    res = st.analyze_stage(ctx)
+    assert res.status == Status.PARTIAL and res.summary["labeled"] == 5 and res.summary["fallback_unlabeled"] == 1
+    assert any("cannot decode IMG_0001.HEIC; HEIC is not supported by the installed image library" in e["error"] for e in res.summary["errors"])
+    photo_calls = [c for c in tr.calls if c.images and len(c.sids) <= 2 and not c.frames]
+    assert photo_calls and all(len(c.sids) == 2 for c in photo_calls) and len(tr.calls) == 2   # the two good photos travel together; no retry round
+    bad = [m for m in moments(ctx).values() if m.get("labeled") is False]
+    assert len(bad) == 1 and "HEIC" in bad[0]["label_error"]
