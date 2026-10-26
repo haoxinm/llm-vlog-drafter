@@ -401,7 +401,10 @@ def test_runs_record_pid_host_and_start_time(fc):
     adapter.build_project(fcsupport.sample_spec(media))
     run = journal(ws)["runs"][0]
     assert run["pid"] == os.getpid() and run["host"] == this_host() and run["started_at"]
-    assert not (ws / "filmcraft" / "execution_journal.lock").exists(), "the lock is released after every journal update"
+    from trip_vlog.filmcraft.journal_lock import journal_lock
+
+    with journal_lock(ws / "filmcraft" / "execution_journal.json", wait=0.2):       # released after every journal update
+        pass
 
 
 def test_a_build_running_in_a_live_process_is_not_abandoned_and_blocks_a_second_build(fc):
@@ -444,21 +447,119 @@ def test_a_recent_build_of_another_host_is_taken_for_live(fc):
     assert journal(ws)["runs"][0]["status"] == "running"
 
 
-def test_journal_lock_fails_fast_on_a_live_holder_and_recovers_a_stale_one(tmp_path):
-    from trip_vlog.filmcraft.journal_lock import journal_lock, lock_path_for, this_host
+_HOLDER = """
+import sys, time
+from pathlib import Path
+from trip_vlog.filmcraft.journal_lock import journal_lock
+jp, ready, secs = Path(sys.argv[1]), Path(sys.argv[2]), float(sys.argv[3])
+with journal_lock(jp, wait=5):
+    ready.write_text("held")
+    time.sleep(secs)
+"""
+
+
+def _spawn_holder(jp, ready, secs):
+    import subprocess
+    import sys
+
+    p = subprocess.Popen([sys.executable, "-c", _HOLDER, str(jp), str(ready), str(secs)])
+    t0 = time.monotonic()
+    while not ready.exists():
+        assert p.poll() is None and time.monotonic() - t0 < 20, "holder did not start"
+        time.sleep(0.02)
+    return p
+
+
+def test_journal_lock_is_exclusive_across_processes_and_released_when_the_holder_dies(tmp_path):
+    from trip_vlog.filmcraft.journal_lock import journal_lock, lock_path_for
 
     jp = tmp_path / "execution_journal.json"
-    lock = lock_path_for(jp)
-    lock.write_text(json.dumps({"pid": os.getppid(), "host": this_host(), "at": "2999-01-01T00:00:00+00:00"}), encoding="utf-8")
-    t0 = time.monotonic()
-    with pytest.raises(FilmCraftError, match="updating execution_journal.json"):
+    p = _spawn_holder(jp, tmp_path / "ready1", 30)
+    try:
+        t0 = time.monotonic()
+        with pytest.raises(FilmCraftError, match="is being updated by pid"):
+            with journal_lock(jp, wait=0.3):
+                raise AssertionError("two processes held the lock at once")
+        assert time.monotonic() - t0 < 5, "waits no longer than asked"
+    finally:
+        p.kill()
+        p.wait()
+    with journal_lock(jp, wait=2):          # the OS dropped the dead holder's lock: no stale handling needed
+        pass
+    assert lock_path_for(jp).exists(), "the lock file is persistent and never deleted"
+
+
+def test_journal_lock_waits_for_a_short_holder_then_proceeds(tmp_path):
+    from trip_vlog.filmcraft.journal_lock import journal_lock
+
+    jp = tmp_path / "execution_journal.json"
+    p = _spawn_holder(jp, tmp_path / "ready2", 0.5)
+    with journal_lock(jp, wait=10):
+        pass
+    assert p.wait(timeout=10) == 0
+
+
+def test_journal_lock_reacquires_after_release_error_or_interrupt_and_nested_use_does_not_deadlock(tmp_path):
+    from trip_vlog.filmcraft.journal_lock import journal_lock
+
+    jp = tmp_path / "execution_journal.json"
+    with pytest.raises(KeyboardInterrupt):
         with journal_lock(jp, wait=0.3):
-            pass
-    assert time.monotonic() - t0 < 3 and lock.exists(), "a live holder's lock is not touched"
-    lock.write_text(json.dumps({"pid": _dead_pid(), "host": this_host(), "at": "2999-01-01T00:00:00+00:00"}), encoding="utf-8")
-    with journal_lock(jp, wait=0.3):
-        assert json.loads(lock.read_text(encoding="utf-8"))["pid"] == os.getpid()
-    assert not lock.exists()
+            raise KeyboardInterrupt
+    for _ in range(3):
+        with journal_lock(jp, wait=0.3):
+            with journal_lock(jp, wait=0.3):        # nested use by the same thread is a no-op, not a deadlock
+                pass
+
+
+def test_abandon_running_marks_foreign_running_builds_and_keeps_files(fc):
+    from trip_vlog.filmcraft.execution import abandon_running, running_builds
+    from trip_vlog.logging_utils import utc_now_iso
+
+    adapter, media, ws = fc
+    spec = fcsupport.sample_spec(media)
+    adapter.build_project(spec)
+    _set_running(ws, pid=4242, host="renamed-host", started_at=utc_now_iso())
+    jp = ws / "filmcraft" / "execution_journal.json"
+    with pytest.raises(FilmCraftError) as e:
+        adapter.build_project(fcsupport.sample_spec(media, end_marker=90))
+    assert str(jp) in str(e.value) and "--abandon-running" in str(e.value)
+    assert [r["version"] for r in running_builds(jp)] == [1]
+    assert [r["version"] for r in abandon_running(jp)] == [1]
+    assert journal(ws)["runs"][0]["abandoned"] and (ws / "filmcraft" / "Trip Vlog Draft_v001.fcproj").is_file()
+    assert adapter.build_project(fcsupport.sample_spec(media, end_marker=90)).version == 2
+
+
+def test_cli_abandon_running_asks_first(fc, monkeypatch, capsys):
+    from trip_vlog import cli
+    from trip_vlog.logging_utils import utc_now_iso
+
+    adapter, media, ws = fc
+    adapter.build_project(fcsupport.sample_spec(media))
+    _set_running(ws, pid=4242, host="renamed-host", started_at=utc_now_iso())
+    monkeypatch.setattr("builtins.input", lambda *_: "n")
+    assert cli._abandon_running(ws) is False and journal(ws)["runs"][0]["status"] == "running"
+    monkeypatch.setattr("builtins.input", lambda *_: "y")
+    assert cli._abandon_running(ws) is True and journal(ws)["runs"][0]["status"] == "failed"
+
+
+def test_a_failing_journal_write_while_recording_a_failure_does_not_hide_the_build_error(fc, monkeypatch):
+    from trip_vlog.filmcraft import execution
+
+    adapter, media, ws = fc
+    monkeypatch.setenv("FAKE_FC_FAIL_ON", "timeline.place")
+    real = execution.save_journal
+    calls = {"n": 0}
+
+    def flaky(path, doc):
+        calls["n"] += 1
+        if doc["runs"] and doc["runs"][-1]["status"] == "failed":
+            raise OSError("disk full")
+        real(path, doc)
+
+    monkeypatch.setattr(execution, "save_journal", flaky)
+    with pytest.raises(CommandError, match="timeline.place"):
+        adapter.build_project(fcsupport.sample_spec(media))
 
 
 def test_each_checkpoint_reloads_the_journal_so_another_process_runs_are_kept(fc, monkeypatch):

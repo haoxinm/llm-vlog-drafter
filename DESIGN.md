@@ -1455,8 +1455,9 @@ nothing here was run in Resolve.
     run left `running` by a dead process (pid, host and start time are
     recorded per run) is marked `failed` + `abandoned` by the next
     build; a live build of another process is never touched and a
-    second build is refused; the journal is updated under a short lock
-    file and reloaded before each write; failed/interrupted builds are listed
+    second build is refused; the journal is updated under a short OS
+    file lock and reloaded before each write; `--abandon-running` is the
+    escape hatch for a build of an unreachable host; failed/interrupted builds are listed
     in `manifest.filmcraft.failed_versions`, `status` and the handoff
     report, `latest_run` documents that only completed builds are
     returned (so `resume`, preview, QC, critic, revisions and handoff

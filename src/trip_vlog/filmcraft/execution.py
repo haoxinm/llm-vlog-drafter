@@ -132,6 +132,26 @@ def mark_abandoned(doc: dict[str, Any]) -> list[int]:
     return out
 
 
+def abandon_running(journal_path: Path) -> list[dict[str, Any]]:
+    """Mark every ``running`` run abandoned, whoever owns it (the escape hatch for a build that ran under another host name and so cannot be checked).
+    Under the journal lock. Returns the runs marked (version, pid, host, started_at). Nothing is deleted."""
+    out: list[dict[str, Any]] = []
+    with journal_lock(journal_path):
+        doc = load_journal(journal_path)
+        for r in doc["runs"]:
+            if r.get("status") == "running":
+                out.append({k: r.get(k) for k in ("version", "pid", "host", "started_at")})
+                r["pid"] = None
+        if out:
+            mark_abandoned(doc)
+            save_journal(journal_path, doc)
+    return out
+
+
+def running_builds(journal_path: Path) -> list[dict[str, Any]]:
+    return [{k: r.get(k) for k in ("version", "pid", "host", "started_at")} for r in load_journal(journal_path)["runs"] if r.get("status") == "running"] if journal_path.is_file() else []
+
+
 def live_builds(doc: dict[str, Any]) -> list[dict[str, Any]]:
     """Runs still ``running`` (after mark_abandoned): a build of another live process."""
     return [r for r in doc["runs"] if r.get("status") == "running"]
@@ -222,8 +242,9 @@ def run_build(adapter: "FilmCraftAdapter", spec: TimelineSpec, project_name: str
             noop_run = latest
         elif (other := live_builds(doc)):
             o = other[0]
-            raise FilmCraftError(f"another build is running on this workspace (version {o.get('version')}, pid {o.get('pid')} on {o.get('host')}, started {o.get('started_at')}); "
-                                 f"wait for it to finish, then run the command again. If that process is gone, its run is marked interrupted automatically")
+            raise FilmCraftError(f"another build is running on this workspace (version {o.get('version')}, pid {o.get('pid')} on {o.get('host')}, started {o.get('started_at')}; "
+                                 f"journal: {jpath}). Wait for it to finish and run the command again. If that build is really gone (for example it ran on another host or "
+                                 f"under another host name, which cannot be checked for 24 hours), run `trip-vlog resume --abandon-running` to mark it abandoned")
         else:
             version = next_version(doc, fc_dir, project_name)
             project_path = fc_dir / project_filename(project_name, version)
@@ -325,6 +346,8 @@ def run_build(adapter: "FilmCraftAdapter", spec: TimelineSpec, project_name: str
         run["finished_at"] = utc_now_iso()
         try:
             flush()
+        except Exception:       # noqa: BLE001 - the build's own error is the one to report, not a failure to record it
+            pass
         finally:
             adapter.close()
         raise

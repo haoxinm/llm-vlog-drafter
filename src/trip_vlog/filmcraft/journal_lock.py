@@ -1,8 +1,10 @@
 """Who is building: process liveness and the short exclusive lock around the execution journal's read-modify-write.
 
-The lock is a file (``filmcraft/execution_journal.lock``) created with O_CREAT|O_EXCL, holding pid, host and time. It is held only while the journal
-is read, changed and written, never across a whole build. A lock left by a process that is gone (same host, pid not alive) or that is older than
-``STALE_AFTER_SECONDS`` (another host: the pid cannot be checked) is taken over. A live holder is waited for briefly, then refused with a clear message.
+The lock is an OS advisory lock on byte 0 of a persistent file (``filmcraft/execution_journal.lock``, never deleted): ``fcntl.flock`` on POSIX,
+``msvcrt.locking`` on Windows. The operating system drops it when the holding process dies, so there is no stale-lock logic and no takeover race. It
+is held only while the journal is read, changed and written, never across a whole build. A busy lock is polled until ``LOCK_WAIT_SECONDS``, then
+refused with a message. pid / host / time are written into the file (from offset 8, past the lock byte) as diagnostics only. Re-entrant use by the
+same thread is allowed (it does not lock twice).
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ import contextlib
 import json
 import os
 import socket
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -83,9 +86,49 @@ def lock_path_for(journal_path: Path) -> Path:
     return journal_path.with_suffix(".lock")
 
 
+_DIAG_OFFSET = 8
+_held = threading.local()            # paths this thread holds: nested use does not lock (and so cannot deadlock) a second time
+
+
+def _try_lock(fd: int) -> bool:
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)       # type: ignore[attr-defined]
+        except OSError:
+            return False
+        return True
+    import fcntl
+
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
+
+
+def _unlock(fd: int) -> None:
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)       # type: ignore[attr-defined]
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass                                            # closing the handle releases it anyway
+
+
 def _read_holder(p: Path) -> dict[str, Any]:
     try:
-        d = json.loads(p.read_text(encoding="utf-8"))
+        with open(p, "rb") as f:
+            f.seek(_DIAG_OFFSET)
+            d = json.loads(f.read().decode("utf-8"))
         return d if isinstance(d, dict) else {}
     except (OSError, ValueError):
         return {}
@@ -94,42 +137,34 @@ def _read_holder(p: Path) -> dict[str, Any]:
 @contextlib.contextmanager
 def journal_lock(journal_path: Path, wait: float = LOCK_WAIT_SECONDS) -> Iterator[None]:
     lock = lock_path_for(journal_path)
-    lock.parent.mkdir(parents=True, exist_ok=True)
-    deadline = time.monotonic() + wait
-    payload = json.dumps({"pid": os.getpid(), "host": this_host(), "at": datetime.now(timezone.utc).isoformat()}).encode("utf-8")
-    while True:
-        try:
-            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            h = _read_holder(lock)
-            if not h:
-                # empty/unreadable: a holder that is just writing it, or debris; give a fresh file a moment, then treat it as stale
-                try:
-                    if time.time() - lock.stat().st_mtime > 2:
-                        lock.unlink(missing_ok=True)
-                        continue
-                except OSError:
-                    continue
-            elif not owner_is_live(h.get("pid"), h.get("host"), h.get("at"), self_is_live=True):
-                try:
-                    lock.unlink(missing_ok=True)       # stale: its process is gone
-                except OSError:
-                    pass
-                continue
-            if time.monotonic() >= deadline:
-                raise FilmCraftError(f"another trip-vlog process (pid {h.get('pid')} on {h.get('host')}) is updating {journal_path.name} right now; "
-                                     f"wait for it to finish and run the command again (a lock left by a dead process is cleared automatically)")
-            time.sleep(0.05)
-            continue
-        try:
-            os.write(fd, payload)
-        finally:
-            os.close(fd)
-        break
-    try:
+    key = str(lock)
+    mine: set[str] = getattr(_held, "paths", None) or set()
+    _held.paths = mine
+    if key in mine:
         yield
-    finally:
+        return
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o644)
+    try:
+        deadline = time.monotonic() + wait
+        while not _try_lock(fd):
+            if time.monotonic() >= deadline:
+                h = _read_holder(lock)
+                who = f"pid {h.get('pid')} on {h.get('host')}" if h else "another process"
+                raise FilmCraftError(f"{journal_path.name} is being updated by {who}; this only takes a moment, so run the command again in a few seconds. "
+                                     f"If it keeps happening, check that no other trip-vlog command is running on this workspace")
+            time.sleep(0.05)
+        mine.add(key)
         try:
-            lock.unlink()
-        except OSError:
-            pass
+            try:
+                os.ftruncate(fd, _DIAG_OFFSET)
+                os.lseek(fd, _DIAG_OFFSET, os.SEEK_SET)
+                os.write(fd, json.dumps({"pid": os.getpid(), "host": this_host(), "at": datetime.now(timezone.utc).isoformat()}).encode("utf-8"))
+            except OSError:
+                pass                                    # diagnostics only
+            yield
+        finally:
+            mine.discard(key)
+            _unlock(fd)
+    finally:
+        os.close(fd)

@@ -95,6 +95,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--set", dest="sets", action="append", default=[], metavar="SECTION.FIELD=VALUE")
     p.add_argument("--auto-approve", action="store_true", default=None, help="approve the plan automatically (recorded as automatic)")
     p.add_argument("--filmcraft", help="path to filmcraft-cli (filmcraft.executable; else $FILMCRAFT_CLI, PATH)")
+    p.add_argument("--abandon-running", action="store_true",
+                   help="mark FilmCraft builds still recorded as running as abandoned (asks first); for a build that crashed under another host name")
 
     p = sub.add_parser("draft", help="media folder -> edited FilmCraft draft, preview, QC and Resolve handoff")
     _common(p, media_required=True)
@@ -108,6 +110,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--filmcraft-mode", choices=["mcp", "cli", "bridge"], help="filmcraft.mode")
     p.add_argument("--auto-approve", action="store_true", default=None,
                    help="skip the approval stop; approval is recorded as automatic (workflow.approval=auto_approve)")
+    p.add_argument("--abandon-running", action="store_true",
+                   help="mark FilmCraft builds still recorded as running as abandoned (asks first); for a build that crashed under another host name")
 
     p = sub.add_parser("critic", help="run the optional LLM critic on a finished draft: report (default) writes qc/critic_report.md; apply also applies its "
                                       "validated, local fixes as a new plan version and FilmCraft project (this run only; project.yaml is not changed)")
@@ -363,7 +367,32 @@ def _compat_line(summary: dict, ws: Path) -> str:
             f"\n  report: {ws / 'resolve_handoff' / 'compatibility_report.md'}")
 
 
+def _abandon_running(output: Path) -> bool:
+    """`--abandon-running`: after confirming, mark builds the journal still lists as running as abandoned. False: the person declined (nothing changed)."""
+    from trip_vlog.filmcraft.execution import abandon_running, running_builds
+
+    jp = Path(output).expanduser().resolve() / "filmcraft" / "execution_journal.json"
+    live = running_builds(jp)
+    if not live:
+        print("no FilmCraft build is recorded as running; nothing to abandon")
+        return True
+    for r in live:
+        print(f"build v{r['version']} is recorded as running (pid {r['pid']} on {r['host']}, started {r['started_at']})")
+    try:
+        ok = input("Mark it/them as abandoned (the files are kept)? Only do this if no such build is really running. [y/N] ").strip().lower() in ("y", "yes")
+    except EOFError:
+        ok = False
+    if not ok:
+        print("nothing was changed", file=sys.stderr)
+        return False
+    abandon_running(jp)
+    print("marked as abandoned; the next build takes a new version number")
+    return True
+
+
 def _cmd_draft(args: argparse.Namespace, command: str = "draft") -> int:
+    if getattr(args, "abandon_running", False) and not _abandon_running(args.output):
+        return 2
     res = run_draft(args.media, args.output, args.config, _overrides(args), command=command)
     _print_draft_result(res)
     return res.exit_code
