@@ -271,6 +271,7 @@ class LLMConfig(_Model):
     mode: Literal["live", "record", "replay"] = "live"   # env TRIP_VLOG_LLM_MODE overrides
     text: str = "main"      # endpoint profile for text/planning calls
     vision: str = "main"    # endpoint profile for vision calls
+    critic: str | None = None  # endpoint profile for the QC critic; null -> the vision profile (it reads preview sheets), or the text profile when no image is sent
     endpoints: dict[str, EndpointConfig] = Field(default_factory=lambda: {"main": EndpointConfig()})
     schema_retries: int = Field(2, ge=0, le=5)           # re-asks with validation errors after a schema failure
     image_max_side: int = Field(1568, ge=256, le=8000)   # longest side of frames sent to a model
@@ -289,10 +290,17 @@ class LLMConfig(_Model):
             name = getattr(self, purpose)
             if name not in self.endpoints:
                 raise ValueError(f"llm.{purpose} refers to unknown endpoint profile {name!r} (defined: {', '.join(sorted(self.endpoints)) or 'none'})")
+        if self.critic is not None and self.critic not in self.endpoints:
+            raise ValueError(f"llm.critic refers to unknown endpoint profile {self.critic!r} (defined: {', '.join(sorted(self.endpoints)) or 'none'})")
         return self
 
-    def endpoint_for(self, purpose: Literal["text", "vision"]) -> tuple[str, EndpointConfig]:
-        name = self.text if purpose == "text" else self.vision
+    def endpoint_for(self, purpose: Literal["text", "vision", "critic"], *, images: bool = True) -> tuple[str, EndpointConfig]:
+        """Profile name and endpoint for a purpose. `critic` is `llm.critic` when set; otherwise the vision profile when the critic sends
+        preview-sheet images (`images`), else the text profile."""
+        if purpose == "critic":
+            name = self.critic or (self.vision if images else self.text)
+        else:
+            name = self.text if purpose == "text" else self.vision
         return name, self.endpoints[name]
 
 
@@ -505,6 +513,25 @@ class QcConfig(_Model):
     audio_jump_db: float = Field(12.0, gt=0, le=60)                # warn at a cut when mean levels of two audible clips differ by this much
     audio_active_ratio_min: float = Field(0.5, ge=0, le=1)         # "active natural sound": at least this share of windows above the silence threshold
     music_max_gain_db: float = Field(-6.0, ge=-60, le=0)           # music under speech / active sound must be at or below this clip gain
+    # Optional LLM critic (DESIGN §9.4, §14 steps 6-8). off: never runs. report: reads the plan, QC results and preview sheets and writes
+    # qc/critic_report.json/.md. apply: also applies the proposals that validate and are local, as a new plan version and a new FilmCraft project.
+    critic: Literal["off", "report", "apply"] = "off"
+    critic_max_rounds: int = Field(1, ge=1, le=5)                  # apply: critic -> fix -> rebuild -> QC rounds per plan
+    critic_max_ops_per_round: int = Field(3, ge=1, le=20)          # apply: most proposals applied in one round
+    critic_apply_min_severity: Literal["minor", "major"] = "minor"  # apply: proposals of findings below this severity are reported, not applied
+    critic_images: bool = True                                     # send the preview sheets to a vision-capable endpoint (false: text only)
+    critic_max_sheets: int = Field(4, ge=1, le=20)                 # most preview sheet images sent in one request
+    critic_max_tokens: int = Field(6000, ge=256)                   # upper bound on the critic reply (also capped by the endpoint's max_tokens)
+
+    @field_validator("critic", mode="before")
+    @classmethod
+    def _critic_off(cls, v: Any) -> Any:
+        # YAML 1.1 reads an unquoted `off` (and `--set qc.critic=off`) as the boolean false
+        if v is False or v is None:
+            return "off"
+        if v is True:
+            raise ValueError("qc.critic must be off, report or apply (not true): report only writes a review, apply also changes the plan")
+        return v
 
 
 class OutputsConfig(_Model):
@@ -582,8 +609,9 @@ class Config(_Model):
                 f"media.local_only is true but speech.endpoint host {self.speech.endpoint.host!r} is not a loopback address "
                 "(127.x, ::1, localhost); point speech.endpoint at a local server, use speech.backend: command, or turn local_only off")
         if self.media.local_only:
-            for purpose in ("text", "vision"):
-                name, ep = self.llm.endpoint_for(purpose)
+            purposes = ("text", "vision") + (("critic",) if self.qc.critic != "off" else ())
+            for purpose in purposes:
+                name, ep = self.llm.endpoint_for(purpose, images=self.qc.critic_images)  # type: ignore[arg-type]
                 if not ep.is_local:
                     raise ValueError(
                         f"media.local_only is true but llm.{purpose} uses endpoint {name!r} whose host {ep.host!r} is not a loopback address "
