@@ -37,6 +37,31 @@ def test_offset_is_clamped_inside_short_clips():
         assert c.start_frame <= x.record_frame < c.end_frame
 
 
+def test_tiles_stay_out_of_a_dissolve_and_inside_their_clips():
+    cs = clips((0, 150), (150, 270), (270, 360))
+    plain = P.plan_tiles(cs, FPS, 360, offset_seconds=0.15)
+    assert [x.record_frame for x in plain.tiles if x.cut_index == 1] == [146, 154]
+    # a 30-frame dissolve on the first cut spans 135..165: the tiles must sit at least half (15) + 1 frames away from the cut
+    d = P.plan_tiles(cs, FPS, 360, offset_seconds=0.15, transition_frames={"clip_002": 30})
+    b1, a1 = [x for x in d.tiles if x.cut_index == 1]
+    assert (b1.record_frame, a1.record_frame) == (150 - 16, 150 + 16) and b1.clip_instance_id == "clip_001" and a1.clip_instance_id == "clip_002"
+    assert [x.record_frame for x in d.tiles if x.cut_index == 2] == [266, 274]            # the other cut has no dissolve
+    # odd length: 15 frames reach 8 frames before the cut (the odd frame goes first), so 8 + 1
+    o = P.plan_tiles(cs, FPS, 360, offset_seconds=0.0, transition_frames={"clip_002": 15})
+    assert [x.record_frame for x in o.tiles if x.cut_index == 1] == [150 - 9, 150 + 9]
+    # never further than the clip: a long dissolve next to short clips stays inside both
+    short = clips((0, 10), (10, 20), (20, 100))
+    for x in P.plan_tiles(short, FPS, 100, transition_frames={"clip_002": 40, "clip_003": 40}).tiles:
+        c = next(c for c in short if c.clip_instance_id == x.clip_instance_id)
+        assert c.start_frame <= x.record_frame < c.end_frame
+
+
+def test_before_tile_never_lands_past_the_end_of_the_outgoing_clip():
+    gap = [P.CutClip("a", "s", 0, 40), P.CutClip("b", "s", 60, 120)]       # a ends at 40, the next clip starts at 60
+    before = next(x for x in P.plan_tiles(gap, FPS, 120, offset_seconds=0.0).tiles if x.side == "before")
+    assert before.record_frame == 39 and before.clip_instance_id == "a"
+
+
 def test_scene_ids_follow_the_clip_each_side():
     cs = clips((0, 60), (60, 120), scene=["scene_01", "scene_02"])
     plan = P.plan_tiles(cs, FPS, 120)
@@ -117,3 +142,41 @@ def test_build_sheets_with_a_real_ffmpeg(tmp_path, generated_media, ffmpeg_tools
     plan2 = P.plan_tiles(cs[:2], FPS, 60, max_per_sheet=4)
     res2 = P.build_preview_sheets(ffmpeg, video, tmp_path / "sheet.jpg", plan2, FPS, max_per_sheet=4, duration_frames=60)
     assert [p.name for p in res2.written] == ["sheet.jpg"] and not (tmp_path / "sheet_02.jpg").exists()
+
+
+def test_stale_sheets_and_index_are_removed_and_the_stem_is_glob_escaped(tmp_path):
+    first = tmp_path / "sheet[1].jpg"                       # glob metacharacters in the name must not matter
+    other = tmp_path / "sheetX.jpg"
+    for p in (first, tmp_path / "sheet[1]_02.jpg", tmp_path / "sheet[1]_03.jpg", tmp_path / "preview_sheet.json", other, tmp_path / "sheet[1]_notes.jpg"):
+        p.write_bytes(b"x")
+    # with a pattern that was not escaped "sheet[1]_NN.jpg" would be a character class and match "sheet1_NN.jpg" instead
+    (tmp_path / "sheet1_02.jpg").write_bytes(b"x")
+    assert [p.name for p in P._numbered_sheets(first)] == ["sheet[1]_02.jpg", "sheet[1]_03.jpg"]
+    P.remove_stale_sheets(first, tmp_path / "preview_sheet.json")
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted(["sheet1_02.jpg", "sheet[1]_notes.jpg", "sheetX.jpg"])
+    P.remove_stale_sheets(first, None)                       # nothing left to remove: no error
+
+
+def test_qc_without_a_preview_removes_the_sheets_of_an_earlier_run(tmp_path):
+    from qc_helpers import make_plan, clip
+    from trip_vlog.config import Config
+    from trip_vlog.planning.catalog_view import PlanningCatalog
+    from trip_vlog.qc.report import QcInputs, run_qc
+
+    prev = tmp_path / "preview"
+    prev.mkdir()
+    qc = tmp_path / "qc"
+    qc.mkdir()
+    sheet, idx = prev / "contact_sheet_timeline.jpg", qc / "preview_sheet.json"
+    for p in (sheet, prev / "contact_sheet_timeline_02.jpg", idx):
+        p.write_bytes(b"x")
+    plan = make_plan(("s", [clip("c1", 0, 90)]))
+    doc = run_qc(QcInputs(plan=plan, catalog=PlanningCatalog([], []), source_paths=[], sequence=None, project=None, reopen_error="x", mismatches=[],
+                          preview=prev / "draft.mp4", report_path=prev / "qc_report.json", contact_sheet=sheet, ffmpeg=None, ffprobe=None,
+                          config=Config(), index_path=idx, workspace_root=tmp_path))
+    assert doc["contact_sheet"]["path"] is None and doc["contact_sheet"]["index"] is None
+    assert not sheet.exists() and not idx.exists() and not (prev / "contact_sheet_timeline_02.jpg").exists()
+    assert (prev / "qc_report.json").is_file() and (prev / "qc_report.md").is_file()
+    md = (prev / "qc_report.md").read_text(encoding="utf-8")
+    assert "skipped" in md and doc["counts"]["skipped"] >= 1
+    assert doc["status"] in ("pass", "warn", "fail") and doc["status"] != "skipped"

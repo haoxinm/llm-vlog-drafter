@@ -15,6 +15,7 @@ Layout of the data model (consumed by reviewers and by the QC critic):
 
 from __future__ import annotations
 
+import glob
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -86,11 +87,13 @@ def _secs(frame: int, fps: Fraction) -> float:
 
 
 def plan_tiles(clips: Sequence[CutClip], fps: Fraction, duration_frames: int, *, offset_seconds: float = 0.15,
-               max_per_sheet: int = 48, max_sheets: int = 8) -> TilePlan:
+               max_per_sheet: int = 48, max_sheets: int = 8, transition_frames: Mapping[str, int] | None = None) -> TilePlan:
     """Which frames to sample. ``clips`` are the primary-video clips in any order; frames are sequence frames.
 
     The sampled frames stay inside the clip they belong to (an offset longer than a short clip is clamped), so a tile's
-    ``clip_instance_id`` is the clip really visible in it."""
+    ``clip_instance_id`` is the clip really visible in it. ``transition_frames`` maps an incoming clip_instance_id to the length of the
+    dissolve centred on its cut: the offset at that cut is at least half the dissolve plus one frame, so the before/after tiles show
+    the clips themselves and not the blend (unless a clip is too short for that; the tile then stays inside its clip)."""
     if not clips or duration_frames <= 0:
         return TilePlan([], [], 0, 0)
     ordered = sorted(clips, key=lambda c: (c.start_frame, c.clip_instance_id))
@@ -132,8 +135,10 @@ def plan_tiles(clips: Sequence[CutClip], fps: Fraction, duration_frames: int, *,
     for cut in picked:
         a, b, c = cut
         n = numbering[id(cut)]
-        before = tile(min(max(c - off, a.start_frame), c - 1), "before", a, n)
-        after = tile(min(max(c + off, c), min(b.end_frame - 1, last_frame)), "after", b, n)
+        half = -(-int((transition_frames or {}).get(b.clip_instance_id, 0)) // 2)    # a centred dissolve reaches ceil(n/2) frames before the cut
+        o = max(off, half + 1) if half else off
+        before = tile(min(max(c - o, a.start_frame), c - 1, a.end_frame - 1), "before", a, n)
+        after = tile(min(max(c + o, c), min(b.end_frame - 1, last_frame)), "after", b, n)
         groups.append([before, after])
         cuts.append(CutInfo(n, c, _secs(c, fps), a.clip_instance_id, b.clip_instance_id, a.scene_id, b.scene_id,
                             before.tile_id, after.tile_id))
@@ -362,7 +367,22 @@ def build_preview_sheets(ffmpeg: Path, preview: Path, first_sheet: Path, plan: T
         written.append(out)
         keep.add(out)
         idx.sheets.append(SheetEntry(sn, rel(out), [t.tile_id for t in tiles]))
-    for stale in first_sheet.parent.glob(f"{first_sheet.stem}_[0-9][0-9]{first_sheet.suffix}"):  # leftovers of an earlier, longer run
+    for stale in _numbered_sheets(first_sheet):          # leftovers of an earlier, longer run
         if stale not in keep:
             stale.unlink(missing_ok=True)
     return SheetsResult(idx, written, failed)
+
+
+def _numbered_sheets(first_sheet: Path) -> list[Path]:
+    """``<stem>_02<suffix>``, ``_03``, ... next to the first sheet. The stem is glob-escaped: file names may contain ``[`` or ``*``."""
+    return sorted(first_sheet.parent.glob(f"{glob.escape(first_sheet.stem)}_[0-9][0-9]{glob.escape(first_sheet.suffix)}"))
+
+
+def remove_stale_sheets(first_sheet: Path, index_path: Path | None) -> None:
+    """A QC run that makes no preview sheets must not leave the sheets and ``preview_sheet.json`` of an earlier run behind: they would
+    describe a different preview."""
+    for p in [first_sheet, *_numbered_sheets(first_sheet), *([index_path] if index_path is not None else [])]:
+        try:
+            Path(p).unlink(missing_ok=True)
+        except OSError:
+            pass

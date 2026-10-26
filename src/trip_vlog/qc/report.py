@@ -17,7 +17,7 @@ from trip_vlog.logging_utils import utc_now_iso
 from trip_vlog.planning.catalog_view import PlanningCatalog
 from trip_vlog.planning.models import EditPlan
 from trip_vlog.qc import checks as C
-from trip_vlog.qc.preview import CutClip, build_preview_sheets, plan_tiles
+from trip_vlog.qc.preview import CutClip, build_preview_sheets, plan_tiles, remove_stale_sheets
 from trip_vlog.state import atomic_write_json, atomic_write_text
 
 QC_SCHEMA = 2   # 2: speech/audio/music/scene-order/decode checks, several preview sheets + index, `critic` block
@@ -110,8 +110,10 @@ def run_qc(i: QcInputs) -> dict[str, Any]:
         rel = _relative_to(i.workspace_root)
         clips = [CutClip(c.clip_instance_id, s.scene_id, c.timeline_start_frame, c.timeline_start_frame + c.duration_frames)
                  for s in plan.scenes for c in s.clips if c.track_role == "primary_video"]
+        dissolves = {c.clip_instance_id: c.transition_in.duration_frames for sc in plan.scenes for c in sc.clips
+                     if c.track_role == "primary_video" and c.transition_in.type == "dissolve"}
         tiles = plan_tiles(clips, fps, frames, offset_seconds=q.cut_sample_offset_seconds, max_per_sheet=q.contact_sheet_max_frames,
-                           max_sheets=q.contact_sheet_max_sheets)
+                           max_sheets=q.contact_sheet_max_sheets, transition_frames=dissolves)
         res = build_preview_sheets(i.ffmpeg, i.preview, i.contact_sheet, tiles, fps, columns=q.contact_sheet_columns,
                                    tile_width=q.contact_sheet_tile_width, max_per_sheet=q.contact_sheet_max_frames,
                                    offset_seconds=q.cut_sample_offset_seconds, duration_frames=frames, plan_hash=plan.plan_hash, rel=rel)
@@ -125,6 +127,8 @@ def run_qc(i: QcInputs) -> dict[str, Any]:
         if res.index.error or res.failed:
             results.append(C.CheckResult("contact_sheet", C.WARN, res.index.error or f"{len(res.failed)} frame(s) could not be extracted",
                                          {"failed": res.failed[:10]}))
+    else:   # no preview or no ffmpeg: sheets and index of an earlier run would describe a different preview
+        remove_stale_sheets(i.contact_sheet, i.index_path)
     status = C.overall_status(results)
     counts = {s: sum(1 for r in results if r.status == s) for s in (C.PASS, C.WARN, C.FAIL, C.SKIPPED)}
     doc = {"schema_version": QC_SCHEMA, "generated_at": utc_now_iso(), "status": status, "counts": counts,
