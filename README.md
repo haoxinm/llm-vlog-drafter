@@ -365,7 +365,8 @@ trip-vlog resume  --output C:\vlogs\lisbon
   rest, by interest. What was left out and why is in `plans/story_outline_report.json` (`selection`) and in `story_outline.md`.
 - **`must_include` / `must_exclude`** are lists of references, not free text: a `moment_id`, `segment_id`, `asset_id`, a path relative to the media folder (`day2/hike.mp4`), a glob
   (`day2/*.mp4`) or a folder with a trailing slash (`day2/`). A `must_include` reference is satisfied when at least one moment it resolves to is in the outline; one that matches
-  nothing is reported under `missing_coverage`. `preferred_topics` is free text and is passed to the story editor as a preference.
+  nothing is reported under `missing_coverage`. References are paths from your own folder layout, so requests never contain them: the model is told "required item N"
+  together with the moment IDs it resolves to, and that N is spelled out only in the local reports. `preferred_topics` is free text and is passed to the story editor as a preference.
 - **Validation and repair** (deterministic, `planning/outline.py`). Repaired and recorded in the report (and shown under "Checks" in the summary): unknown moment IDs, moments not offered
   to the model, duplicates (a moment is used by one scene; the hook moment may appear once more in its chronological scene), moments matching `must_exclude`, an opening hook longer
   than `editorial.opening_hook_seconds` (shortened), scene budgets outside `project.duration_tolerance_pct`/`_seconds` of the target (all non-hook scenes scaled proportionally to the
@@ -373,9 +374,10 @@ trip-vlog resume  --output C:\vlogs\lisbon
   an out-of-order scene when `story_mode: chronological`, a `must_include` that matches nothing (also added to `missing_coverage`). Everything that would change the story is an **error** instead: a scene left without moments,
   a hook that is not allowed (`allow_nonlinear_hook: false`) or whose scene/moment is inconsistent, an uncovered `must_include`. Errors are sent back to the model **once**
   (`planning.outline_retries`) with the previous reply; if they remain the stage fails with the findings and writes `plans/story_outline_report.json`. Schema violations are retried by the
-  gateway first (`llm.schema_retries`).
+  gateway first (`llm.schema_retries`). Text length and number ranges are not part of the reply schema (providers ignore them and one long sentence must not fail the stage): over-long texts are cut and
+  out-of-range budgets clamped by code, and each change is a recorded repair. When a stage fails, its cached replies are removed, so `resume` asks again.
 - **Your edits are checked, not rewritten**: when you edit `story_outline.json`, `resume` re-validates it without the LLM (any usable moment may be used, not only those that fit in the
-  prompt; budgets off target are a warning). Errors fail the `outline_approval` stage and `approve` refuses; fix the file and run `resume`.
+  prompt; budgets off target are a warning; blanks around moment IDs are ignored; a UTF-8 byte order mark from Windows editors is fine). Errors fail the `outline_approval` stage and `approve` refuses; fix the file and run `resume`.
 - **Caching**: the `outline` stage is keyed by the exact request text (catalog, settings including the target duration, constraints), prompt versions, response schema, model and endpoint
   `api`/`params`, tolerance and retry settings. Unchanged re-runs make no request and never touch an edited outline. Changing `--duration` (or a label, a transcript, the model...) creates a new
   outline; if you had edited the previous one, a copy is kept as `plans/story_outline.<hash>.bak.json`. The gateway's response cache sits underneath.
@@ -427,7 +429,10 @@ trip-vlog resume  --output C:\vlogs\lisbon
   never under 1 s), bad titles dropped. Anything else (a missing scene, too little footage for the target, a `must_include` left out) fails the stage with the findings and `plans/selection_report.json`.
   Scene order always follows the outline. Every repair is listed under "Validation" in `plan_summary.md`.
 - **Caching**: the `plan` stage is keyed by the approved outline hash, the digest of its candidate records, the whole request text, prompt and schema versions, capabilities, endpoint/model/params/mode,
-  retry and token limits, and the project, editorial, validation and title settings. Edit the outline, change the model, or change `--duration` (a new outline) and it plans again; an unchanged run makes no request.
+  retry and token limits, the project, editorial, validation and title settings, and the catalog fields the resolver reads for those moments (ranges, best sub-range, length, frame rate, audio, version).
+  Edit the outline, change the model, change `--duration` (a new outline) or re-index changed media and it plans again; an unchanged run makes no request.
+  A plan stage that replaces an `edit_plan.json` you edited by hand first keeps a copy as `plans/edit_plan.<hash>.bak.json`. A plan stage that **fails** moves the earlier plan files aside
+  (`edit_plan.stale.json`, `selection_plan.stale.json`, `plan_summary.stale.md`), so nothing that looks current is left next to the failure report; the next successful plan writes the normal names again.
 - **Files** (`plans/`): `selection_plan.json`, `edit_plan.json`, `plan_summary.md`, `validation_report.json`, `selection_report.json` (model, prompts, usage, each attempt's findings and repairs), `timeline_planner_response.schema.json`
   (also in `schemas/`).
 - **Cost and privacy** (what leaves the machine, per stage; `status` and the stage summaries show token counts; a `local` endpoint sends nothing off the machine, `media.local_only: true` enforces it):
