@@ -327,7 +327,8 @@ def run_index(media: Path | str | None, output: Path | str, config_path: Path | 
 def run_draft(media: Path | str | None, output: Path | str, config_path: Path | str | None = None,
               overrides: Mapping[str, Any] | None = None, *, echo: Callable[[str], None] = print,
               command: str = "draft") -> IndexResult:
-    """Run (or continue) the Phase 2 pipeline: index -> segment -> plan -> approval -> assemble -> preview -> qc -> handoff."""
+    """Run (or continue) the draft pipeline: index -> segment -> plan -> approval -> assemble -> preview -> qc -> handoff. With
+    ``workflow.planner: llm`` the plan is preceded by audio -> transcribe -> analyze -> outline -> outline_approval and made by the LLM."""
     return _execute(media, output, config_path, overrides, echo=echo, command=command, pipeline="draft")
 
 
@@ -364,8 +365,6 @@ def _execute(media: Path | str | None, output: Path | str, config_path: Path | s
     overrides = dict(overrides or {})
     cfg_file: Path | None = Path(config_path) if config_path else (ws.project_yaml if ws.project_yaml.exists() else None)
     config = load_config(cfg_file, overrides)
-    if pipeline == "draft" and config.workflow.planner != "baseline":
-        raise ConfigError(f"workflow.planner={config.workflow.planner!r} is not implemented yet (LLM planning arrives in Phase 3/4); use 'baseline'")
     manifest = Manifest.load(ws.manifest_path)
     if media is None:
         media = manifest.get("media_root")

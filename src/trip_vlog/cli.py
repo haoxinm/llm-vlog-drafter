@@ -3,7 +3,7 @@
 Exit codes
   0    success (pipeline finished; QC findings are reported, not errors)
   1    a stage failed (details in `status`, logs/errors.jsonl)
-  2    usage or configuration error (bad flag, unusable paths, planner not implemented)
+  2    usage or configuration error (bad flag, unusable paths)
   3    stopped at the approval gate: review plans/story_outline.md (`outline`) or plans/plan_summary.md (`draft`), then `approve` and
        `resume` (or `--auto-approve`)
   4    `approve` refused: the outline/plan is missing, failed validation, or its stage did not succeed
@@ -100,7 +100,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--aspect", choices=["16:9", "9:16"], help="aspect ratio (project.aspect_ratio)")
     p.add_argument("--style", help="style (project.style)")
     p.add_argument("--sampling-fps", type=float, metavar="FPS", help="frame sampling rate used when analysis runs, > 0 and <= 30 (media.vision_sampling_fps)")
-    p.add_argument("--planner", choices=["baseline", "llm"], help="planner (workflow.planner); only 'baseline' exists yet")
+    p.add_argument("--planner", choices=["baseline", "llm"],
+                   help="planner (workflow.planner): 'baseline' (default, no LLM) or 'llm' (labels, outline, your approval, then LLM clip selection)")
     p.add_argument("--filmcraft", help="path to filmcraft-cli (filmcraft.executable; else $FILMCRAFT_CLI, PATH)")
     p.add_argument("--filmcraft-mode", choices=["mcp", "cli", "bridge"], help="filmcraft.mode")
     p.add_argument("--auto-approve", action="store_true", default=None,
@@ -185,6 +186,15 @@ def _print_draft_result(res: IndexResult) -> None:
     s = res.summary
     print(f"assets: {s['assets']}  probe failures: {s['probe_failed']}")
     ws = res.workspace
+    if res.awaiting_approval and m.stage("outline_approval").get("status") == "awaiting_approval":
+        ap = m.stage("outline_approval").get("summary", {})
+        print("\nAWAITING APPROVAL of the story outline: no clips have been selected and nothing was created in FilmCraft yet.")
+        if ap.get("invalidated"):
+            print(f"  {ap['invalidated']}")
+        print(f"  review: {ws / ap.get('outline_summary', 'plans/story_outline.md')}")
+        print(f"  edit  : {ws / ap.get('outline', 'plans/story_outline.json')} (optional)")
+        print(f"  then  : trip-vlog approve --output {ws}  &&  trip-vlog resume --output {ws}")
+        return
     if res.awaiting_approval:
         ap = m.stage("approval").get("summary", {})
         print("\nAWAITING APPROVAL: nothing has been created in FilmCraft yet.")
@@ -196,6 +206,16 @@ def _print_draft_result(res: IndexResult) -> None:
     fc = m.get("filmcraft") or {}
     if fc.get("project"):
         print(f"\nFilmCraft {fc.get('version')}: {ws / fc['project']}")
+    pl = m.stage("plan").get("summary", {})
+    if pl.get("planner") == "llm" and pl.get("clips"):
+        print(f"plan: {pl['clips']} clip(s) in {pl['scenes']} scene(s), {pl['titles']} title(s), {pl['duration_seconds']:g} s (target {pl['target_seconds']:g} s); "
+              f"{pl.get('requests', 0)} request(s) to '{pl.get('endpoint')}' ({'local' if pl.get('local') else 'remote'}), "
+              f"{pl.get('input_tokens', 0)} input / {pl.get('output_tokens', 0)} output tokens"
+              + (f"; re-asked {pl['reasked']}x" if pl.get("reasked") else "") + (f"; {pl['repairs']} automatic repair(s)" if pl.get("repairs") else ""))
+        print(f"  summary: {ws / 'plans' / 'plan_summary.md'}")
+    ap_rec = m.get("approval") or {}
+    if ap_rec.get("mode") == "derived_from_outline":
+        print(f"edit plan approved from the {ap_rec.get('outline_approval_mode')} outline approval (no separate review; set workflow.plan_review: true to stop here)")
     qc = m.stage("qc").get("summary", {})
     if qc:
         print(f"QC: {qc.get('status')} ({qc.get('pass', 0)} pass, {qc.get('warn', 0)} warn, {qc.get('fail', 0)} fail)"
@@ -413,7 +433,9 @@ def _cmd_status(args: argparse.Namespace) -> int:
     print("stages:")
     stages = m.get("stages", {})
     canonical = ("scan", "probe", "catalog", "thumbnails", "segment", "audio", "transcribe", "analyze", "outline", "outline_approval", *DRAFT_STAGES[5:])
-    order = ([n for n in canonical if n in stages or (m.get("pipeline") == "draft" and n not in ("analyze", "audio", "transcribe", "outline", "outline_approval"))]
+    llm_draft = m.get("pipeline") == "draft" and m.get("planner") == "llm"
+    order = ([n for n in canonical if n in stages or (m.get("pipeline") == "draft"
+                                                      and (llm_draft or n not in ("analyze", "audio", "transcribe", "outline", "outline_approval")))]
              + [n for n in stages if n not in canonical])
     for name in order:
         st = stages.get(name, {})

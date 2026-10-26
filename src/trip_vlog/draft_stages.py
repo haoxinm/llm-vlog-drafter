@@ -106,11 +106,28 @@ def approval_record(manifest: Any) -> dict[str, Any] | None:
     return ap if isinstance(ap, dict) else None
 
 
-def approve_current_plan(manifest: Any, plan_hash: str, mode: str) -> dict[str, Any]:
-    ap = {"status": "approved", "mode": mode, "plan_hash": plan_hash, "approved_at": utc_now_iso()}
+def approve_current_plan(manifest: Any, plan_hash: str, mode: str, **extra: Any) -> dict[str, Any]:
+    ap = {"status": "approved", "mode": mode, "plan_hash": plan_hash, "approved_at": utc_now_iso(), **extra}
     manifest.set(approval=ap)
     manifest.save()
     return ap
+
+
+def _derived_approval(ctx: Any, plan_hash: str) -> dict[str, Any] | None:
+    """llm planner: the human checkpoint is the outline (DESIGN §9.5), so a plan the planner made from the approved outline and
+    that nobody has touched since is approved automatically, and recorded as such. Not when `workflow.plan_review` asks for a
+    stop, and never for a plan whose content differs from what the plan stage wrote (a hand edit needs its own approval)."""
+    from trip_vlog.outline_stages import outline_approval_record
+
+    m, cfg = ctx.manifest, ctx.config
+    if cfg.workflow.planner != "llm" or cfg.workflow.plan_review:
+        return None
+    oap, rec = outline_approval_record(m), m.get("plan") or {}
+    if not oap or oap.get("status") != "approved" or rec.get("planner") != "llm":
+        return None
+    if rec.get("outline_hash") != oap.get("outline_hash") or rec.get("plan_hash") != plan_hash:
+        return None
+    return {"outline_hash": oap["outline_hash"], "outline_approval_mode": oap.get("mode")}
 
 
 def approval_stage(ctx: Any) -> StageResult:
@@ -120,6 +137,10 @@ def approval_stage(ctx: Any) -> StageResult:
     if ctx.config.workflow.approval == "auto_approve":
         approve_current_plan(m, cur, "automatic")
         return StageResult(Status.SUCCEEDED, {"mode": "automatic", "plan_hash": cur})
+    derived = _derived_approval(ctx, cur)
+    if derived is not None:
+        approve_current_plan(m, cur, "derived_from_outline", **derived)
+        return StageResult(Status.SUCCEEDED, {"mode": "derived_from_outline", "plan_hash": cur, **derived})
     ap = approval_record(m)
     if ap and ap.get("status") == "approved" and ap.get("plan_hash") == cur:
         return StageResult(Status.SUCCEEDED, {"mode": ap.get("mode"), "plan_hash": cur})
@@ -196,11 +217,18 @@ def _project_sha(ctx: Any) -> str | None:
 # ---- stages ----------------------------------------------------------------------------------------------
 
 def plan_stage(ctx: Any) -> StageResult:
-    res = plan_baseline_stage(ctx)
+    planner = ctx.config.workflow.planner
+    if planner == "llm":
+        from trip_vlog.selection_stages import plan_llm_stage
+
+        res = plan_llm_stage(ctx)
+    else:
+        res = plan_baseline_stage(ctx)
     ctx.data.pop("prepared", None)
     if res.status != Status.FAILED:
-        ctx.manifest.set(planner=ctx.config.workflow.planner, plan={
-            "path": _rel(ctx, _pp(ctx).edit_plan), "summary": _rel(ctx, _pp(ctx).summary), "plan_hash": res.summary.get("plan_hash")})
+        ctx.manifest.set(planner=planner, plan={
+            "path": _rel(ctx, _pp(ctx).edit_plan), "summary": _rel(ctx, _pp(ctx).summary), "plan_hash": res.summary.get("plan_hash"),
+            "planner": planner, "outline_hash": res.summary.get("outline_hash")})
         ctx.manifest.save()
     return res
 
@@ -383,18 +411,21 @@ def handoff_stage(ctx: Any) -> StageResult:
 
 def build_draft_runner(ctx: Any) -> StageRunner:
     from trip_vlog.orchestrator import build_index_runner
+    from trip_vlog.orchestrator import build_outline_runner as _build_outline_runner
 
-    runner = build_index_runner(ctx)
     plan_path_exists = lambda c: _pp(c).edit_plan.is_file()
-    runner.register("segment", segment_assets, deps=("catalog",), inputs=segment_inputs)
-    plan_dep = "segment"
-    if ctx.config.workflow.planner == "llm":  # Phase 4 consumes the labeled moments; the baseline planner never needs an LLM
-        from trip_vlog.analysis.stage import analyze_inputs, analyze_stage
+    if ctx.config.workflow.planner == "llm":
+        # index, segment, audio, transcribe, analyze, outline, outline_approval (the human checkpoint), then the LLM selection.
+        # The baseline planner never needs an LLM and skips all of that.
+        from trip_vlog.selection_stages import selection_inputs
 
-        runner.register("analyze", analyze_stage, deps=("segment",), inputs=analyze_inputs)
-        plan_dep = "analyze"
-    runner.register("plan", plan_stage, deps=(plan_dep,), verify=plan_path_exists,
-                    inputs=lambda c: {**plan_inputs(c), "planner": c.config.workflow.planner})
+        runner = _build_outline_runner(ctx)
+        runner.register("plan", plan_stage, deps=("outline_approval",), verify=plan_path_exists, inputs=selection_inputs)
+    else:
+        runner = build_index_runner(ctx)
+        runner.register("segment", segment_assets, deps=("catalog",), inputs=segment_inputs)
+        runner.register("plan", plan_stage, deps=("segment",), verify=plan_path_exists,
+                        inputs=lambda c: {**plan_inputs(c), "planner": c.config.workflow.planner})
     runner.register("approval", approval_stage, deps=("plan",), always_run=True)
     runner.register("assemble", assemble_stage, deps=("approval",), inputs=_assemble_inputs, verify=_assemble_verify)
     runner.register("preview", preview_stage, deps=("assemble",), inputs=_preview_inputs, verify=lambda c: _preview_path(c).is_file())
