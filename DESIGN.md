@@ -1402,7 +1402,8 @@ ships with tests like any other phase. Deliver:
     from the timeline read back from FilmCraft when its native export
     is missing or lossy, with the cross-check diff in the handoff
     report. Not needed so far: FilmCraft 0.13's native FCP7 XML
-    passed every check in Resolve.
+    passed every check in Resolve. *Status: done for FCP7 XML (Phase 7b);
+    OTIO is not generated.*
 -   **Plan re-seal helper:** a command that re-validates a hand-edited
     `edit_plan.json` / outline and recomputes its seal (hash), so
     manual edits are accepted explicitly instead of failing the hash
@@ -1413,9 +1414,11 @@ ships with tests like any other phase. Deliver:
     done (Phase 7a).*
 -   **Portrait and mixed-aspect framing:** scale-to-fit portrait clips
     and stills in a landscape sequence (and the reverse), if FilmCraft
-    supports it and the result is verified.
+    supports it and the result is verified. *Status: done (Phase 7b,
+    `filmcraft.fit_mixed_aspect`, off by default).*
 -   **Audio ducking:** lower music under natural sound or speech
-    (§13.3), verified in the read-back and the preview.
+    (§13.3), verified in the read-back and the preview. *Status: done
+    (Phase 7b, `filmcraft.duck_music`, off by default).*
 -   **Fine sampling refinement (§7.2 step 5):** when
     `fine_sampling_enabled`, resample at `fine_sampling_fps` around the
     best-frame boundaries of high-scoring moments and tighten them with
@@ -1488,6 +1491,74 @@ through a transcript segment (the estimated word positions); (4) hand
 edit a plan on Windows with Notepad (BOM) and `reseal` it; (5) kill a
 `resume` during a FilmCraft build and confirm the next run builds the
 next version and `status` lists the failed one.
+
+**Phase 7b status (read-back interchange, mixed-aspect framing, ducking).**
+Built and covered by tests with the fake and the real FilmCraft CLI
+(0.13.0, Linux); nothing here was run in Resolve. All new options are
+off by default except the fallback, which only acts on a failure.
+
+-   *What FilmCraft supports* (checked in the CLI and its source, not
+    assumed): `clip.fitToFrame` (answers with the scale it chose; the
+    Motion scale is readable in `sequence_inspect`, 100 = native size, so
+    a portrait or 4K clip is cropped without it); `effects.setParam`
+    with `keyframe: true` on a clip's `volume.level` (dB, hard range
+    -287.5..15, added to the clip gain; the read-back reports only the
+    keyframe count, not the times and values); `mixer.setStrip` to mute a
+    track in a session that is never saved; `file.exportMedia` with
+    `format: wav`. FilmCraft's FCP7 XML carries the Basic Motion scale and
+    the Audio Levels keyframes (`when` = source frame, level linear,
+    clip gain folded in). Track-level automation (`mixer.setKeyframe`)
+    and Essential Sound ducking (`essentialSound.generateDucking`) exist
+    but are not used: the first is lost in every interchange format, the
+    second needs clips tagged in the UI.
+-   *Framing* (`filmcraft.fit_mixed_aspect`): the mapping marks every
+    video or still placement whose display size differs from the sequence
+    (`Placement.fit_source_size`); the adapter fits them in one command;
+    read-back verification requires the scale `min(W/w, H/h)*100`
+    (+-0.5), the XML round trip compares the Basic Motion scale, and the
+    QC `framing` check looks for black bars in a preview frame of scaled
+    clips that are alone on screen. Without the option the compatibility
+    report keeps the manual framing step and now says the clips are
+    cropped. Rotation metadata is honoured by FilmCraft (a rotated phone
+    clip reports the rotated size).
+-   *Ducking* (`filmcraft.duck_music`, `duck_mode`, `duck_db`,
+    `duck_ramp_seconds`, `duck_merge_gap_seconds`; `qc/ducking.py`):
+    windows from transcript segments (or the whole clip when the
+    transcript is coarse, or, in `natural_sound` mode, active measured
+    sound), merged, with linear ramps; keyframes are absolute Volume
+    levels on the music placement (`Placement.gain_keys`). Verified by
+    keyframe count after reopening, by times and levels in the native
+    FCP7 XML, and in the preview by rendering the music tracks alone
+    (other audio tracks muted in a throw-away FilmCraft process; the
+    project hash is compared afterwards) and comparing each window with
+    the music source over the same range (+-2 dB). QC `music_ducking`
+    warns, never fails. The stage cache keys include the new settings
+    and, for ducking, the transcripts, only when the feature is on.
+-   *Read-back fallback* (`filmcraft.readback_interchange: auto|off`,
+    `handoff/readback.py`): decision by the same round trip as the
+    compatibility report; generated from `SequenceSnapshot` and
+    `ProjectSnapshot` after a fresh reopen, in FilmCraft's own xmeml
+    structure; accepted only if it round-trips exactly (keyframes
+    excluded: values are not readable) and recorded in
+    `readback_interchange.json` and the handoff report with the
+    plan-versus-readback diff and the list of what it cannot carry. A
+    lossy native file is kept as `timeline.native.xml`; a good one is
+    never touched; stale provenance is set aside as `.stale`.
+    Decision to confirm: the generated file takes the name
+    `timeline.xml` so that `resolve-finish` and the user's import step
+    need no change.
+
+Runbook items for the first live run (not automated): (1) import a
+generated `timeline.xml` (needs a FilmCraft whose FCP7 XML export is
+missing or wrong; the tests simulate that) and compare it with the
+native one in Resolve; (2) with `fit_mixed_aspect` on, import a plan with a
+portrait clip and a 4K clip and check Inspector > Transform > Zoom
+equals the planned scale and that Resolve's own "Image scaling" setting
+does not scale it a second time; (3) with `duck_music` on and a music
+clip, check that the Audio Levels keyframes arrive as clip volume
+automation in Fairlight and that the dips line up with the speech;
+(4) on Windows and macOS check that the music-bed render (WAV export in
+a muted throw-away session) works and leaves the `.fcproj` untouched.
 
 ## 21. Suggested repository structure
 
