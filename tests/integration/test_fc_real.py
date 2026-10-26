@@ -223,6 +223,9 @@ def test_exported_dissolve_span_and_half_frame_source_match_exactly(tmp_path, ff
     half = float(Fraction(15, 2) / fps)                      # source in point on exactly 7.5 frames
     pl[0] = replace(pl[0], source_in_seconds=half, source_out_seconds=half + float(Fraction(105) / fps))
     pl[1] = replace(pl[1], transition_in=TransitionIn("dissolve", frames))
+    for k in (2, 3):         # the other placements keep their frame counts; their source seconds follow the rate (no speed changes)
+        n = pl[k].duration_frames if pl[k].media_kind == "video" else int(Fraction(6) * fps)
+        pl[k] = replace(pl[k], duration_frames=n, source_out_seconds=pl[k].source_in_seconds + float(Fraction(n) / fps))
     spec = replace(spec, placements=tuple(pl))
     adapter = new_adapter(tmp_path / "ws", media)
     try:
