@@ -431,8 +431,8 @@ trip-vlog resume  --output C:\vlogs\lisbon
 - **Caching**: the `plan` stage is keyed by the approved outline hash, the digest of its candidate records, the whole request text, prompt and schema versions, capabilities, endpoint/model/params/mode,
   retry and token limits, the project, editorial, validation and title settings, and the catalog fields the resolver reads for those moments (ranges, best sub-range, length, frame rate, audio, version).
   Edit the outline, change the model, change `--duration` (a new outline) or re-index changed media and it plans again; an unchanged run makes no request.
-  A plan stage that replaces an `edit_plan.json` you edited by hand first keeps a copy as `plans/edit_plan.<hash>.bak.json`. A plan stage that **fails** moves the earlier plan files aside
-  (`edit_plan.stale.json`, `selection_plan.stale.json`, `plan_summary.stale.md`), so nothing that looks current is left next to the failure report; the next successful plan writes the normal names again.
+  A plan stage that replaces an `edit_plan.json` you edited by hand first keeps a copy as `plans/edit_plan.<hash>.bak.json`. A plan stage that **fails because the plan was refused** (validation or selection failure; not a timeout, 401/429/5xx or a missing prerequisite, which leave the earlier plan alone) moves the earlier plan files aside
+  (`edit_plan.stale.json`, `selection_plan.stale.json`, `plan_summary.stale.md`), so nothing that looks current is left next to the failure report; the next successful plan writes the normal names again. A rename that fails (a file locked on Windows) is listed as `stale_rename_failed` in the stage summary.
 - **Files** (`plans/`): `selection_plan.json`, `edit_plan.json`, `plan_summary.md`, `validation_report.json`, `selection_report.json` (model, prompts, usage, each attempt's findings and repairs), `timeline_planner_response.schema.json`
   (also in `schemas/`).
 - **Cost and privacy** (what leaves the machine, per stage; `status` and the stage summaries show token counts; a `local` endpoint sends nothing off the machine, `media.local_only: true` enforces it):

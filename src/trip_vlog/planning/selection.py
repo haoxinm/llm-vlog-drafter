@@ -111,13 +111,13 @@ def response_schema() -> dict[str, Any]:
     }
     scene = {
         "scene_id": {"type": "string", "description": "The outline's scene_id, exactly."},
-        "clips": {"type": "array", "minItems": 1, "maxItems": MAX_CLIPS_PER_SCENE, "description": "Clips in playing order.",
+        "clips": {"type": "array", "minItems": 1, "description": "Clips in playing order (at most 500).",
                   "items": {"type": "object", "properties": clip, "required": list(clip), "additionalProperties": False}},
     }
     props = {
-        "scenes": {"type": "array", "minItems": 1, "maxItems": MAX_SCENES, "description": "One entry per outline scene, in the outline's order.",
+        "scenes": {"type": "array", "minItems": 1, "description": "One entry per outline scene, in the outline's order.",
                    "items": {"type": "object", "properties": scene, "required": list(scene), "additionalProperties": False}},
-        "titles": {"type": "array", "maxItems": MAX_TITLES_SCHEMA, "description": "Scene titles, only when enabled; otherwise empty.",
+        "titles": {"type": "array", "description": "Scene titles, only when enabled; otherwise empty.",
                    "items": {"type": "object", "properties": title, "required": list(title), "additionalProperties": False}},
         "uncertainties": {"type": "array", "items": {"type": "string"},
                           "description": f"Things the user should check in the result (up to 100, each at most {MAX_UNCERTAINTY} characters)."},
@@ -387,7 +387,11 @@ def build_work(parsed: Any, ctx: SelectionContext, report: ValidationReport) -> 
             report.error("scene_missing", f"scene {osc.scene_id} of the outline has no clips in the reply", "scenes")
             continue
         clips = []
-        for n, c in enumerate(rs.get("clips") or [], 1):
+        raw_clips = rs.get("clips") or []
+        if len(raw_clips) > MAX_CLIPS_PER_SCENE:
+            report.repaired("list_shortened", f"scenes[{si}] has {len(raw_clips)} clips, the limit is {MAX_CLIPS_PER_SCENE}; the rest was dropped",
+                            len(raw_clips), MAX_CLIPS_PER_SCENE, f"scenes[{si}].clips")
+        for n, c in enumerate(raw_clips[:MAX_CLIPS_PER_SCENE], 1):
             d = copy.deepcopy(c)
             d["moment_id"] = str(d.get("moment_id", "")).strip()
             d["_n"] = n          # the position in the model's own list: titles refer to it (clips may be dropped later)
@@ -396,7 +400,7 @@ def build_work(parsed: Any, ctx: SelectionContext, report: ValidationReport) -> 
             clips.append(d)
         scenes.append({"scene_id": osc.scene_id, "title": osc.title, "purpose": osc.purpose, "budget": ctx.budgets[si],
                        "candidates": [m.strip() for m in osc.candidate_moment_ids], "clips": clips,
-                       "n_original": len(rs.get("clips") or [])})
+                       "n_original": min(len(raw_clips), MAX_CLIPS_PER_SCENE)})
     titles = []
     for i, t in enumerate(parsed.get("titles") or []):
         d = copy.deepcopy(t)
@@ -580,7 +584,7 @@ def _check_titles(work: dict[str, Any], ctx: SelectionContext, report: Validatio
         work["titles"] = []
         return
     fixed = default_titles(ctx.outline.scenes[0].scene_id, ctx.outline.scenes[-1].scene_id, ts, [])
-    room = max(0, ts.max_titles - len(fixed))
+    room = max(0, min(ts.max_titles, MAX_TITLES_SCHEMA) - len(fixed))
     kept = []
     for t in work["titles"]:
         path = f"titles[{t['_i']}]"

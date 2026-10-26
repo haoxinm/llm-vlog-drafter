@@ -239,22 +239,23 @@ def _backup_edited_plan(ctx: Any, path: Path) -> str | None:
     return _rel(ctx, bak)
 
 
-def _set_stale(ctx: Any) -> list[str]:
+def _set_stale(ctx: Any) -> tuple[list[str], list[str]]:
     """The plan stage failed: the files of an earlier plan must not look current next to the failure report. Each is renamed
     `<name>.stale<ext>` (`edit_plan.stale.json`, `plan_summary.stale.md`, `selection_plan.stale.json`), replacing an older stale copy;
     the next successful plan stage writes the normal names again. The approval record is untouched: it is bound to a hash that no
     file carries any more, so nothing can be assembled from a stale plan."""
     pp = _pp(ctx)
-    moved = []
+    moved: list[str] = []
+    failed: list[str] = []
     for attr in PLAN_FILES:
         f: Path = getattr(pp, attr)
         if f.is_file():
             try:
                 f.replace(f.with_name(f"{f.stem}.stale{f.suffix}"))
                 moved.append(_rel(ctx, f))
-            except OSError:
-                pass
-    return moved
+            except OSError:      # e.g. a file locked by another program on Windows
+                failed.append(_rel(ctx, f))
+    return moved, failed
 
 
 def plan_stage(ctx: Any) -> StageResult:
@@ -269,10 +270,16 @@ def plan_stage(ctx: Any) -> StageResult:
     ctx.data.pop("prepared", None)
     if backup:
         res.summary["edited_plan_backup"] = backup
-    if res.status == Status.FAILED:
-        stale = _set_stale(ctx)
+    if res.status == Status.FAILED and (res.summary.pop("planning_failure", False) or planner != "llm"):
+        # only when the plan itself was refused (validation / selection failure): an endpoint timeout, a 401/429/5xx or a missing
+        # prerequisite says nothing about the earlier plan, which stays where it is
+        stale, failed = _set_stale(ctx)
         if stale:
             res.summary["stale_files"] = stale
+        if failed:
+            res.summary["stale_rename_failed"] = failed
+    elif res.status == Status.FAILED:
+        res.summary.pop("planning_failure", None)
     else:
         ctx.manifest.set(planner=planner, plan={
             "path": _rel(ctx, _pp(ctx).edit_plan), "summary": _rel(ctx, _pp(ctx).summary), "plan_hash": res.summary.get("plan_hash"),

@@ -655,7 +655,7 @@ def load_config(path: Path | None, overrides: Mapping[str, Any] | None = None) -
     raw: Any = {}
     if path is not None:
         try:
-            text = Path(path).read_text(encoding="utf-8")
+            text = Path(path).read_text(encoding="utf-8-sig")   # Notepad adds a byte order mark
         except OSError as e:
             raise ConfigError(f"cannot read config file {path}: {e.strerror or e}") from None
         try:

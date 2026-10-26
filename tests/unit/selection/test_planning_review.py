@@ -458,3 +458,85 @@ def test_failed_plan_stage_moves_the_old_plan_aside(tmp_path):
     assert ctx.manifest.stage("plan")["summary"]["stale_files"]
     tr.respond_plan = None                                                     # fixing the endpoint and resuming writes the normal names again
     assert plan_runner(ctx).run()["plan"] == S.SUCCEEDED and (plans / "edit_plan.json").is_file()
+
+
+# ---- follow-ups: odd top-level documents, stale only for planning failures, BOM in yaml/json, array limits -------------
+
+@pytest.mark.parametrize("bad", [None, [1], "x", 5])
+def test_outline_document_that_is_not_an_object_is_a_schema_error(tmp_path, bad):
+    from trip_vlog.orchestrator import ApprovalRefused, approve_outline
+    ctx, tr = setup(tmp_path, planner_config())
+    plan_runner(ctx).run()
+    from trip_vlog.planning.outline_catalog import build_outline_catalog
+    oc = build_outline_catalog(ctx.catalog, ctx.config)
+    settings = ol.OutlineSettings.from_config(ctx.config)
+    for repair in (True, False):
+        rep = ol.validate_outline(bad, oc, settings, repair=repair)
+        assert not rep.ok and [e.code for e in rep.errors] == ["schema"]
+    p = ctx.workspace.root / "plans" / "story_outline.json"
+    p.write_text(json.dumps(bad), encoding="utf-8")
+    assert ol.outline_file_hash(p).startswith("invalid")
+    ws = ctx.workspace
+    ws.project_yaml.write_text("project: {}\n", encoding="utf-8")
+    (tmp_path / "media").mkdir(exist_ok=True)
+    ctx.manifest.set(media_root=str(tmp_path / "media"))
+    ctx.manifest.save()
+    with pytest.raises(ApprovalRefused):
+        approve_outline(ws.root)
+
+
+def test_transient_llm_failure_keeps_the_earlier_plan(tmp_path):
+    from trip_vlog.llm.transport import HttpResponse
+    ctx, tr = setup(tmp_path)
+    plan_runner(ctx).run()
+    plans = ctx.workspace.root / "plans"
+    tr.respond_plan = lambda c, d: HttpResponse(401, {}, b'{"error":"no"}')
+    st = reapproved_replan(ctx, tr, lambda doc: doc["scenes"][0].update(tone="calm"))
+    assert st["plan"] == S.FAILED
+    assert (plans / "edit_plan.json").is_file() and not (plans / "edit_plan.stale.json").exists()
+    assert "stale_files" not in ctx.manifest.stage("plan")["summary"]
+
+
+def test_stale_rename_failure_is_recorded(tmp_path, monkeypatch):
+    from pathlib import Path
+    ctx, tr = setup(tmp_path)
+    plan_runner(ctx).run()
+    tr.respond_plan = missing_scene
+    real = Path.replace
+
+    def locked(self, target):
+        if self.name == "edit_plan.json":
+            raise PermissionError("locked")
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "replace", locked)
+    st = reapproved_replan(ctx, tr, lambda doc: doc["scenes"][0].update(tone="calm"))
+    summ = ctx.manifest.stage("plan")["summary"]
+    assert st["plan"] == S.FAILED and summ["stale_rename_failed"] == ["plans/edit_plan.json"] and "plans/plan_summary.md" in summ["stale_files"]
+
+
+def test_bom_in_project_yaml_and_finish_json(tmp_path):
+    from trip_vlog.config import load_config
+    from trip_vlog.resolve.finish import _read_json
+    y = tmp_path / "project.yaml"
+    y.write_bytes(b"\xef\xbb\xbfproject:\r\n  title: Caf\xc3\xa9 trip\r\n")
+    assert load_config(y).project.title == "Café trip"
+    j = tmp_path / "x.json"
+    j.write_bytes(b"\xef\xbb\xbf{\"a\": 1}")
+    assert _read_json(j, "x") == {"a": 1}
+
+
+def test_array_limits_are_not_in_the_reply_schemas_and_are_handled_in_code(tmp_path):
+    for sch in (sl.response_schema(), ol.response_schema()):
+        assert "maxItems" not in set(keys(sch))
+    ctx, tr = setup(tmp_path, planner_config(editorial={"scene_titles": True}, workflow=AUTO), PlannerTransport(lambda c, d: {**d, "titles": [
+        {"scene_id": "scene_01", "text": "Scene 1", "start": {"relative_to": "scene_start", "clip_number": None, "offset_seconds": 0},
+         "duration_seconds": 2.0, "rationale": "r"}] * 60}))
+    assert plan_runner(ctx).run()["plan"] == S.SUCCEEDED and len(tr.plan_calls) == 2           # too_many_titles: reported, then repaired
+    assert "too_many_titles" in {r["code"] for r in rj(ctx, "selection_report.json")["repairs"]}
+
+    def many_scenes(call, d):
+        d["scenes"] = d["scenes"] * 30
+        return d
+    ctx2, tr2 = setup(tmp_path / "b", planner_config(), PlannerTransport(respond_outline=many_scenes))
+    assert plan_runner(ctx2).run()["outline"] == S.FAILED and "too_many_scenes" in all_text(tr2.outline_calls[1:])

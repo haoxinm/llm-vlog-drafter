@@ -90,7 +90,9 @@ def plan_llm_stage(ctx: Any) -> StageResult:
         gateway = outline_stages.gateway_factory(ctx) if outline_stages.gateway_factory else outline_stages._default_gateway(ctx)
         res = sl.generate_selection(gateway, sctx)
     except sl.SelectionError as e:
-        return _fail_report(ctx, pp, base, str(e), e.history, e.report)
+        res = _fail_report(ctx, pp, base, str(e), e.history, e.report)
+        res.summary["planning_failure"] = True      # the plan was refused: an earlier plan no longer matches (see draft_stages.plan_stage)
+        return res
     except LLMError as e:
         return _fail_report(ctx, pp, base, f"{type(e).__name__}: {e}", [], None)
     usage = {"requests": res.requests, "input_tokens": res.usage.input_tokens, "output_tokens": res.usage.output_tokens}

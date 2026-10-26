@@ -155,7 +155,7 @@ def _scene_properties(with_id: bool) -> dict[str, Any]:
         "tone": {"type": "string", **_lim(with_id, maxLength=MAX_TONE), "description": "Emotional tone, a few words."},
         "target_duration_seconds": {"type": "number", **_lim(with_id, exclusiveMinimum=0, maximum=MAX_SCENE_SECONDS),
                                     "description": "Time budget for the scene on the timeline, in seconds (more than 0)."},
-        "candidate_moment_ids": {"type": "array", "minItems": 1, "maxItems": MAX_CANDIDATES, "items": {"type": "string"},
+        "candidate_moment_ids": {"type": "array", "minItems": 1, **_lim(with_id, maxItems=MAX_CANDIDATES), "items": {"type": "string"},
                                  "description": "IDs copied exactly from the catalog, in the order they would be used."},
         "chronology_note": {"type": ["string", "null"], **_lim(with_id, maxLength=MAX_NOTE),
                             "description": "Why the scene is out of chronological order, or null when it is in order."},
@@ -172,7 +172,7 @@ def _body_properties(with_id: bool) -> dict[str, Any]:
         "premise": {"type": "string", **_lim(with_id, maxLength=MAX_PREMISE),
                     "description": "A short narrative premise grounded in the catalog (a few sentences)."},
         "story_mode_used": {"type": "string", "enum": list(STORY_MODES), "description": "How the scenes are ordered."},
-        "scenes": {"type": "array", "minItems": 1, "maxItems": MAX_SCENES,
+        "scenes": {"type": "array", "minItems": 1, **_lim(with_id, maxItems=MAX_SCENES),
                    "items": {"type": "object", "properties": scene, "required": list(scene), "additionalProperties": False},
                    "description": "Scenes in story order."},
         "hook": {"type": "object", "properties": {
@@ -276,6 +276,11 @@ def _tidy_limits(d: dict[str, Any], report: ValidationReport) -> None:
     for si, sc in enumerate(d.get("scenes") if isinstance(d.get("scenes"), list) else []):
         if not isinstance(sc, dict):
             continue
+        ids = sc.get("candidate_moment_ids")
+        if isinstance(ids, list) and len(ids) > MAX_CANDIDATES:
+            report.repaired("list_shortened", f"scenes[{si}].candidate_moment_ids had {len(ids)} entries, the limit is {MAX_CANDIDATES}; the rest was dropped",
+                            len(ids), MAX_CANDIDATES, f"scenes[{si}].candidate_moment_ids")
+            del ids[MAX_CANDIDATES:]
         for key, limit in (("title", MAX_TITLE), ("purpose", MAX_PURPOSE), ("tone", MAX_TONE), ("chronology_note", MAX_NOTE)):
             text(sc, key, limit, f"scenes[{si}].{key}")
         v = sc.get("target_duration_seconds")
@@ -313,8 +318,14 @@ def validate_outline(doc: Mapping[str, Any], oc: OutlineCatalog, s: OutlineSetti
     there are no errors. ``repair=False`` never changes anything: the offered set is every eligible moment, not only the
     ones that fit in the prompt, because the user may legitimately pick any of them."""
     report = ValidationReport()
+    if not isinstance(doc, Mapping):      # a hand edit can leave null, a list, a string or a number at the top level
+        report.error("schema", f"the outline must be a JSON object, not {type(doc).__name__ if doc is not None else 'null'}", "<root>")
+        return report
     d = copy.deepcopy(dict(doc))
     if repair:
+        if isinstance(d.get("scenes"), list) and len(d["scenes"]) > MAX_SCENES:     # not in the reply schema: told to the model instead
+            report.error("too_many_scenes", f"the outline has {len(d['scenes'])} scenes, the limit is {MAX_SCENES}; merge scenes", "scenes")
+            return report
         _tidy_limits(d, report)
     try:
         StoryOutline.model_validate(d)

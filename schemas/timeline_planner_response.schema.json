@@ -10,7 +10,7 @@
         "additionalProperties": false,
         "properties": {
           "clips": {
-            "description": "Clips in playing order.",
+            "description": "Clips in playing order (at most 500).",
             "items": {
               "additionalProperties": false,
               "properties": {
@@ -95,7 +95,6 @@
               ],
               "type": "object"
             },
-            "maxItems": 500,
             "minItems": 1,
             "type": "array"
           },
@@ -110,7 +109,6 @@
         ],
         "type": "object"
       },
-      "maxItems": 200,
       "minItems": 1,
       "type": "array"
     },
@@ -175,7 +173,6 @@
         ],
         "type": "object"
       },
-      "maxItems": 50,
       "type": "array"
     },
     "uncertainties": {
