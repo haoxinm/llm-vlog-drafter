@@ -83,6 +83,10 @@ trip-vlog outline --output /path/to/vlog-project [--media /path/to/trip-media] [
 # Phase 5b: optional LLM critic on a finished draft (see "QC critic"): a review report, or review + localized fixes as a new project version
 trip-vlog critic --output /path/to/vlog-project [--mode report|apply]
 
+# Phase 6: change a finished draft with a request in your own words (see "Revisions"): a new plan version, project version, preview and QC run
+trip-vlog revise --output /path/to/vlog-project "make the beach scene shorter and drop the blurry sunset clip" [--dry-run] [--file request.txt]
+trip-vlog approve --output /path/to/vlog-project --revision    # when revise stopped with exit code 3 (ambiguous or destructive): then `resume` or `revise --apply`
+
 # Optional, Resolve Studio only: finish the handoff inside Resolve (see "Finish in Resolve" below)
 trip-vlog resolve-finish --output /path/to/vlog-project [--dry-run] [--project-name NAME] [--keep-on-failure]
 ```
@@ -96,7 +100,7 @@ trip-vlog resolve-finish --output /path/to/vlog-project [--dry-run] [--project-n
   A failed or interrupted assembly leaves its numbered `.fcproj` behind, never reused; `resume` builds the next version, so clips are never appended twice.
 - `resume` continues the pipeline recorded in `manifest.json`; the media folder is taken from there. Settings persist in `<output>/project.yaml`.
 
-Exit codes: `0` finished (QC warnings and unprobeable files are reported, not fatal), `1` a stage failed, `2` bad configuration/arguments, `3` stopped at the approval gate, `4` `approve` refused (nothing to approve yet, or the plan/outline is invalid), `130` interrupted.
+Exit codes: `0` finished (QC warnings and unprobeable files are reported, not fatal), `1` a stage failed, `2` bad configuration/arguments, `3` stopped at the approval gate, `4` `approve` refused (nothing to approve yet, or the plan/outline is invalid), `5` `revise` needs an answer first (nothing was proposed, so there is nothing to approve: ask again with the answer in the request), `130` interrupted.
 
 Configuration: copy [examples/project.yaml](examples/project.yaml), edit, pass with `--config`. Command-line overrides win:
 `--duration`, `--aspect`, `--fingerprint sha256`, `--no-recursive`, `--ffprobe PATH`, or any field via `--set media.thumbnail_max_side=320`.
@@ -338,7 +342,7 @@ trip-vlog analyze --output C:\vlogs\lisbon --media D:\Trips\Lisbon --limit 3 --s
 ### Checking an endpoint (`llm-check`)
 
 ```sh
-trip-vlog llm-check --output ./vlog                  # every endpoint used by llm.text / llm.vision: a text request, then an image request
+trip-vlog llm-check --output ./vlog                  # every endpoint used by llm.text / llm.vision (and llm.critic / llm.revise when set): a text request, then an image request
 trip-vlog llm-check --config project.yaml --endpoint main --no-image
 ```
 ```powershell
@@ -515,6 +519,54 @@ trip-vlog critic --output ./vlog --mode apply     # also apply the proposals tha
   a critic round is not re-reviewed beyond `qc.critic_max_rounds`. A plan stage that re-plans keeps the critic-fixed plan as a backup (`edit_plan.<hash>.bak.json`) like any hand-edited plan.
 - Changes apply only to a plan that still resolves to itself (a hand-edited `edit_plan.json`, or a catalog changed since, is reviewed but not changed). `swap_moment` needs the approved outline of `--planner llm`; a baseline plan has none.
 
+## Revisions (`revise`)
+
+Change a finished draft by saying what you want (DESIGN §16): "make the beach scene shorter and drop the blurry sunset clip", "shorten the restaurant section by 12 seconds", "keep the natural sound from the
+waterfall", "move the skydiving scene closer to the beginning", "use fewer similar beach shots". The draft must be approved and built (`draft` finished); media analysis is **not** re-run.
+
+```sh
+trip-vlog revise --output ./vlog "make the beach scene shorter and drop the blurry sunset clip"
+trip-vlog revise --output ./vlog --file request.txt --dry-run     # ask the model and show the diff; nothing is changed
+trip-vlog revise --output ./vlog "..."                            # exit 3: proposed, not applied (see "Confirmation"); read ./vlog/plans/revisions/revise_r01.md
+trip-vlog approve --output ./vlog --revision && trip-vlog resume --output ./vlog      # or: trip-vlog revise --output ./vlog --apply
+trip-vlog revise --output ./vlog --reset-overrides                # forget a target length / waived must_include requirement that earlier revisions set (see "Length and requirements move on purpose")
+```
+
+- **How it works** (stage `revise`, after `qc`): a model (purpose `revise`: `llm.revise: <profile>`, else the `text` profile; prompt `revise.v1` + `revise_input.v1`; strict schema `revise_response`, also in `schemas/`) maps your request onto the
+  **closed set of plan operations** of `planning/plan_diff.py` (the critic's `trim_clip`, `swap_moment`, `remove_clip`, `move_clip`, `set_transition`, `set_clip_audio`, `shorten_scene`, and for revisions `add_moment`, `remove_scene`,
+  `move_scene`), naming clips and scenes by the ids of a compact plan summary it is sent (scenes and clips with ids, record and source times, durations, usable length of each moment, transitions, sound, titles, and the outline's
+  alternative moments for `swap_moment` / `add_moment`). It never edits plan JSON and writes no timestamps, only durations in seconds. Each operation carries a rationale and the words of the request it answers; the reply also lists
+  `ambiguous` questions, a `destructive` flag and the parts of the request no operation can do (`unsupported`: titles, music, colour, speed are not changed by revisions). Your request is the only instruction the model follows;
+  text derived from the media (scene wording, clip descriptions, titles) is wrapped as untrusted data, and the request itself sits between fixed markers. Nothing else leaves the machine: no media, no file names, no GPS, no images.
+  `media.local_only` covers the `revise` profile.
+- **Checked in code**: every operation must parse and name ids that exist; it is then tried on the real plan through the resolver and the validators (must_exclude, titles, handles, repeats, the moment's usable length) and **refused with a
+  reason** if the plan would no longer validate (the plan stays as it was and the other operations still get their turn); operations apply in order, each on top of the earlier ones. The film may change length by at most
+  `revise.max_duration_change_pct` (50%) of what it is now. At most `revise.max_ops` (12) operations are kept. `swap_moment` / `add_moment` need the approved outline of `--planner llm` (a baseline plan has none). A plan
+  that no longer resolves to itself (hand-edited `edit_plan.json`) is not changed.
+- **Confirmation**: a revision is applied on its own only when it is clear and not destructive; otherwise it is written as `plans/revisions/revise_rNN.json` / `.md` with status `proposed`, recorded in `manifest.revise.pending`, and the
+  run stops (exit code **3**, nothing changed). It needs confirmation when: the model asks a question (`ambiguous`) or flags it destructive; it **removes a whole scene** (`revise.confirm_scene_removal`, true); it removes **more than
+  `revise.confirm_removed_clips`** (3) clips; it changes the length of the film by more than `revise.confirm_duration_change_pct` (15%) **and** at least `revise.confirm_duration_change_min_seconds` (10 s), or by more than `revise.confirm_change_pct_any` (30%) whatever the seconds (a 43% cut of an 18 s film is not small); it would move the film's target duration or waive a `must_include` requirement (always); some of the requested changes were refused (only part of the request would be applied: the proposal lists the refused ones, and approving applies exactly the valid ones); it removes content that
+  `editorial.must_include` requires (the summary says "required item N", never the reference); the request needed more than `revise.max_ops` operations; `workflow.plan_review: true`; or `revise.auto_apply: false`. Code decides this from the
+  result of the operations, whatever the model says. A request that yields no operation but a question stops with exit **5** (nothing is proposed, so there is nothing to approve: ask again with the answer in the request). `trip-vlog approve --revision` records the approval, bound
+  to that proposal and to the plan it was made for (refused when the plan changed since); `resume` or `revise --apply` then applies **exactly** those operations (no new request to the model) and refuses, changing nothing, if they no longer give
+  the approved plan. A new request replaces an open proposal (the old files stay, marked `superseded`). Removing must_include content or a scene is only possible this way.
+- **Result**: a **new** edit plan (`plans/edit_plan.json`; the parent plan, selection plan, summary, QC and mapping reports are kept as `plans/revisions/revise_rNN.parent_*`), approval `mode: revision` bound to the new hash with `parent_plan_hash`,
+  the revision file and `authorization` (`automatic` or `manual`), a **new** versioned FilmCraft project (`Trip Vlog Draft_v00N.fcproj`; earlier versions and your Resolve projects are never touched or deleted; original media is never modified),
+  a re-rendered preview (the previous one stays as `preview/draft.before_revise_rNN.mp4`), a re-run QC and handoff. QC is **not reverted** when it gets worse; the summary, `status` and `handoff_report.md` say so. If the project cannot be built, the previous plan
+  and approval are put back. A crash or Ctrl-C mid-way leaves a marker (`revise.applying`); the next run restores the saved parent files first (same machinery as the critic's rounds, `revision_common.py`).
+- **Change summary** (`plans/revisions/revise_rNN.md` + `.json`, printed by the command, referenced in `handoff_report.md`): the request and what the model understood, each change with its reason and the words it answers, the refused ones and why, per scene
+  and clip what changed, the length before and after (and the new target), new warnings, and QC before and after. `trip-vlog status` lists the revision history.
+- **Length and requirements move on purpose**: when a revision takes the total outside the tolerance of the target duration, the target becomes the new total, and must_include references whose clips a confirmed revision removed are waived. Both are
+  recorded in `manifest.revise.overrides` (valid while the plan stage's plan is the one they were made on; whenever the plan stage runs again, even when it makes the same plan, the overrides and any open proposal are dropped and the rules start from `project.yaml` again), not in `project.yaml`. `status` lists active overrides; `revise --reset-overrides` clears them by hand (nothing else is touched).
+  QC may warn `scene_order` after `move_scene` (the plan no longer follows the approved outline's order); that is expected.
+- **Repeating a command**: the same request that produced the current plan is not applied twice (`--again` overrides); a failed or unusable model reply is never cached, so the request asks again. Unchanged inputs make no request (the response cache answers a repeat).
+  Stage cache key: the request text, the plan hash, the whole request sent (plan summary, alternatives, limits), prompt and schema versions, endpoint / model / parameters / mode, `revise.*`, the validation and planning settings with the revision overrides,
+  and the pending proposal.
+- **Dry runs** always ask (the response cache answers an identical request) and always print the diff; they never write a plan, project or record of a revision.
+- **Dropped transitions**: when an operation makes the resolver turn a dissolve into a cut (a moved scene or clip now starts the film, handle too short), the change summary says "transition dropped".
+- **After a revision that made QC worse** the critic only reports for that plan (it does not stack automatic rounds on it); revision numbers grow past `r99` (`r100`, ...).
+- **Exit codes**: 0 applied (or `--dry-run` shown), 1 nothing could be changed (every operation refused, the model unreachable, a stale or rejected proposal), 2 usage or configuration error, 3 proposed (waiting for `approve --revision`), 5 needs clarification (rephrase the request; nothing to approve). An approved proposal whose rebuild is rejected as a plan is marked stale and is not retried by `resume`; a failure of the environment is retried.
+
 ## Titles
 
 Titles are simple, editable text on track V2 (DESIGN §13.4). They live in the plans (`selection_plan.json` / `edit_plan.json`, schema 1.1: `titles[]` with `title_id`, `text`, `role`, `scene_id`, `start`, `duration_seconds`,
@@ -674,7 +726,7 @@ with Python 3.11 and 3.13. Only Linux has been exercised locally so far; treat W
 
 ## Known limitations
 
-- **Not implemented yet:** natural-language revisions (Phase 6; it will reuse `planning/plan_diff.py`). The QC critic (Phase 5b) has only been exercised with fake endpoints and the generated fixtures. `--planner llm` has only been exercised with fake endpoints and the generated fixtures; try it on your own footage before making it the default.
+- **Not verified live:** the QC critic (Phase 5b) and natural-language revisions (Phase 6) have only been exercised with fake endpoints and the generated fixtures (see the revision runbook items in DESIGN §20 Phase 6). `--planner llm` has only been exercised with fake endpoints and the generated fixtures; try it on your own footage before making it the default.
   The baseline planner is chronological with fixed clip lengths, stills at a default duration, no music or narration, hard cuts, and titles only when configured.
 - Titles are one line only; their size and position are fixed defaults; `resolve-finish` titles are still experimental.
 - Resolve import is unverified by this tool (see above). Titles are not carried by any interchange format; audio fades appear as dissolves in OTIO;

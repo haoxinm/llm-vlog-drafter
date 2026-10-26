@@ -1,13 +1,15 @@
-"""Command line interface: index / analyze / transcribe / outline / llm-check / draft / critic / approve / status / resume.
+"""Command line interface: index / analyze / transcribe / outline / llm-check / draft / critic / revise / approve / status / resume.
 
 Exit codes
   0    success (pipeline finished; QC findings are reported, not errors)
   1    a stage failed (details in `status`, logs/errors.jsonl)
   2    usage or configuration error (bad flag, unusable paths)
   3    stopped at the approval gate: review plans/story_outline.md (`outline`) or plans/plan_summary.md (`draft`), or the critic revision under
-       plans/revisions/ (qc.critic: apply with workflow.plan_review), then `approve` and `resume` (or `--auto-approve`)
+       plans/revisions/ (qc.critic: apply with workflow.plan_review), then `approve` and `resume` (or `--auto-approve`); `revise` also stops
+       here with a proposal (plans/revisions/revise_rNN.md) when a request is ambiguous or destructive: `approve --revision`, then `resume`
   4    `approve` refused: the outline/plan is missing, failed validation, or its stage did not succeed
        (`resolve-finish`: 0 finished, 1 required checks failed, 2 preconditions/arguments, 3 Resolve scripting unavailable)
+  5    `revise` needs an answer first (the request was unclear and no change could be proposed): nothing to approve, ask again with the answer
   130  interrupted (Ctrl-C); `resume` continues
 """
 
@@ -24,8 +26,8 @@ import yaml
 from trip_vlog import __version__
 from trip_vlog.config import ConfigError
 from trip_vlog.draft_stages import DRAFT_STAGES
-from trip_vlog.orchestrator import (ApprovalRefused, IndexResult, approve_pending, read_status, run_analyze, run_critic, run_draft, run_index,
-                                    run_outline, run_transcribe)
+from trip_vlog.orchestrator import (ApprovalRefused, IndexResult, approve_pending, read_status, reset_revision_overrides, run_analyze, run_critic, run_draft, run_index,
+                                    run_outline, run_revise, run_transcribe)
 
 
 def _common(p: argparse.ArgumentParser, *, media_required: bool) -> None:
@@ -115,14 +117,34 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--mode", choices=["report", "apply"], help="default: qc.critic from the config, or report when that is off")
     p.add_argument("--filmcraft", help="path to filmcraft-cli (filmcraft.executable; else $FILMCRAFT_CLI, PATH)")
 
+    p = sub.add_parser("revise", help="change a finished draft with a request in your own words (e.g. \"make the beach scene shorter and drop the blurry "
+                                      "sunset clip\"): a model maps it onto a closed set of plan operations, code validates them, and the result is a new plan "
+                                      "version, a new FilmCraft project version, a new preview and a QC re-run. Ambiguous or destructive requests are only "
+                                      "proposed (exit 3): `approve --revision`, then `resume`. A request that needs an answer first (exit 5) proposes nothing: ask again with the "
+                                      "answer in the request")
+    p.add_argument("request", nargs="?", help="what to change, in your own words (or use --file)")
+    p.add_argument("--file", type=Path, help="read the request from this text file (UTF-8)")
+    p.add_argument("--output", type=Path, required=True, help="the draft workspace")
+    p.add_argument("--config", type=Path)
+    p.add_argument("--set", dest="sets", action="append", default=[], metavar="SECTION.FIELD=VALUE")
+    p.add_argument("--dry-run", action="store_true", help="ask the model and show what would change; the plan, project and preview stay as they are")
+    p.add_argument("--apply", action="store_true", help="apply the proposal you approved with `approve --revision` (the same as `resume`); takes no request")
+    p.add_argument("--again", action="store_true", help="apply a request again even though it produced the current plan (a repeated command is otherwise skipped)")
+    p.add_argument("--reset-overrides", action="store_true",
+                   help="forget what accepted revisions changed about the rules (a new target length, waived must_include references): the plan is checked against "
+                        "project.yaml again (`status` shows them). Takes no request and changes nothing else")
+    p.add_argument("--filmcraft", help="path to filmcraft-cli (filmcraft.executable; else $FILMCRAFT_CLI, PATH)")
+
     p = sub.add_parser("approve", help="approve what is waiting at the approval gate: the story outline (plans/story_outline.json), "
-                                       "the edit plan (plans/edit_plan.json) or a critic revision; it says which")
+                                       "the edit plan (plans/edit_plan.json), a critic revision or a proposed revision; it says which")
     p.add_argument("--output", type=Path, required=True)
     g = p.add_mutually_exclusive_group()
     g.add_argument("--outline", dest="which", action="store_const", const="outline", help="approve the story outline explicitly")
     g.add_argument("--plan", dest="which", action="store_const", const="plan", help="approve the edit plan explicitly")
     g.add_argument("--critic", dest="which", action="store_const", const="critic",
                    help="approve the critic revision plans/revisions/critic_rNN.* (workflow.plan_review: true); `resume` then applies it")
+    g.add_argument("--revision", dest="which", action="store_const", const="revision",
+                   help="approve the proposed revision plans/revisions/revise_rNN.* (`trip-vlog revise` stopped for it); `resume` or `revise --apply` then applies exactly that")
 
     p = sub.add_parser("resolve-finish", help="optional: finish the handoff inside DaVinci Resolve Studio "
                                               "(new project, import, relink stills, markers, experimental titles, report)")
@@ -205,6 +227,9 @@ def _print_draft_result(res: IndexResult) -> None:
         print(f"  edit  : {ws / ap.get('outline', 'plans/story_outline.json')} (optional)")
         print(f"  then  : trip-vlog approve --output {ws}  &&  trip-vlog resume --output {ws}")
         return
+    if res.awaiting_approval and m.stage("revise").get("status") == "awaiting_approval":
+        _print_revise_block(m, ws)
+        return
     if res.awaiting_approval and m.stage("critic").get("status") == "awaiting_approval":
         cs = m.stage("critic").get("summary", {})
         print(f"\nAWAITING APPROVAL of a critic revision: the draft and its preview are unchanged; {cs.get('proposals_valid', 0)} proposed change(s) wait for you.")
@@ -238,6 +263,7 @@ def _print_draft_result(res: IndexResult) -> None:
               + (f", {qc['skipped']} skipped" if qc.get("skipped") else "") + ")"
               + (f"; warnings: {', '.join(qc['warned_checks'])}" if qc.get("warned_checks") else "")
               + (f"; FAILED: {', '.join(qc['failed_checks'])}" if qc.get("failed_checks") else ""))
+    _print_revise_block(m, ws)
     cs = m.stage("critic").get("summary", {})
     if cs.get("mode"):
         sev = cs.get("by_severity") or {}
@@ -266,6 +292,60 @@ def _print_draft_result(res: IndexResult) -> None:
             print(line)
 
 
+def _overrides_text(ov: dict | None) -> str:
+    ov = ov or {}
+    parts = []
+    if ov.get("target_duration_seconds"):
+        parts.append(f"target duration {float(ov['target_duration_seconds']):g} s")
+    if ov.get("must_include_waived"):
+        parts.append(f"{len(ov['must_include_waived'])} must_include reference(s) waived")
+    return ", ".join(parts) or "none"
+
+
+def _print_revise_block(m: Any, ws: Path) -> None:
+    """What `revise` did or wants (the stage summary): the change summary lines, then what to do next."""
+    st = m.stage("revise")
+    s = st.get("summary") or {}
+    out = s.get("outcome")
+    pend = (m.get("revise") or {}).get("pending") or {}
+    ran_now = str(st.get("finished_at") or st.get("started_at") or "") >= str(m.get("run_started_at") or "~")      # the stage's record is from this run
+    if not ran_now:
+        if pend.get("status") == "pending":
+            print(f"\na proposed revision waits for you ({pend.get('revision')}): trip-vlog approve --revision --output {ws}  &&  trip-vlog resume --output {ws}")
+        return
+    if not out or st.get("status") in (None, "pending") or (st.get("status") == "skipped" and not s.get("reason")):
+        return
+    if out == "already_applied":
+        print(f"\nrevise: {s.get('reason')}")
+        return
+    print()
+    for line in s.get("lines") or []:
+        print(line)
+    mod = f"; {s.get('requests', 0)} request(s) to '{s.get('endpoint')}' ({'local' if s.get('local') else 'remote'}), {s.get('input_tokens', 0)} input / {s.get('output_tokens', 0)} output tokens" if s.get("endpoint") else ""
+    if out == "proposed":
+        print(f"\nAWAITING CONFIRMATION of a revision: the plan, project and preview are unchanged{mod}.")
+        for r in s.get("confirm_reasons") or []:
+            print(f"  - {r}")
+        print(f"  review: {ws / str(s.get('revision_summary'))}")
+        print(f"  then  : trip-vlog approve --revision --output {ws}  &&  trip-vlog resume --output {ws}")
+    elif out == "needs_clarification":
+        print(f"\nThe request needs clarification; nothing was changed and there is nothing to approve{mod}. Ask again with the answers in the request "
+              "(exit code 5).")
+    elif out == "dry_run":
+        print(f"\ndry run: nothing was changed{mod}" + ("; applying it would ask for your confirmation first" if s.get("would_need_confirmation") else ""))
+    elif out == "applied":
+        d = s.get("duration") or {}
+        print(f"\nrevision applied ({s.get('authorization')}): {s.get('changes_applied', 0)} change(s)" + (f", {s.get('changes_refused')} could not be made" if s.get("changes_refused") else "")
+              + f"; length {d.get('before_seconds', 0):.1f} s -> {d.get('after_seconds', 0):.1f} s; FilmCraft project now {s.get('project')} (v{s.get('project_version')}), "
+              f"earlier versions are kept; QC {s.get('qc_before')} -> {s.get('qc_after')}{mod}")
+        if s.get("halt_note"):
+            print(f"  WARNING: {s['halt_note']}")
+        if s.get("revision_summary"):
+            print(f"  summary: {ws / str(s['revision_summary'])}")
+    elif out in ("failed", "no_change", "stale", "not_approved", "nothing_pending") and st.get("error"):
+        print(f"\nnothing was changed: {str(st['error']).splitlines()[0]}")
+
+
 def _compat_line(summary: dict, ws: Path) -> str:
     cp = summary.get("compatibility")
     if not cp:
@@ -278,6 +358,28 @@ def _compat_line(summary: dict, ws: Path) -> str:
 
 def _cmd_draft(args: argparse.Namespace, command: str = "draft") -> int:
     res = run_draft(args.media, args.output, args.config, _overrides(args), command=command)
+    _print_draft_result(res)
+    return res.exit_code
+
+
+def _cmd_revise(args: argparse.Namespace) -> int:
+    request = args.request
+    if args.reset_overrides:
+        if request or args.file is not None or args.apply or args.dry_run or args.again:
+            raise ConfigError("--reset-overrides takes no request and no other option; it only clears the runtime rule changes of earlier revisions")
+        cleared = reset_revision_overrides(args.output)
+        print("revision overrides cleared: " + _overrides_text(cleared) + "; the plan is checked against project.yaml again (run `trip-vlog resume`). "
+              "If the revised plan no longer fits project.yaml (e.g. its length), resume stops at plan validation: revise it back, edit the plan, "
+              "or change project.yaml and re-plan" if cleared else "no revision overrides are active; nothing was changed")
+        return 0
+    if args.file is not None:
+        if request:
+            raise ConfigError("give the request either as an argument or with --file, not both")
+        try:
+            request = Path(args.file).expanduser().read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeDecodeError) as e:
+            raise ConfigError(f"cannot read the request file {args.file}: {getattr(e, 'strerror', None) or e}") from None
+    res = run_revise(args.output, args.config, _overrides(args), request=request, dry_run=args.dry_run, apply=args.apply, again=args.again, command="revise")
     _print_draft_result(res)
     return res.exit_code
 
@@ -460,7 +562,10 @@ def _cmd_approve(args: argparse.Namespace) -> int:
     except ApprovalRefused as e:
         print(f"error: {e}", file=sys.stderr)
         return 4
-    if kind == "critic":
+    if kind == "revision":
+        print(f"approved revision {ap.get('revision')} (recorded in manifest.json); it will be applied exactly as proposed, to the plan it was proposed for. "
+              f"Continue with: trip-vlog resume --output {args.output}")
+    elif kind == "critic":
         print(f"approved critic revision {ap.get('revision')} (recorded in manifest.json). Continue with: trip-vlog resume --output {args.output}")
     elif kind == "outline":
         print(f"approved story outline {ap['outline_hash'][:12]} (recorded in manifest.json). Continue with: trip-vlog resume --output {args.output}")
@@ -490,7 +595,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
     stages = m.get("stages", {})
     canonical = ("scan", "probe", "catalog", "thumbnails", "segment", "audio", "transcribe", "analyze", "outline", "outline_approval", *DRAFT_STAGES[5:])
     llm_draft = m.get("pipeline") == "draft" and m.get("planner") == "llm"
-    order = ([n for n in canonical if n in stages or (m.get("pipeline") == "draft" and n != "critic"
+    order = ([n for n in canonical if n in stages or (m.get("pipeline") == "draft" and n not in ("critic", "revise")
                                                       and (llm_draft or n not in ("analyze", "audio", "transcribe", "outline", "outline_approval")))]
              + [n for n in stages if n not in canonical])
     for name in order:
@@ -502,7 +607,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
     ap = m.get("approval")
     if ap:
         print(f"approval  : {ap.get('status')}" + (f" ({ap.get('mode')})" if ap.get("mode") else "") + f" plan {str(ap.get('plan_hash', ''))[:12]}"
-              + (f" (critic fix of {str(ap.get('parent_plan_hash', ''))[:12]}, {ap.get('revision')})" if ap.get("mode") == "critic_fix" else ""))
+              + (f" (critic fix of {str(ap.get('parent_plan_hash', ''))[:12]}, {ap.get('revision')})" if ap.get("mode") == "critic_fix" else "")
+              + (f" (revision of {str(ap.get('parent_plan_hash', ''))[:12]}, {ap.get('revision')})" if ap.get("mode") == "revision" else ""))
     cst = m.get("critic")
     if cst and (cst.get("rounds") or cst.get("pending")):
         pend = cst.get("pending") or {}
@@ -510,6 +616,21 @@ def _cmd_status(args: argparse.Namespace) -> int:
               + (f"; revision {pend.get('revision')} {pend.get('status')}" if pend else "") + "; report qc/critic_report.md")
         if cst.get("rounds") and cst["rounds"][-1].get("halt_note"):
             print(f"            WARNING: {cst['rounds'][-1]['halt_note']}")
+    from trip_vlog.revise_stages import history
+
+    hist = history(m)
+    if hist:
+        print(f"revisions : {sum(1 for h in hist if h['status'] == 'applied')} applied" + (f", {sum(1 for h in hist if h['status'] in ('pending', 'approved'))} waiting" if any(h['status'] in ('pending', 'approved') for h in hist) else ""))
+        for h in hist:
+            q = json.dumps(str(h.get("request") or ""), ensure_ascii=False)
+            q = q if len(q) <= 70 else q[:67] + '..."'
+            tail = (f" -> {Path(str(h['project'])).name}" if h.get("project") else "") + (f", QC {h.get('qc_before')} -> {h.get('qc_after')}" if h.get("qc_after") else "")
+            print(f"  {Path(str(h.get('revision'))).stem:<10} {h['status']:<9} {q}{tail}")
+            if h.get("halt_note"):
+                print(f"            WARNING: {h['halt_note']}")
+    ov = (m.get("revise") or {}).get("overrides")
+    if ov and (ov.get("target_duration_seconds") or ov.get("must_include_waived")):
+        print(f"overrides : {_overrides_text(ov)} (set by accepted revisions, not in project.yaml; `trip-vlog revise --reset-overrides` clears them)")
     oap = m.get("outline_approval")
     if oap:
         print(f"outline   : {oap.get('status')}" + (f" ({oap.get('mode')})" if oap.get("mode") else "") + f" outline {str(oap.get('outline_hash', ''))[:12]}")
@@ -545,6 +666,11 @@ def _cmd_status(args: argparse.Namespace) -> int:
     if stages.get("outline_approval", {}).get("status") == "awaiting_approval":
         print(f"next: review plans/story_outline.md (edit plans/story_outline.json if needed), then `trip-vlog approve --output {info['workspace']}` "
               f"and `trip-vlog resume --output {info['workspace']}`")
+    elif stages.get("revise", {}).get("status") == "awaiting_approval" and (m.get("revise") or {}).get("pending", {}).get("status") == "approved":
+        print(f"next: the revision is approved; `trip-vlog resume --output {info['workspace']}` applies it")
+    elif stages.get("revise", {}).get("status") == "awaiting_approval":
+        print(f"next: review plans/revisions/ (the revise_rNN.md of the proposal), then `trip-vlog approve --revision --output {info['workspace']}` and "
+              f"`trip-vlog resume --output {info['workspace']}`; or ask again with `trip-vlog revise`")
     elif stages.get("critic", {}).get("status") == "awaiting_approval" and (m.get("critic") or {}).get("pending", {}).get("status") == "approved":
         print(f"next: the critic revision is approved; `trip-vlog resume --output {info['workspace']}` applies it")
     elif stages.get("critic", {}).get("status") == "awaiting_approval":
@@ -566,7 +692,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return {"index": _cmd_index, "status": _cmd_status, "resume": _cmd_resume, "draft": _cmd_draft,
-                "approve": _cmd_approve, "critic": _cmd_critic, "outline": _cmd_outline, "resolve-finish": _cmd_resolve_finish, "analyze": _cmd_analyze, "transcribe": _cmd_transcribe,
+                "approve": _cmd_approve, "critic": _cmd_critic, "revise": _cmd_revise, "outline": _cmd_outline, "resolve-finish": _cmd_resolve_finish, "analyze": _cmd_analyze, "transcribe": _cmd_transcribe,
                 "llm-check": _cmd_llm_check}[args.command](args)
     except ConfigError as e:
         print(f"error: {e}", file=sys.stderr)

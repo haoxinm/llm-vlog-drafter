@@ -13,7 +13,7 @@ from typing import Any, Literal, Mapping
 from urllib.parse import urlsplit
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError, field_validator, model_validator
 
 from trip_vlog.paths import check_portable_component, is_within
 
@@ -272,6 +272,7 @@ class LLMConfig(_Model):
     text: str = "main"      # endpoint profile for text/planning calls
     vision: str = "main"    # endpoint profile for vision calls
     critic: str | None = None  # endpoint profile for the QC critic; null -> the vision profile (it reads preview sheets), or the text profile when no image is sent
+    revise: str | None = None  # endpoint profile for natural-language revisions (`trip-vlog revise`); null -> the text profile
     endpoints: dict[str, EndpointConfig] = Field(default_factory=lambda: {"main": EndpointConfig()})
     schema_retries: int = Field(2, ge=0, le=5)           # re-asks with validation errors after a schema failure
     image_max_side: int = Field(1568, ge=256, le=8000)   # longest side of frames sent to a model
@@ -292,12 +293,16 @@ class LLMConfig(_Model):
                 raise ValueError(f"llm.{purpose} refers to unknown endpoint profile {name!r} (defined: {', '.join(sorted(self.endpoints)) or 'none'})")
         if self.critic is not None and self.critic not in self.endpoints:
             raise ValueError(f"llm.critic refers to unknown endpoint profile {self.critic!r} (defined: {', '.join(sorted(self.endpoints)) or 'none'})")
+        if self.revise is not None and self.revise not in self.endpoints:
+            raise ValueError(f"llm.revise refers to unknown endpoint profile {self.revise!r} (defined: {', '.join(sorted(self.endpoints)) or 'none'})")
         return self
 
-    def endpoint_for(self, purpose: Literal["text", "vision", "critic"], *, images: bool = True) -> tuple[str, EndpointConfig]:
+    def endpoint_for(self, purpose: Literal["text", "vision", "critic", "revise"], *, images: bool = True) -> tuple[str, EndpointConfig]:
         """Profile name and endpoint for a purpose. `critic` is `llm.critic` when set; otherwise the vision profile when the critic sends
-        preview-sheet images (`images`), else the text profile."""
-        if purpose == "critic":
+        preview-sheet images (`images`), else the text profile. `revise` is `llm.revise` when set, else the text profile (a revision reads text only)."""
+        if purpose == "revise":
+            name = self.revise or self.text
+        elif purpose == "critic":
             name = self.critic or (self.vision if images else self.text)
         else:
             name = self.text if purpose == "text" else self.vision
@@ -534,6 +539,26 @@ class QcConfig(_Model):
         return v
 
 
+class ReviseConfig(_Model):
+    """Natural-language revisions (DESIGN §16, `trip-vlog revise`). The model only maps a request onto the closed set of plan operations; code validates
+    every operation. A revision that is ambiguous or destructive is proposed and waits for `trip-vlog approve --revision`; nothing destructive is applied
+    on the strength of a model's reply alone."""
+
+    auto_apply: bool = True                        # false: every revision is only proposed (the same as workflow.plan_review: true)
+    max_request_chars: int = Field(2000, ge=20, le=20000)   # longer requests are refused (they are not "a revision")
+    max_ops: int = Field(12, ge=1, le=50)          # operations kept from one reply; more are dropped and the revision then needs confirmation
+    max_tokens: int = Field(4000, ge=256)          # upper bound on the reply (also capped by the endpoint's max_tokens)
+    # confirmation thresholds (any one makes the revision "destructive": it is proposed, not applied). A revision that moves the target duration or waives a
+    # must_include requirement always needs confirmation as well
+    confirm_duration_change_pct: float = Field(15.0, ge=0, le=100)      # the film gets longer or shorter by more than this share of its length ...
+    confirm_duration_change_min_seconds: float = Field(10.0, ge=0, le=3600)   # ... and by at least this many seconds
+    confirm_change_pct_any: float = Field(30.0, ge=0, le=100)           # ... or by more than this share, however short the film is (the seconds floor does not apply)
+    confirm_removed_clips: int = Field(3, ge=1, le=1000)                # more clips than this leave the film (a removed scene counts all its clips)
+    confirm_scene_removal: bool = True             # removing a whole scene always needs confirmation
+    # hard bound: a revision may not move the total away from the current length by more than this share (such operations are refused)
+    max_duration_change_pct: float = Field(50.0, ge=1, le=95)
+
+
 class OutputsConfig(_Model):
     project_file: str = "filmcraft/TripVlog.fcproj"
     preview_file: str = "preview/draft.mp4"
@@ -570,7 +595,10 @@ class Config(_Model):
     workflow: WorkflowConfig = WorkflowConfig()
     filmcraft: FilmCraftConfig = FilmCraftConfig()
     qc: QcConfig = QcConfig()
+    revise: ReviseConfig = ReviseConfig()
     outputs: OutputsConfig = OutputsConfig()
+
+    _revision: dict[str, Any] = PrivateAttr(default_factory=dict)   # runtime only (never written to project.yaml, never hashed): see `set_revision_overrides`
 
     @model_validator(mode="before")
     @classmethod
@@ -609,7 +637,7 @@ class Config(_Model):
                 f"media.local_only is true but speech.endpoint host {self.speech.endpoint.host!r} is not a loopback address "
                 "(127.x, ::1, localhost); point speech.endpoint at a local server, use speech.backend: command, or turn local_only off")
         if self.media.local_only:
-            purposes = ("text", "vision") + (("critic",) if self.qc.critic != "off" else ())
+            purposes = ("text", "vision") + (("critic",) if self.qc.critic != "off" else ()) + (("revise",) if self.llm.revise is not None else ())
             for purpose in purposes:
                 name, ep = self.llm.endpoint_for(purpose, images=self.qc.critic_images)  # type: ignore[arg-type]
                 if not ep.is_local:
@@ -617,6 +645,26 @@ class Config(_Model):
                         f"media.local_only is true but llm.{purpose} uses endpoint {name!r} whose host {ep.host!r} is not a loopback address "
                         "(127.x, ::1, localhost); point it at a local server or turn local_only off")
         return self
+
+    def set_revision_overrides(self, overrides: Mapping[str, Any] | None) -> None:
+        """What accepted revisions changed about the rules the plan is checked against (never written to project.yaml, never part of `config_hash`):
+        ``target_duration_seconds`` (a revision may shorten or lengthen the film on purpose) and ``must_include_waived`` (references whose clips a
+        confirmed revision removed). The orchestrator sets them from the manifest while the plan is still the one they were made for."""
+        self._revision = dict(overrides or {})
+
+    @property
+    def revision_overrides(self) -> dict[str, Any]:
+        return dict(self._revision)
+
+    @property
+    def effective_target_seconds(self) -> float:
+        v = self._revision.get("target_duration_seconds")
+        return float(v) if v else float(self.project.target_duration_seconds)
+
+    @property
+    def effective_must_include(self) -> list[str]:
+        waived = set(self._revision.get("must_include_waived") or ())
+        return [r for r in self.editorial.must_include if r not in waived]
 
     def to_dict(self) -> dict[str, Any]:
         return self.model_dump(mode="json")
