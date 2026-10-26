@@ -563,6 +563,10 @@ def handoff_stage(ctx: Any) -> StageResult:
         from trip_vlog.revise_stages import handoff_notes
 
         notes += handoff_notes(ctx, prep.plan.plan_hash, run["version"])
+    rs = [r for r in (ctx.manifest.get("reseal") or []) if isinstance(r, dict) and r.get("what") == "plan" and r.get("hash") == prep.plan.plan_hash]
+    if rs:
+        notes.append(f"this plan was edited by hand and re-sealed with `trip-vlog reseal` on {rs[-1].get('at')} (previous content hash {str(rs[-1].get('previous_hash'))[:12]}"
+                     + (f", backup {rs[-1]['backup']}" if rs[-1].get("backup") else "") + ")")
     failed = failed_versions(ctx)
     if failed:
         notes.append("failed FilmCraft build(s) " + ", ".join(f"v{f['version']} ({f['status']})" for f in failed) + " are listed in filmcraft/execution_journal.json; their "

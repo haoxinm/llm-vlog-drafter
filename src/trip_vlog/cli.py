@@ -1,4 +1,4 @@
-"""Command line interface: index / analyze / transcribe / outline / llm-check / draft / critic / revise / approve / status / resume.
+"""Command line interface: index / analyze / transcribe / outline / llm-check / draft / critic / revise / approve / reseal / status / resume.
 
 Exit codes
   0    success (pipeline finished; QC findings are reported, not errors)
@@ -7,7 +7,7 @@ Exit codes
   3    stopped at the approval gate: review plans/story_outline.md (`outline`) or plans/plan_summary.md (`draft`), or the critic revision under
        plans/revisions/ (qc.critic: apply with workflow.plan_review), then `approve` and `resume` (or `--auto-approve`); `revise` also stops
        here with a proposal (plans/revisions/revise_rNN.md) when a request is ambiguous or destructive: `approve --revision`, then `resume`
-  4    `approve` refused: the outline/plan is missing, failed validation, or its stage did not succeed
+  4    `approve` refused: the outline/plan is missing, failed validation, or its stage did not succeed (`reseal`: the edited file does not validate)
        (`resolve-finish`: 0 finished, 1 required checks failed, 2 preconditions/arguments, 3 Resolve scripting unavailable)
   5    `revise` needs an answer first (the request was unclear and no change could be proposed): nothing to approve, ask again with the answer
   130  interrupted (Ctrl-C); `resume` continues
@@ -145,6 +145,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="approve the critic revision plans/revisions/critic_rNN.* (workflow.plan_review: true); `resume` then applies it")
     g.add_argument("--revision", dest="which", action="store_const", const="revision",
                    help="approve the proposed revision plans/revisions/revise_rNN.* (`trip-vlog revise` stopped for it); `resume` or `revise --apply` then applies exactly that")
+
+    p = sub.add_parser("reseal", help="accept a hand edit of plans/edit_plan.json and/or plans/story_outline.json: re-run the full validators, keep a backup, "
+                                      "recompute the seal (the plan's plan_hash; the outline's canonical form and summary). Never approves anything")
+    p.add_argument("--output", type=Path, required=True, help="the draft workspace")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--outline", dest="which", action="store_const", const="outline", help="re-seal only the story outline")
+    g.add_argument("--plan", dest="which", action="store_const", const="plan", help="re-seal only the edit plan (default: whichever of the two exists)")
 
     p = sub.add_parser("resolve-finish", help="optional: finish the handoff inside DaVinci Resolve Studio "
                                               "(new project, import, relink stills, markers, experimental titles, report)")
@@ -574,6 +581,34 @@ def _cmd_approve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_reseal(args: argparse.Namespace) -> int:
+    from trip_vlog.reseal import reseal
+
+    results = reseal(args.output, (args.which,) if args.which else None)
+    for r in results:
+        label = "story outline" if r.what == "outline" else "edit plan"
+        if r.outcome == "refused":
+            print(f"{label} {r.path}: NOT sealed, nothing was changed", file=sys.stderr)
+            for e in r.errors:
+                print(f"  error: {e}", file=sys.stderr)
+            continue
+        print(f"{label} {r.path}: {r.outcome}" + (f" ({str(r.previous_hash)[:12]} -> {str(r.new_hash)[:12]})" if r.outcome == "sealed" else f" ({str(r.new_hash)[:12]})"))
+        if r.backup:
+            print(f"  backup of the file as it was: {Path(r.path).parent.as_posix()}/{r.backup}")
+        for rep in r.repairs:
+            print(f"  repaired: {rep}")
+        for w in r.warnings:
+            print(f"  warning: {w}")
+        for n in r.notes:
+            print(f"  note: {n}")
+        if r.approval == "invalidated":
+            print(f"  approval: the earlier approval no longer matches and is invalidated; review, then `trip-vlog approve --{r.what} --output {args.output}` "
+                  f"and `trip-vlog resume --output {args.output}` (nothing was approved)")
+        elif r.outcome == "sealed" and r.approval == "none":
+            print(f"  approval: none recorded yet; `trip-vlog approve --{r.what} --output {args.output}` when you are happy with it (nothing was approved)")
+    return 0 if all(r.ok for r in results) else 4
+
+
 def _cmd_resolve_finish(args: argparse.Namespace) -> int:
     from trip_vlog.resolve.finish import run_finish
 
@@ -695,7 +730,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return {"index": _cmd_index, "status": _cmd_status, "resume": _cmd_resume, "draft": _cmd_draft,
-                "approve": _cmd_approve, "critic": _cmd_critic, "revise": _cmd_revise, "outline": _cmd_outline, "resolve-finish": _cmd_resolve_finish, "analyze": _cmd_analyze, "transcribe": _cmd_transcribe,
+                "approve": _cmd_approve, "reseal": _cmd_reseal, "critic": _cmd_critic, "revise": _cmd_revise, "outline": _cmd_outline, "resolve-finish": _cmd_resolve_finish, "analyze": _cmd_analyze, "transcribe": _cmd_transcribe,
                 "llm-check": _cmd_llm_check}[args.command](args)
     except ConfigError as e:
         print(f"error: {e}", file=sys.stderr)
