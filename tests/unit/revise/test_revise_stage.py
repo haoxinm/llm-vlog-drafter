@@ -85,7 +85,6 @@ def test_a_clear_small_request_is_applied_as_a_new_plan_version(setup, monkeypat
     assert res.summary["outcome"] == "applied" and res.summary["project_version"] == 2 and res.summary["revision_summary"] == "plans/revisions/revise_r01.md"
     assert (ctx.workspace.root / "preview" / "draft.before_revise_r01.mp4").is_file()
     assert [h["revision"] for h in rs.history(ctx.manifest)] == ["plans/revisions/revise_r01.json"]
-    assert (ctx.workspace.root / "qc" / "revise_response.schema.json").exists() or True       # the schema is committed under schemas/, not per workspace
 
 
 def test_the_model_sees_the_plan_with_ids_the_request_in_markers_and_media_text_as_untrusted_data(setup):
