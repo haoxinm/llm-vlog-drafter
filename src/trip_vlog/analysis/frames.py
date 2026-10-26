@@ -113,7 +113,7 @@ def _extract(ffmpeg: Path, src: Path, items: Sequence[tuple[float, Path]], setti
     for t, _ in items:
         cmd += ["-ss", f"{t:.6f}", "-i", str(long_path(src.resolve()))]
     for i, (_, out) in enumerate(items):
-        cmd += ["-map", f"{i}:v:0", "-frames:v", "1", "-an", "-sn", "-vf", vf, "-q:v", str(q), "-f", "image2", str(out)]
+        cmd += ["-map", f"{i}:v:0", "-frames:v", "1", "-an", "-sn", "-vf", vf, "-q:v", str(q), "-f", "image2", str(long_path(out))]
     try:
         cp = subprocess.run(cmd, capture_output=True, timeout=timeout, encoding="utf-8", errors="replace",
                             stdin=subprocess.DEVNULL, **popen_flags())
@@ -137,8 +137,11 @@ def extract_segment_frames(ffmpeg: Path | None, src: Path, seg: dict[str, Any], 
     if not records:
         return "segment has no frames to sample"
     fps = segment_fps(seg)
-    half = Fraction(1, 2) / fps  # seek to the middle of the frame so float rounding cannot land on the previous one
-    targets = [(root / r["artifact"], float(Fraction(r["frame"]) / fps + half)) for r in records]
+    # ffmpeg's input -ss outputs the first frame whose pts is >= the seek time, so seek half a frame BEFORE the wanted frame's
+    # pts: float rounding cannot skip it and the previous frame (pts one frame earlier) is still excluded. Seeking after it
+    # would return the next frame and fail outright on the last frame of a file.
+    half = Fraction(1, 2) / fps
+    targets = [(root / r["artifact"], float(max(Fraction(0), Fraction(r["frame"]) / fps - half))) for r in records]
     tmps = [out.with_name(f".{out.stem}.{os.getpid()}.tmp.jpg") for out, _ in targets]
     timeout = 60.0 + 15.0 * len(records)
     try:
@@ -146,8 +149,8 @@ def extract_segment_frames(ffmpeg: Path | None, src: Path, seg: dict[str, Any], 
         err = _extract(ffmpeg, src, [(t, tmp) for (_, t), tmp in zip(targets, tmps)], settings, timeout)
         if err is None:
             missing = [i for i, tmp in enumerate(tmps) if not tmp.is_file() or tmp.stat().st_size == 0]
-            for i in missing:  # one retry per missing frame, a quarter frame later
-                err = _extract(ffmpeg, src, [(targets[i][1] + float(half) / 2, tmps[i])], settings, 60.0)
+            for i in missing:  # one retry per missing frame, a quarter frame earlier (still after the previous frame)
+                err = _extract(ffmpeg, src, [(max(0.0, targets[i][1] - float(half) / 2), tmps[i])], settings, 60.0)
                 if err or not tmps[i].is_file() or tmps[i].stat().st_size == 0:
                     return f"frame {i} (t={records[i]['timestamp_seconds']:.3f}s) could not be decoded" + (f": {err}" if err else "")
         else:

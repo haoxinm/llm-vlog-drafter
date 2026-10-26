@@ -139,3 +139,33 @@ def test_dhash_groups_near_duplicates(tmp_path):
     groups = ph.group_duplicates({"asset_a": ha, "asset_b": hb, "asset_c": hc}, 6)
     assert groups["asset_a"] == groups["asset_b"] and "asset_c" not in groups and groups["asset_a"].startswith("dup_")
     assert ph.group_duplicates({"asset_a": ha, "asset_c": hc}, 0) == {}
+
+
+def _gray_step_clip(ffmpeg_tools, tmp_path, n=12, fps=10):
+    """A clip where frame k is a flat gray of level 20*k + 10 (lossless-ish encode), so the frame number is readable from pixels."""
+    import subprocess
+
+    ffmpeg, _ = ffmpeg_tools
+    src = tmp_path / "gray"
+    src.mkdir()
+    for k in range(n):
+        Image.new("RGB", (64, 64), (20 * k + 10,) * 3).save(src / f"f{k:03d}.png")
+    clip = tmp_path / "gray.mp4"
+    subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-framerate", str(fps), "-i", str(src / "f%03d.png"),
+                    "-c:v", "libx264", "-qp", "0", "-pix_fmt", "yuv444p", str(clip)], check=True)
+    return clip
+
+
+def test_extract_returns_exactly_the_requested_frame_including_the_last(ffmpeg_tools, tmp_path):
+    from pathlib import Path
+
+    n, fps = 12, 10
+    clip = _gray_step_clip(ffmpeg_tools, tmp_path, n, fps)
+    seg = {"asset_id": "a1", "segment_id": "seg_1", "fps": str(fps), "start_frame": 0, "end_frame": n}
+    wanted = [0, 1, 5, n - 2, n - 1]
+    records = [{"index": i, "frame": f, "timestamp_seconds": f / fps, "artifact": f"frames/seg_1_{i:02d}.jpg"} for i, f in enumerate(wanted)]
+    root = tmp_path / "ws"
+    assert fr.extract_segment_frames(Path(ffmpeg_tools[0]), clip, seg, records, root, fr.SamplingSettings()) is None
+    for r in records:
+        px = Image.open(root / r["artifact"]).convert("L").getpixel((32, 32))
+        assert abs(px - (20 * r["frame"] + 10)) < 8, (r["frame"], px)
