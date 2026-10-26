@@ -4,8 +4,9 @@ Draft a travel vlog from a folder of photos and videos, with an LLM. The full de
 
 **Status:** Phase 0 (FilmCraft spike, see [docs/phase0-filmcraft-spike.md](docs/phase0-filmcraft-spike.md)), Phase 1 (media inventory) and
 **Phase 2 (deterministic end-to-end slice)** are done: `trip-vlog draft` turns a media folder into a reopened FilmCraft project, a rendered preview,
-a QC report and a Resolve handoff package, using a baseline planner with no LLM. **Phase 3+ (LLM vision labeling, LLM story/selection planning,
-critic, natural-language revisions) is not implemented yet**; `--planner llm` is rejected.
+a QC report and a Resolve handoff package, using a baseline planner with no LLM. **Phase 3 and 4 (LLM vision labeling, story outline, LLM clip selection
+and titles) are implemented** (`draft --planner llm`, see "LLM draft"); the baseline planner stays the default until the LLM path has been tried on real footage.
+The critic and natural-language revisions are not implemented yet.
 
 Originals are never modified. Everything the tool writes goes into a separate *output workspace* that must live outside the media folder.
 
@@ -57,7 +58,7 @@ version is recorded in `manifest.json`. A build that lacks a required capability
 ```sh
 # One shot: inventory -> segment -> baseline plan -> (approval) -> FilmCraft project -> preview -> QC -> Resolve handoff
 trip-vlog draft --media /path/to/trip-media --output /path/to/vlog-project --duration 180 --aspect 16:9 \
-                [--config project.yaml] [--planner baseline] [--filmcraft /path/to/filmcraft-cli] [--auto-approve]
+                [--config project.yaml] [--planner baseline|llm] [--filmcraft /path/to/filmcraft-cli] [--auto-approve]
 
 # Default (workflow.approval = stop_after_outline): the run stops after the plan, BEFORE anything is created in FilmCraft (exit code 3).
 #   read  <output>/plans/plan_summary.md   (scenes, clips, source ranges, notes)
@@ -92,8 +93,7 @@ trip-vlog resolve-finish --output /path/to/vlog-project [--dry-run] [--project-n
   A failed or interrupted assembly leaves its numbered `.fcproj` behind, never reused; `resume` builds the next version, so clips are never appended twice.
 - `resume` continues the pipeline recorded in `manifest.json`; the media folder is taken from there. Settings persist in `<output>/project.yaml`.
 
-Exit codes: `0` finished (QC warnings and unprobeable files are reported, not fatal), `1` a stage failed, `2` bad configuration/arguments (including
-`--planner llm`), `3` stopped at the approval gate, `4` `approve` refused (nothing to approve yet, or the plan/outline is invalid), `130` interrupted.
+Exit codes: `0` finished (QC warnings and unprobeable files are reported, not fatal), `1` a stage failed, `2` bad configuration/arguments, `3` stopped at the approval gate, `4` `approve` refused (nothing to approve yet, or the plan/outline is invalid), `130` interrupted.
 
 Configuration: copy [examples/project.yaml](examples/project.yaml), edit, pass with `--config`. Command-line overrides win:
 `--duration`, `--aspect`, `--fingerprint sha256`, `--no-recursive`, `--ffprobe PATH`, or any field via `--set media.thumbnail_max_side=320`.
@@ -152,7 +152,7 @@ Media references are absolute: moving the package or the media to another machin
    `resolve_handoff/stills/<key>/<name>` and relinks the clip to the copy. Keep `resolve_handoff/stills/` together with the Resolve project;
 4. adds scene markers that are missing (an existing marker with the same frame and name is not duplicated);
 5. **experimental:** creates the titles of the timeline spec as editable Text+ titles on their track and range; a title that cannot be verified
-   by read-back is rolled back (only items this run created) and listed for manual recreation. The baseline planner emits no titles yet;
+   by read-back is rolled back (only items this run created) and listed for manual recreation. Both planners can emit titles (see "Titles");
 6. reads the timeline back, compares it with the FilmCraft timeline spec and writes `resolve_handoff/resolve_finish_report.json` and `.md`
    (every API call, repairs, titles, pass/fail table). The new project is always kept and saved.
 
@@ -269,7 +269,7 @@ media: {local_only: true}
 ## Vision labeling (`analyze`)
 
 `trip-vlog analyze` turns the deterministic segments into candidate moments with a vision model (DESIGN §7.2, §7.4). It runs `index` and `segment` first,
-then the resumable `analyze` stage. `draft --planner baseline` never needs it; `draft --planner llm` is still rejected until the selection phase (`outline` already runs `analyze` for you).
+then the resumable `analyze` stage. `draft --planner baseline` never needs it; `draft --planner llm` runs it for you (as does `outline`).
 
 ```sh
 trip-vlog analyze --output ./vlog --media ./trip --dry-run          # counts only: segments, frames, images, requests, endpoint, local/remote
@@ -323,7 +323,7 @@ shows endpoint, api, URL (no query string or secrets), local/remote, model, stru
 
 `trip-vlog outline` is the first half of LLM editorial planning (DESIGN §8.1, §9.2, §9.5): from the labeled moments it asks a text model for a **story outline** (premise,
 ordered scenes with a role, tone, duration budget and candidate moment IDs, optional opening hook, missing coverage, things to confirm) and then **stops for your approval**.
-It selects no clips and touches no FilmCraft; turning the approved outline into a selection plan, titles and a draft is the next phase (`draft --planner llm` is still rejected).
+It selects no clips and touches no FilmCraft; `draft --planner llm` continues from the approved outline (see "LLM draft").
 The text model is the endpoint named by `llm.text` (see "LLM provider").
 
 ```sh
@@ -378,6 +378,72 @@ trip-vlog resume  --output C:\vlogs\lisbon
   and optional values are nullable, so it works with strict structured-output backends).
 - **Privacy**: a remote `llm.text` endpoint receives descriptions, local capture times, speech excerpts and base file names (no images, no GPS). `outline --dry-run` shows the endpoint and says
   `remote`/`local`; `media.local_only: true` forces a loopback endpoint. Descriptions and transcripts are personal data: treat the workspace as private.
+
+## LLM draft (`draft --planner llm`)
+
+The full LLM path (DESIGN §8, §9.5, §20 Phase 4): label the footage, propose a story, **you approve the story**, an LLM chooses the clips, code resolves them to exact frames and
+validates, then the usual FilmCraft assembly, preview, QC and handoff. The baseline planner remains the default (`--planner baseline`); switch the default only after trying this on your footage.
+
+```sh
+export ANTHROPIC_API_KEY=...        # or the variable your llm.text / llm.vision endpoints name; see "LLM provider"
+trip-vlog analyze --output ./vlog --media ./trip --dry-run                  # optional: what would be sent, to which endpoint
+trip-vlog draft --planner llm --media ./trip --output ./vlog --duration 180 \
+                --set editorial.opening_title=true --set project.title="Lisbon 2026"
+#   exit 3: index, segment, audio, transcribe, analyze and outline are done; read ./vlog/plans/story_outline.md, edit story_outline.json if you like
+trip-vlog approve --output ./vlog          # approves the story outline (exact content hash)
+trip-vlog resume  --output ./vlog          # LLM clip selection -> resolve -> validate -> FilmCraft -> preview -> QC -> handoff
+#   read ./vlog/plans/plan_summary.md (scenes, clips with moment descriptions, why, titles, repairs) and ./vlog/preview/draft.mp4
+trip-vlog status  --output ./vlog
+```
+```powershell
+$env:ANTHROPIC_API_KEY = "..."
+trip-vlog draft --planner llm --media D:\Trips\Lisbon --output C:\vlogs\lisbon --duration 180 --set editorial.opening_title=true
+notepad C:\vlogs\lisbon\plans\story_outline.json      # optional
+trip-vlog approve --output C:\vlogs\lisbon
+trip-vlog resume  --output C:\vlogs\lisbon
+```
+`trip-vlog outline` followed by `draft --planner llm` on the same workspace reuses the approved outline (cached, no new request). `--auto-approve` runs straight through and records both approvals as automatic.
+
+- **Stages**: `scan, probe, catalog, thumbnails, segment, audio, transcribe, analyze, outline, outline_approval, plan, approval, assemble, preview, qc, handoff`. `plan` is the LLM selection.
+- **Approval**: the human checkpoint is the **outline** (DESIGN §9.5). A plan made from the approved outline and not touched since is approved automatically and recorded as
+  `approval.mode = "derived_from_outline"` (with the outline hash and how the outline was approved), because the selection only follows the story you approved and is validated in code. It stops for
+  its own review when you set `workflow.plan_review: true`, and whenever `plans/edit_plan.json` differs from what the plan stage wrote (a hand edit needs `trip-vlog approve` again). Editing the outline withdraws
+  its approval and, after you approve again, makes a new plan.
+- **What the planner sees** (second request, `timeline_planner.v1` + `timeline_planner_input.v1`): the approved outline (premise, each scene's role, tone, budget and candidate moments in your order) and the
+  compact record of **only those candidate moments**, with `use` (the longest clip that fits the moment) and `best` (its best sub-range) added; project settings and rules (`must_include`/`must_exclude`, similar-shot limit,
+  transitions, no invented context); and a plain-words capability summary (track roles, cut and dissolve, sound policies, titles; never editor command names, built from the plan enums and the FilmCraft capability
+  snapshot when one exists). Text from the media and the outline's wording is wrapped as untrusted data. It returns, per scene, clips (`moment_id`, `target_duration_seconds`, `anchor`, `track_role`, `audio_policy`,
+  `transition_in`, `rationale`, `intentional_repeat_reason`), optional scene titles and uncertainties; **no timestamps**. Code assigns `clip_001...`, builds `plans/selection_plan.json`, resolves it to frames (existing resolver)
+  and validates both plans (`validate_selection_plan`, `validate_edit_plan`).
+- **Feedback loop**: problems the model can fix (a moment that is unknown, not in the scene's candidates or excluded, a clip longer than its moment, a scene or the total outside tolerance, a repeated moment without a
+  reason, a dissolve longer than its clips, invented title text, an overlap on V2, a missing `must_include`) are sent back **once** (`planning.selection_retries`) together with the previous reply. Then, only where the fix is unambiguous,
+  code repairs and records: invalid clips are dropped, durations clamped into the moment, dissolves shortened, scene and total durations scaled proportionally within each moment's bounds (never longer than a moment,
+  never under 1 s), bad titles dropped. Anything else (a missing scene, too little footage for the target, a `must_include` left out) fails the stage with the findings and `plans/selection_report.json`.
+  Scene order always follows the outline. Every repair is listed under "Validation" in `plan_summary.md`.
+- **Caching**: the `plan` stage is keyed by the approved outline hash, the digest of its candidate records, the whole request text, prompt and schema versions, capabilities, endpoint/model/params/mode,
+  retry and token limits, and the project, editorial, validation and title settings. Edit the outline, change the model, or change `--duration` (a new outline) and it plans again; an unchanged run makes no request.
+- **Files** (`plans/`): `selection_plan.json`, `edit_plan.json`, `plan_summary.md`, `validation_report.json`, `selection_report.json` (model, prompts, usage, each attempt's findings and repairs), `timeline_planner_response.schema.json`
+  (also in `schemas/`).
+- **Cost and privacy** (what leaves the machine, per stage; `status` and the stage summaries show token counts; a `local` endpoint sends nothing off the machine, `media.local_only: true` enforces it):
+  `analyze` sends sampled **frames** (images) plus transcript excerpts and base file names to `llm.vision`; `transcribe` sends **audio** to the speech backend only if you configured a remote one; `outline` sends one text request with all
+  candidate records (descriptions, local capture times, speech excerpts, base names; no images, no GPS); `plan` sends one text request (a second only when validation finds something) with the outline and the records of its candidate moments only.
+  Everything is cached in `llm/` of the workspace (no repeat cost for unchanged requests). Treat descriptions and transcripts as personal data.
+
+## Titles
+
+Titles are simple, editable text on track V2 (DESIGN §13.4). They live in the plans (`selection_plan.json` / `edit_plan.json`, schema 1.1: `titles[]` with `title_id`, `text`, `role`, `scene_id`, `start`, `duration_seconds`,
+`track: V2`, `style: simple`, and in the edit plan the exact frames), are placed in the FilmCraft project as text clips, read back and checked, and listed in QC (`titles`) and the handoff report.
+
+- **Off by default.** `editorial.opening_title: true` adds an opening title with `project.title` (your text, never invented); `editorial.closing_title: "..."` adds a closing title with exactly that text at the end;
+  `editorial.scene_titles: true` lets the **LLM planner** show the outline's scene titles (it may only copy the outline's title of the scene; any other text, such as a place or date, is rejected). `editorial.title_seconds`
+  (default 3) is the on-screen time of the opening and closing titles, `editorial.max_titles` (default 6) the cap. The baseline planner supports the opening and closing titles too.
+- **Rules**: one line, at most 60 characters (FilmCraft names a text clip after its first line, so a two-line title would fail the read-back), 1 to 10 seconds, inside the sequence, no two titles overlapping,
+  none overlapping an overlay clip on V2. A title whose text equals a folder name of its clips is accepted but flagged "from folder name" in the plan's uncertainties. In `edit_plan.json` you may type your own title text (`text_source: "user"`); it is
+  checked for structure, not origin; remember to update `plan_hash`.
+- **Position/size**: lower-left, sized from the sequence height (the adapter's defaults); change them in FilmCraft.
+- **Resolve**: no interchange format carries titles, so `handoff_report.md` lists them. `trip-vlog resolve-finish` recreates them from the same timeline spec as editable Text+ titles on V2 at the same frames
+  (experimental, Studio only), verified by read-back, and lists any it cannot place. Run `resolve-finish --dry-run` first to see what it would do.
+- **Older plans** (schema 1.0) still load; they simply have no titles.
 
 ## Speech transcription (optional)
 
@@ -519,8 +585,9 @@ with Python 3.11 and 3.13. Only Linux has been exercised locally so far; treat W
 
 ## Known limitations
 
-- **Phase 4 is only partly implemented (LLM gateway, vision labeling, optional transcription, audio features and the approved story outline exist):** no LLM selection planning, titles, critic or natural-language revisions. The baseline planner
-  is chronological with fixed clip lengths, stills at a default duration, no music or narration, hard cuts, and no titles.
+- **Not implemented yet:** the QC critic and natural-language revisions (Phases 5-6). `--planner llm` has only been exercised with fake endpoints and the generated fixtures; try it on your own footage before making it the default.
+  The baseline planner is chronological with fixed clip lengths, stills at a default duration, no music or narration, hard cuts, and titles only when configured.
+- Titles are one line only; their size and position are fixed defaults; `resolve-finish` titles are still experimental.
 - Resolve import is unverified by this tool (see above). Titles are not carried by any interchange format; audio fades appear as dissolves in OTIO;
   FCPXML drops non-V1 transitions; EDL carries one video track. Only the FilmCraft 0.13.0 / Linux combination has been run; Windows and macOS are unverified until CI has run.
 - Hand-editing `edit_plan.json` requires updating `plan_hash` yourself; there is no helper yet.
