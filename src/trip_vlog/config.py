@@ -79,6 +79,12 @@ class EditorialConfig(_Model):
     allow_nonlinear_hook: bool = True
     avoid_fabricated_context: bool = True
     avoid_excessive_transitions: bool = True
+    # Titles (DESIGN §13.4): simple, editable text on V2. Off by default: nothing appears on screen unless asked for.
+    opening_title: bool = False       # an opening title with project.title (from your own config, never invented)
+    scene_titles: bool = False        # the LLM planner may put the outline's scene titles on screen (planner: llm only)
+    closing_title: str | None = Field(None, min_length=1, max_length=60)  # text you supply; shown at the end when set
+    max_titles: int = Field(6, ge=0, le=50)                               # most titles in one plan
+    title_seconds: float = Field(3.0, ge=1, le=10)                        # on-screen time of the opening and closing titles
 
 
 def _workspace_relative(v: str, what: str) -> str:
@@ -420,11 +426,16 @@ class PlanningConfig(_Model):
     cluster_gap_seconds: float = Field(300.0, ge=0, le=86400)  # moments captured closer together than this form one time cluster
     outline_max_tokens: int = Field(8000, ge=256)             # upper bound on the outline reply (also capped by the endpoint's max_tokens)
     outline_retries: int = Field(1, ge=0, le=3)               # re-asks with deterministic findings before the outline stage fails
+    selection_max_tokens: int = Field(12000, ge=256)          # upper bound on the clip-selection reply (also capped by the endpoint's max_tokens)
+    selection_retries: int = Field(1, ge=0, le=3)             # re-asks with deterministic findings before the plan stage fails
 
 
 class WorkflowConfig(_Model):
     approval: Literal["stop_after_outline", "auto_approve"] = "stop_after_outline"
-    planner: Literal["baseline", "llm"] = "baseline"  # "llm" arrives in Phase 3/4 and is rejected until then
+    planner: Literal["baseline", "llm"] = "baseline"  # "llm": outline -> approval -> LLM clip selection (needs an LLM endpoint)
+    # llm planner only: after the outline was approved by a person the edit plan is approved automatically (recorded as
+    # "derived"). true: also stop at the edit plan for review (`trip-vlog approve`, then `resume`).
+    plan_review: bool = False
 
 
 class FilmCraftConfig(_Model):

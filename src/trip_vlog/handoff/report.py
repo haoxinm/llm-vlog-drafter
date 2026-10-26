@@ -143,7 +143,9 @@ def render_handoff_report(i: HandoffReportInputs) -> str:
         L.append("")
         if ex.report.titles_not_carried:
             L += ["Titles that must be recreated:", ""] + [f"- \"{_esc(t['text'])}\" at frame {t['start_frame']} for {t['duration_frames']} frames on {t['track']}"
-                                                            for t in ex.report.titles_not_carried] + [""]
+                                                            for t in ex.report.titles_not_carried] + [
+                "`trip-vlog resolve-finish` can recreate them as editable Resolve titles (experimental, Studio only); "
+                "otherwise add them by hand. The FilmCraft project keeps them as editable text clips.", ""]
         else:
             L += ["This draft contains no titles.", ""]
 

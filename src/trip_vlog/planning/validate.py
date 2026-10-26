@@ -25,6 +25,7 @@ from pydantic import ValidationError
 from trip_vlog.planning.catalog_view import AssetInfo, MomentInfo, PlanningCatalog, ref_matches, ref_targets
 from trip_vlog.planning.duration import (cumulative_starts, frame_distance, frames_to_float, parse_fps, seconds_to_frames)
 from trip_vlog.planning.models import EditClip, EditPlan, EditTransition, SelectionPlan, edit_plan_hash
+from trip_vlog.planning.titles import validate_edit_titles, validate_selection_titles
 
 AUDIO_ROLES = ("natural_audio", "music", "narration")
 VISUAL_ROLES = ("primary_video", "overlay")
@@ -46,13 +47,20 @@ class ValidationSettings:
     include_narration: bool = False
     check_hash: bool = True
     repair: bool = True
+    # titles (planning.titles)
+    project_title: str = "Trip Vlog"
+    opening_title: bool = False
+    scene_titles: bool = False
+    closing_title: str | None = None
+    max_titles: int = 6
 
     @classmethod
     def from_config(cls, config: Any, **overrides: Any) -> "ValidationSettings":
         p, e = config.project, config.editorial
         base = dict(frame_rate=p.frame_rate, target_duration_seconds=float(p.target_duration_seconds),
                     must_include=tuple(e.must_include), must_exclude=tuple(e.must_exclude),
-                    music_policy=p.music_policy, include_narration=p.include_narration)
+                    music_policy=p.music_policy, include_narration=p.include_narration, project_title=p.title,
+                    opening_title=e.opening_title, scene_titles=e.scene_titles, closing_title=e.closing_title, max_titles=e.max_titles)
         for name in ("duration_tolerance_pct", "duration_tolerance_seconds"):
             if hasattr(config.project, name):
                 base[name] = getattr(config.project, name)
@@ -217,6 +225,8 @@ def validate_selection_plan(plan: SelectionPlan | Mapping[str, Any], catalog: Pl
                     f"(tolerance {settings.total_tolerance_seconds():.2f}s)")
     _check_refs(report, clips, catalog, settings)
     _check_duplicates_selection(report, plan, catalog)
+    folders = {m.moment_id: catalog.assets[m.asset_id].folder for m in catalog.moments.values() if m.asset_id in catalog.assets}
+    validate_selection_titles(report, plan, settings, folders)
     return report
 
 
@@ -332,6 +342,7 @@ def validate_edit_plan(plan: EditPlan | Mapping[str, Any], catalog: PlanningCata
     _check_totals(report, plan, fps, settings)
     _check_duplicates_edit(report, plan, catalog)
     _check_refs(report, [(c.clip_instance_id, c.moment_id) for _, _, c in clips], catalog, settings)
+    validate_edit_titles(report, plan, fps, settings)
 
     if report.repairs:
         plan.plan_hash = edit_plan_hash(plan)

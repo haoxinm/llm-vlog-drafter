@@ -26,6 +26,11 @@ editorial:
   allow_nonlinear_hook: true
   avoid_fabricated_context: true
   avoid_excessive_transitions: true
+  opening_title: false           # an opening title with project.title on V2 (your own text; both planners)
+  scene_titles: false            # llm planner may show the outline's scene titles (never invented text)
+  closing_title: null            # text you supply (max 60 characters); shown at the end when set
+  max_titles: 6                  # most titles in one plan
+  title_seconds: 3.0             # on-screen time of the opening and closing titles
 
 media:
   recursive: true
@@ -73,10 +78,13 @@ planning:                        # LLM story outline (README "Story outline"); u
   cluster_gap_seconds: 300       # moments captured closer together form one time cluster (pre-selection keeps the best of each)
   outline_max_tokens: 8000       # upper bound on the reply (also capped by the endpoint's max_tokens)
   outline_retries: 1             # corrected re-asks with the validation findings before the outline stage fails
+  selection_max_tokens: 12000    # upper bound on the clip-selection reply (also capped by the endpoint's max_tokens)
+  selection_retries: 1           # corrected re-asks with the validation findings before the plan stage fails
 
 workflow:
   approval: "stop_after_outline" # stop_after_outline | auto_approve
-  planner: "baseline"            # baseline (no LLM); "llm" arrives in Phase 3/4
+  planner: "baseline"            # baseline (no LLM); llm = outline -> approval -> LLM clip selection
+  plan_review: false             # llm planner: also stop at the edit plan for review (default: it follows the approved outline)
 
 filmcraft:
   mode: "mcp"                    # mcp | cli | bridge
