@@ -1,8 +1,9 @@
 """Run all QC checks and write preview/qc_report.json + .md, the preview contact sheets and qc/preview_sheet.json (DESIGN §14).
 
-Seam for the (Phase 5b) critic: a critic reads ``qc/preview_sheet.json`` (tiles -> record time, clip, scene, side; sheet files) and
-the ``checks`` of ``qc_report.json`` (each names clips and scenes in ``data``), and adds its advisory findings as ``extra_results``
-(never ``fail``: subjective findings do not fail a draft). The report carries a ``critic`` block that says it has not run."""
+The optional LLM critic (``qc/critic.py``, stage ``critic``) reads ``qc/preview_sheet.json`` (tiles -> record time, clip, scene, side; sheet files)
+and the ``checks`` of this report (each names clips and scenes in ``data``). Its findings are advisory and never change the deterministic
+status or counts here: they live in ``qc/critic_report.json`` and the ``critic`` block of this report, which says ``not_run`` until the critic has
+run (``set_critic_block`` fills it). ``QcInputs.extra_results`` stays as a seam for other reviewers that want a finding to appear as a check."""
 
 from __future__ import annotations
 
@@ -43,7 +44,7 @@ class QcInputs:
     outline_scene_ids: list[str] | None = None   # the approved outline's scenes in order, when this plan was made from one
     index_path: Path | None = None               # qc/preview_sheet.json
     workspace_root: Path | None = None           # index paths are stored relative to this
-    extra_results: list[C.CheckResult] = field(default_factory=list)   # advisory findings added by a reviewer (Phase 5b critic)
+    extra_results: list[C.CheckResult] = field(default_factory=list)   # advisory findings added by another reviewer (the LLM critic keeps its own report instead)
 
 
 def run_qc(i: QcInputs) -> dict[str, Any]:
@@ -133,13 +134,29 @@ def run_qc(i: QcInputs) -> dict[str, Any]:
     counts = {s: sum(1 for r in results if r.status == s) for s in (C.PASS, C.WARN, C.FAIL, C.SKIPPED)}
     doc = {"schema_version": QC_SCHEMA, "generated_at": utc_now_iso(), "status": status, "counts": counts,
            "plan_hash": plan.plan_hash, "preview": i.preview.name, "contact_sheet": sheet,
-           "critic": {"status": "not_run", "reason": "deterministic checks only; an LLM critic (Phase 5b) would read "
+           "critic": {"status": "not_run", "reason": "deterministic checks only (qc.critic is off, or the critic has not run yet); the LLM critic reads "
                       "contact_sheet.index and the checks above",
                       "inputs": {"preview_sheet_index": sheet.get("index"), "checks": "checks", "plan_hash": plan.plan_hash}},
            "checks": [r.to_dict() for r in results]}
     atomic_write_json(i.report_path, doc)
     atomic_write_text(i.report_path.with_suffix(".md"), render_qc_markdown(doc))
     return doc
+
+
+def set_critic_block(report_path: Path, block: dict[str, Any]) -> bool:
+    """Put the critic's result into an existing qc_report.json (and its .md). False when there is no readable report to put it in."""
+    import json
+
+    try:
+        doc = json.loads(Path(report_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(doc, dict):
+        return False
+    doc["critic"] = block
+    atomic_write_json(report_path, doc)
+    atomic_write_text(Path(report_path).with_suffix(".md"), render_qc_markdown(doc))
+    return True
 
 
 def _relative_to(root: Path | None):
@@ -180,5 +197,10 @@ def render_qc_markdown(doc: dict[str, Any]) -> str:
               f"index `{sheet.get('index')}` maps every tile to its record time, clip and scene.", ""]
         L += [f"- `{p}`" for p in sheet["sheets"]] + [""]
     crit = doc.get("critic") or {}
-    L += ["## Critic", "", f"{crit.get('status', 'not_run')}: {crit.get('reason', '')}", ""]
+    L += ["## Critic", "", f"{crit.get('status', 'not_run')}: {crit.get('reason') or ''}".rstrip(": ").rstrip(), ""]
+    if crit.get("report"):
+        sev = crit.get("by_severity") or {}
+        L += [f"- mode `{crit.get('mode')}`, {crit.get('findings', 0)} finding(s) ({', '.join(f'{n} {k}' for k, n in sev.items() if n) or 'none'}), "
+              f"{crit.get('proposals_valid', 0)} valid proposed change(s), {crit.get('changes_applied', 0)} applied; images "
+              f"{'sent' if crit.get('images_sent') else 'not sent (text only)'}; report `{crit['report']}`", ""]
     return "\n".join(L).rstrip("\n") + "\n"
