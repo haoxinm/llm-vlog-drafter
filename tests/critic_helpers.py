@@ -208,7 +208,7 @@ def stub_rebuild(monkeypatch, *, fail_assemble: str | None = None, reject_plan: 
         mp.parent.mkdir(parents=True, exist_ok=True)
         mp.write_text(json.dumps({"plan_hash": ds.plan_file_hash(ds._pp(ctx).edit_plan)}), encoding="utf-8")
         if fail_assemble:     # a plan rejection says why in `errors`, like the real stage; a failure of the environment does not
-            return StageResult(Status.FAILED, {"errors": [{"code": "plan_rejected"}]} if reject_plan else {}, fail_assemble)
+            return StageResult(Status.FAILED, {"errors": [{"code": "x"}], "plan_rejected": True} if reject_plan else {}, fail_assemble)
         return StageResult(Status.SUCCEEDED, {"project": f"filmcraft/Trip Vlog Draft_v{len([c for c in calls if c[0] == 'assemble']) + 1:03d}.fcproj",
                                               "version": len([c for c in calls if c[0] == "assemble"]) + 1})
 

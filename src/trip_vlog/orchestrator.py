@@ -443,7 +443,12 @@ def _execute(media: Path | str | None, output: Path | str, config_path: Path | s
             ctx = RunContext(config, paths, ws, logger, manifest, catalog, ffprobe, ffmpeg, ffprobe_ver, ffmpeg_ver, echo=echo)
             ctx.data["analyze_limit" if pipeline != "transcribe" else "transcribe_limit"] = analyze_limit
             if pipeline == "draft":
+                from trip_vlog.critic_stages import recover_interrupted
                 from trip_vlog.draft_stages import build_draft_runner
+
+                note = recover_interrupted(ctx)     # before any stage looks at the plan, whether or not the critic runs now
+                if note:
+                    echo(f"warning: {note}")
                 runner = build_draft_runner(ctx)
             elif pipeline == "analyze":
                 runner = build_analyze_runner(ctx, with_analyze=not dry_run)

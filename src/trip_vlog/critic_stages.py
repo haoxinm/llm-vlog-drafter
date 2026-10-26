@@ -137,6 +137,11 @@ def effective_mode(ctx: Any) -> str:
     return "apply" if pending_approved(ctx) else ctx.config.qc.critic
 
 
+def _loop_mode(ctx: Any) -> str:
+    m = effective_mode(ctx)
+    return "report" if m == "off" else m
+
+
 def critic_wanted(ctx: Any) -> bool:
     """Whether the draft pipeline registers the critic stage: qc.critic is not off, or an approved revision waits to be applied."""
     return effective_mode(ctx) != "off"
@@ -448,33 +453,64 @@ def _targets(ctx: Any) -> dict[str, Path]:
             "qc_report": ds._qc_paths(ctx)[0], "mapping_report": ctx.workspace.root / "filmcraft" / "mapping_report.json", "preview": ds._preview_path(ctx)}
 
 
-def _rollback(ctx: Any, saved: dict[str, Path | None], approval: Any) -> None:
-    """Put the parent files back. A saved copy of None means the file did not exist before the round: the new one is deleted."""
-    for key, target in _targets(ctx).items():
-        if key not in saved:
-            continue
-        src = saved[key]
-        if src is None:
-            target.unlink(missing_ok=True)
-        elif src.is_file():
-            shutil.copyfile(src, target)
-    if approval is not None:
-        ctx.manifest.set(approval=approval)
+def _rollback(ctx: Any, saved: dict[str, Path | None], approval: Any, *, new_hash: str, parent_hash: str, new_selection: Path | None = None, new_plan: Path | None = None) -> str:
+    """Put the parent files back, but only over what this round wrote. Looks at the plan on disk first:
+      full    it is the round's new plan: every saved file goes back (a saved copy of None means the file did not exist before: the new one is deleted)
+              and the parent approval returns if it is still the round's;
+      parent  it is already the parent plan (the round stopped before it wrote it): only a selection plan this round wrote is put back;
+      kept    it is something else (somebody edited or replaced it since): nothing is touched.
+    "The round's new plan" means the same bytes the round wrote (`new_plan`), not merely the same content hash: a reformatted file is the person's.
+    Returns which of the three happened."""
+    targets = _targets(ctx)
+    try:
+        cur: str | None = ds.plan_file_hash(targets["edit_plan"])
+    except (OSError, ValueError):
+        cur = None
+    if cur == new_hash and cur != parent_hash and (new_plan is None or not new_plan.is_file() or new_plan.read_bytes() == targets["edit_plan"].read_bytes()):
+        for key, target in targets.items():
+            if key not in saved:
+                continue
+            src = saved[key]
+            if src is None:
+                target.unlink(missing_ok=True)
+            elif src.is_file():
+                shutil.copyfile(src, target)
+        held = ds.approval_record(ctx.manifest)
+        if approval is not None and (held or {}).get("plan_hash") == new_hash:
+            ctx.manifest.set(approval=approval)
+        outcome = "full"
+    elif cur == parent_hash:
+        sel, src = targets["selection_plan"], saved.get("selection_plan")
+        if src is not None and src.is_file() and new_selection is not None and sel.is_file() and new_selection.is_file() and sel.read_bytes() == new_selection.read_bytes():
+            shutil.copyfile(src, sel)
+        outcome = "parent"
+    else:
+        outcome = "kept"
     ctx.manifest.save()
     ctx.data.pop("prepared", None)
+    return outcome
+
+
+_DERIVED_STAGES = ("assemble", "preview", "qc", "critic", "handoff")
 
 
 def recover_interrupted(ctx: Any) -> str | None:
-    """A round that was started and never finished (crash, Ctrl-C, power loss) left `critic.applying`: put the saved parent files back, mark the
-    revision `rolled_back` and clear the marker. Returns a sentence about it, or None when there was nothing to recover."""
+    """A round that was started and never finished (crash, Ctrl-C, power loss) left `critic.applying`. Run before any stage: put the saved parent files
+    back if the plan on disk is still the round's (see `_rollback`; a plan the person edited meanwhile is kept), mark the revision `rolled_back`, clear the
+    marker and forget the input hashes of the stages that built on the half-done state so they run again. Returns a sentence, or None when there was nothing."""
     mk = state_of(ctx).get("applying")
     if not isinstance(mk, dict):
         return None
     root = ctx.workspace.root
     tag = str(mk.get("tag") or f"critic_r{int(mk.get('number') or 0):02d}")
-    _rollback(ctx, {k: (root / v if v else None) for k, v in (mk.get("saved") or {}).items()}, mk.get("parent_approval"))
-    note = f"critic round {tag} was interrupted before it finished; the previous plan (hash {str(mk.get('parent_plan_hash'))[:12]}) was put back"
     d = revisions_dir(ctx)
+    outcome = _rollback(ctx, {k: (root / v if v else None) for k, v in (mk.get("saved") or {}).items()}, mk.get("parent_approval"),
+                        new_hash=str(mk.get("new_plan_hash")), parent_hash=str(mk.get("parent_plan_hash")), new_selection=d / f"{tag}.selection_plan.json",
+                        new_plan=d / f"{tag}.edit_plan.json")
+    head = f"critic round {tag} was interrupted before it finished"
+    note = {"full": f"{head}; the previous plan (hash {str(mk.get('parent_plan_hash'))[:12]}) was put back",
+            "parent": f"{head}; the plan on disk is the previous plan, nothing else was put back",
+            "kept": f"{head}; the edit plan on disk was changed since, so nothing was put back and your plan stays"}[outcome]
     try:
         doc = json.loads((d / f"{tag}.json").read_text(encoding="utf-8"))
         doc.update(status="rolled_back", note=note)
@@ -483,7 +519,11 @@ def recover_interrupted(ctx: Any) -> str | None:
         atomic_write_text(md, md.read_text(encoding="utf-8").replace(f"{tag}: applying", f"{tag}: rolled_back", 1) + "\n" + note + "\n")
     except (OSError, ValueError):
         pass
-    _save_state(ctx, applying=None)
+    if outcome == "full":
+        for name in _DERIVED_STAGES:
+            if name in ctx.manifest.stages:
+                ctx.manifest.stages[name]["input_hash"] = None
+    _save_state(ctx, applying=None, recovered=note)
     ctx.logger.event("critic", Status.PARTIAL, message=note)
     return note
 
@@ -539,9 +579,10 @@ def _apply_round(ctx: Any, rv: Review, selected: list[cr.Finding], res: ApplyRes
     def restore(why: str, *, remember: bool) -> dict[str, Any]:
         """Put the previous state back. ``remember``: the revision itself is at fault (the plan is rejected), so `resume` must not build it again;
         a failure of the environment is retried by the next run."""
-        _rollback(ctx, saved, prev_approval)
+        _rollback(ctx, saved, prev_approval, new_hash=res.edit.plan_hash, parent_hash=parent.plan_hash, new_selection=d / f"{tag}.selection_plan.json",
+                  new_plan=d / f"{tag}.edit_plan.json")
         rec.update(status="failed", error=why)
-        upd: dict[str, Any] = {"applying": None}
+        upd: dict[str, Any] = {"applying": None, "rounds": [r for r in state_of(ctx).get("rounds", []) if not (r.get("round") == n and r.get("plan_hash") == res.edit.plan_hash)]}
         if remember:
             upd["failed"] = [*state_of(ctx).get("failed", []), _revision_hash(parent.plan_hash, selected)]
         _save_state(ctx, **upd)
@@ -566,7 +607,7 @@ def _apply_round(ctx: Any, rv: Review, selected: list[cr.Finding], res: ApplyRes
         except Exception as e:  # noqa: BLE001
             return restore(f"the new plan could not be written or built ({type(e).__name__}: {e}); the previous plan was put back", remember=False)
         if asm.status == Status.FAILED:
-            return restore(f"the new FilmCraft project could not be built; the previous plan was put back: {asm.error}", remember="errors" in asm.summary)
+            return restore(f"the new FilmCraft project could not be built; the previous plan was put back: {asm.error}", remember=bool(asm.summary.get("plan_rejected")))
         _mark(ctx, "assemble", asm, ds._assemble_inputs)
         prv = _safely(ds.preview_stage, ctx)
         _mark(ctx, "preview", prv, ds._preview_inputs)
@@ -574,21 +615,21 @@ def _apply_round(ctx: Any, rv: Review, selected: list[cr.Finding], res: ApplyRes
         if prv.status == Status.SUCCEEDED:      # QC only runs on a preview that was rendered
             qc = _safely(ds.qc_stage, ctx)
             _mark(ctx, "qc", qc, ds._qc_inputs)
-    except BaseException:   # Ctrl-C, SystemExit: leave the previous plan in place, then let it go on
+        qc_ok = qc is not None and qc.status != Status.FAILED and "status" in qc.summary
+        after = [str(x) for x in (qc.summary.get("failed_checks") or [])] if qc is not None and qc_ok else []
+        new_failures = sorted(set(after) - _failed_names(rv.inp.qc))
+        halt = "preview_failed" if qc is None else "qc_failed" if not qc_ok else "qc_regression" if new_failures else None
+        rec.update(status="applied", project=asm.summary.get("project"), project_version=asm.summary.get("version"), preview_status=str(prv.status),
+                   qc_after=qc.summary.get("status") if qc is not None else None, qc_failed_after=after, qc_new_failures=new_failures,
+                   qc_regressed=halt in ("qc_failed", "qc_regression"), halt=halt)
+        rec["halt_note"] = halt_text(rec)
+        rdoc.update(status="applied", project=rec["project"], project_version=rec["project_version"], qc_before=rec["qc_before"], qc_after=rec["qc_after"],
+                    preview_before=rec["preview_before"], qc_regressed=rec["qc_regressed"], qc_new_failures=new_failures, halt=halt, halt_note=rec["halt_note"])
+        _write_revision(ctx, n, rdoc, res)
+        _save_state(ctx, rounds=[*state_of(ctx).get("rounds", []), rec], pending=None, applying=None)
+    except BaseException:   # Ctrl-C, SystemExit (also while the round is being recorded): the previous plan goes back, then it goes on
         restore("the round was interrupted; the previous plan was put back", remember=False)
         raise
-    qc_ok = qc is not None and qc.status != Status.FAILED and "status" in qc.summary
-    after = [str(x) for x in (qc.summary.get("failed_checks") or [])] if qc is not None and qc_ok else []
-    new_failures = sorted(set(after) - _failed_names(rv.inp.qc))
-    halt = "preview_failed" if qc is None else "qc_failed" if not qc_ok else "qc_regression" if new_failures else None
-    rec.update(status="applied", project=asm.summary.get("project"), project_version=asm.summary.get("version"), preview_status=str(prv.status),
-               qc_after=qc.summary.get("status") if qc is not None else None, qc_failed_after=after, qc_new_failures=new_failures,
-               qc_regressed=halt in ("qc_failed", "qc_regression"), halt=halt)
-    rec["halt_note"] = halt_text(rec)
-    rdoc.update(status="applied", project=rec["project"], project_version=rec["project_version"], qc_before=rec["qc_before"], qc_after=rec["qc_after"],
-                preview_before=rec["preview_before"], qc_regressed=rec["qc_regressed"], qc_new_failures=new_failures, halt=halt, halt_note=rec["halt_note"])
-    _write_revision(ctx, n, rdoc, res)
-    _save_state(ctx, rounds=[*state_of(ctx).get("rounds", []), rec], pending=None, applying=None)
     return rec
 
 
@@ -657,13 +698,15 @@ def critic_stage(ctx: Any) -> StageResult:
 def _critic_stage(ctx: Any) -> StageResult:
     cfg = ctx.config
     q = cfg.qc
-    recovered = recover_interrupted(ctx)      # before anything else looks at the plan files
-    mode = effective_mode(ctx)
-    if mode == "off":
+    recovered = recover_interrupted(ctx) or state_of(ctx).get("recovered")      # normally done before the runner starts
+    if recovered:
+        _save_state(ctx, recovered=None)
+    if effective_mode(ctx) == "off":
         return StageResult(Status.SKIPPED, {"skipped": True, "reason": "qc.critic is off"})
     requests = hits = applied_now = 0
     while True:
         st = state_of(ctx)
+        mode = _loop_mode(ctx)      # an approved revision runs in apply mode once; afterwards the configured mode (off: one last review) applies again
         try:
             rv = review(ctx)
         except RuntimeError as e:   # nothing to review (no valid plan, no QC report)
@@ -692,6 +735,11 @@ def _critic_stage(ctx: Any) -> StageResult:
             for f in selected:
                 f.change_status, f.change_note = "refused", "this would return the plan to a version an earlier round already started from or produced; it is not applied again"
             selected, res = [], None
+        pend = state_of(ctx).get("pending") or {}
+        if pend.get("status") == "approved" and not (rounds_left and selected and res is not None and res.changed
+                                                      and pend.get("revision_hash") == _revision_hash(rv.inp.plan.plan_hash, selected)):
+            _save_state(ctx, pending=None)       # an approval for a revision this review no longer proposes is not carried over
+            mode = _loop_mode(ctx)
         if mode == "apply" and rounds_left and selected and res is not None and res.changed:
             authorization, number, stop = _authorize(ctx, rv, selected, res, mode, done)
             if stop is not None:

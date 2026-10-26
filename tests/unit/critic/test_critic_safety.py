@@ -324,3 +324,157 @@ def test_a_plan_edited_after_the_review_aborts_the_round_without_changes(setup, 
     assert json.loads(edited)["uncertainties"] == ["edited by hand"]
     assert not (root / "plans" / "revisions").exists() and not ctx.manifest.get("critic", {}).get("rounds") and not ctx.manifest.get("critic", {}).get("failed")
     assert ctx.manifest.get("critic", {}).get("applying") is None
+
+
+# ---- follow-up review: recovery must not destroy what the person did since --------------------------------------------------
+
+def _crashed_round(setup, monkeypatch, **stub):
+    """A round that "died" in the middle: new plan and approval on disk, marker still set."""
+    ctx, plan, _ = setup(transport=CriticTransport(proposals_once()))
+    stub_rebuild(monkeypatch, preview_raises=KeyboardInterrupt(), **stub)
+    real = cs._rollback
+    monkeypatch.setattr(cs, "_rollback", lambda *a, **k: (_ for _ in ()).throw(OSError("killed")))
+    assert cs.critic_stage(ctx).status == Status.PARTIAL
+    monkeypatch.setattr(cs, "_rollback", real)
+    assert ctx.manifest.get("critic")["applying"]
+    return ctx, plan
+
+
+def test_a_plan_edited_after_the_crash_is_kept_and_nothing_is_deleted(setup, monkeypatch):
+    ctx, plan = _crashed_round(setup, monkeypatch)
+    root, pp = ctx.workspace.root, ds._pp(ctx)
+    doc = rj(pp.edit_plan)
+    doc["uncertainties"] = ["edited by hand after the crash"]
+    atomic_write_json(pp.edit_plan, with_hash(EditPlan.model_validate(doc)).model_dump(mode="json"))
+    edited, approval = pp.edit_plan.read_bytes(), dict(ctx.manifest.get("approval"))
+    mapping = root / "filmcraft" / "mapping_report.json"
+    note = cs.recover_interrupted(ctx)
+    assert "nothing was put back" in note and pp.edit_plan.read_bytes() == edited and ctx.manifest.get("approval") == approval
+    assert mapping.is_file() and pp.summary.is_file()                       # files the round wrote are not deleted under a plan that is not the round's
+    assert ctx.manifest.get("critic")["applying"] is None
+    rev = rj(root / "plans" / "revisions" / "critic_r01.json")
+    assert rev["status"] == "rolled_back" and "nothing was put back" in rev["note"]
+
+
+def test_a_plan_approved_by_somebody_else_after_the_crash_keeps_its_approval(setup, monkeypatch):
+    ctx, plan = _crashed_round(setup, monkeypatch)
+    ctx.manifest.set(approval={"status": "approved", "mode": "manual", "plan_hash": "another"})
+    cs.recover_interrupted(ctx)
+    assert ctx.manifest.get("approval")["plan_hash"] == "another"
+
+
+def test_a_marker_whose_plan_is_still_the_parent_only_cleans_up_what_the_round_wrote(setup, monkeypatch):
+    ctx, plan, _ = setup(transport=CriticTransport(proposals_once()))
+    pp = ds._pp(ctx)
+    before = plan_files(ctx)
+    stub_rebuild(monkeypatch)
+    ctx.manifest.set(critic={"applying": {"number": 1, "tag": "critic_r01", "parent_plan_hash": plan.plan_hash, "new_plan_hash": "n", "saved": {"edit_plan": None, "summary": None}}})
+    pp.summary.write_text("the person's summary", encoding="utf-8")
+    note = cs.recover_interrupted(ctx)
+    assert "previous plan" in note and plan_files(ctx) == before and pp.summary.read_text(encoding="utf-8") == "the person's summary"
+
+
+def test_recovery_forgets_the_input_hashes_of_the_stages_that_built_on_the_half_done_state(setup, monkeypatch):
+    ctx, plan = _crashed_round(setup, monkeypatch)
+    for name in ("assemble", "preview", "qc"):
+        ctx.manifest.stages[name] = {"status": "succeeded", "input_hash": "built on the new plan"}
+    cs.recover_interrupted(ctx)
+    assert all(ctx.manifest.stages[n]["input_hash"] is None for n in ("assemble", "preview", "qc"))
+    assert ds.plan_file_hash(ds._pp(ctx).edit_plan) == plan.plan_hash
+
+
+def test_a_stale_marker_is_recovered_before_the_runner_starts_even_with_the_critic_off(setup, monkeypatch, tmp_path):
+    ctx, plan = _crashed_round(setup, monkeypatch)
+    ctx.config.qc.critic = "off"
+    root = ctx.workspace.root
+    (root / "project.yaml").write_text(ctx.config.to_yaml(), encoding="utf-8")
+    seen = {}
+
+    class Stop(Exception):
+        pass
+
+    def spy_runner(c):
+        seen["applying"] = c.manifest.get("critic")["applying"]
+        seen["plan"] = ds.plan_file_hash(ds._pp(c).edit_plan)
+        raise Stop
+
+    monkeypatch.setattr(ds, "build_draft_runner", spy_runner)
+    with pytest.raises(Stop):
+        orch.run_critic(root, None, {"qc.critic": "off"}, mode="report", echo=lambda *_: None)
+    assert seen == {"applying": None, "plan": plan.plan_hash}
+
+
+def test_an_interrupt_while_the_round_is_recorded_rolls_it_back(setup, monkeypatch):
+    ctx, plan, _ = setup(transport=CriticTransport(proposals_once()))
+    stub_rebuild(monkeypatch)
+    real = cs._write_revision
+
+    def write(ctx_, n, doc, res):
+        if doc["status"] == "applied":
+            raise KeyboardInterrupt
+        return real(ctx_, n, doc, res)
+    monkeypatch.setattr(cs, "_write_revision", write)
+    before = plan_files(ctx)
+    with pytest.raises(KeyboardInterrupt):
+        cs.critic_stage(ctx)
+    st = ctx.manifest.get("critic")
+    assert plan_files(ctx) == before and st["applying"] is None and not st.get("rounds")
+
+
+def test_only_a_plan_rejection_is_remembered_not_a_failure_that_merely_has_errors(setup, monkeypatch):
+    from trip_vlog.state import StageResult
+    ctx, plan, _ = setup(transport=CriticTransport(proposals_once()))
+    monkeypatch.setattr(ds, "assemble_stage", lambda c: StageResult(Status.FAILED, {"errors": [{"code": "spec"}]}, "FilmCraft said no"))
+    cs.critic_stage(ctx)
+    assert not ctx.manifest.get("critic").get("failed")
+
+    def rejected(c):
+        raise ds.PlanRejected("bad plan")
+    monkeypatch.setattr(ds, "assemble_stage", rejected)
+    cs.critic_stage(ctx)
+    assert len(ctx.manifest.get("critic")["failed"]) == 1
+
+
+def _approved_with_critic_off(setup, monkeypatch, second):
+    n = {"i": 0}
+
+    def respond(call):
+        n["i"] += 1
+        return proposals(call) if n["i"] == 1 else second(call)
+    ctx, plan, _ = setup(qc={"critic_max_rounds": 3}, workflow={"plan_review": True}, transport=CriticTransport(respond))
+    rebuild = stub_rebuild(monkeypatch)
+    (ctx.workspace.root / "project.yaml").write_text(ctx.config.to_yaml(), encoding="utf-8")
+    assert cs.critic_stage(ctx).status == Status.AWAITING_APPROVAL
+    approve_pending(ctx.workspace.root, "critic")
+    ctx.manifest.data = type(ctx.manifest).load(ctx.manifest.path).data
+    ctx.config.qc.critic = "off"
+    return ctx, plan, rebuild
+
+
+def test_after_the_approved_round_the_critic_goes_back_to_the_configured_mode(setup, monkeypatch):
+    more = lambda call: {"summary": "", "findings": [finding(severity="major", clips=["c3"], proposed=change("trim_clip", clip_instance_id="c3", duration_seconds=2.5))]}   # noqa: E731
+    ctx, plan, rebuild = _approved_with_critic_off(setup, monkeypatch, more)
+    cs.critic_stage(ctx)
+    assert [c[0] for c in rebuild].count("assemble") == 1 and cs.effective_mode(ctx) == "off"
+    rep = rj(ctx.workspace.root / "qc" / "critic_report.json")
+    assert rep["mode"] == "report" and rep["findings"][0]["change"]["status"] == "valid" and "would be applied" in rep["findings"][0]["change"]["note"]
+
+
+def test_an_approval_for_a_revision_the_critic_no_longer_proposes_is_dropped(setup, monkeypatch):
+    other = lambda call: {"summary": "", "findings": [finding(severity="major", clips=["c3"], proposed=change("trim_clip", clip_instance_id="c3", duration_seconds=2.5))]}   # noqa: E731
+    ctx, plan, rebuild = _approved_with_critic_off(setup, monkeypatch, other)
+    ctx.config.qc.critic = "off"
+    # the review now differs from the one that was approved (e.g. another model or prompt): the approval does not carry over
+    cs_state = ctx.manifest.get("critic")
+    ctx.manifest.set(critic={**cs_state, "pending": {**cs_state["pending"], "revision_hash": "of another revision"}})
+    cs.critic_stage(ctx)
+    assert rebuild == [] and ctx.manifest.get("critic")["pending"] is None and cs.effective_mode(ctx) == "off"
+
+
+def test_a_reformatted_plan_after_the_crash_is_the_persons_even_though_its_content_hash_is_unchanged(setup, monkeypatch):
+    ctx, plan = _crashed_round(setup, monkeypatch)
+    pp = ds._pp(ctx).edit_plan
+    pp.write_bytes(pp.read_bytes() + b"\n")
+    edited = pp.read_bytes()
+    cs.recover_interrupted(ctx)
+    assert pp.read_bytes() == edited and ctx.manifest.get("critic")["applying"] is None

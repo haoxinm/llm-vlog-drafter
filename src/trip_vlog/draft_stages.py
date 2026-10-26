@@ -315,7 +315,7 @@ def assemble_stage(ctx: Any) -> StageResult:
     try:
         prep = _prepare(ctx)
     except PlanRejected as e:
-        return StageResult(Status.FAILED, {"errors": [i.to_dict() for i in (e.report.errors if e.report else [])]}, str(e))
+        return StageResult(Status.FAILED, {"errors": [i.to_dict() for i in (e.report.errors if e.report else [])], "plan_rejected": True}, str(e))
     atomic_write_json(ctx.workspace.root / "filmcraft" / "mapping_report.json", prep.mapping.to_dict())
     ad = get_adapter(ctx)
     cfg = ctx.config
