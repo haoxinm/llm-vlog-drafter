@@ -115,15 +115,26 @@ class OpenAITranscriptions:
                 self._sleep(self._backoff(attempt, None))
                 continue
             if resp.status in RETRYABLE_STATUS and not last:
+                ra = self._retry_after(resp.headers)
+                if ra is not None and ra > MAX_RETRY_AFTER:
+                    break  # the server wants a longer pause than we will wait: retrying now would only fail again
                 self._sleep(self._backoff(attempt, resp.headers.get("retry-after")))
                 continue
             break
         assert resp is not None
         if 200 <= resp.status < 300:
             return parse_response_body(resp.body, self.ep.response_format, duration)
-        raise self._http_error(resp.status, resp.body)
+        raise self._http_error(resp.status, resp.body, resp.headers)
 
     # ------------------------------------------------------------------
+    @staticmethod
+    def _retry_after(headers: Mapping[str, str]) -> float | None:
+        try:
+            v = float(headers.get("retry-after") or "")
+        except ValueError:
+            return None
+        return v if v == v and v >= 0 else None
+
     @staticmethod
     def _backoff(attempt: int, retry_after: str | None) -> float:
         if retry_after:
@@ -133,10 +144,15 @@ class OpenAITranscriptions:
                 pass
         return min(0.5 * 2**attempt, MAX_BACKOFF)
 
+    def _key_advice(self) -> str:
+        if self.ep.api_key_env:
+            return f"check the key in ${self.ep.api_key_env}"
+        return "no API key is configured (speech.endpoint.api_key_env is null); set it if the server requires one"
+
     def _clean(self, text: object) -> str:
         return sanitize(text, redactions=[(s, "***") for s in self._secrets])
 
-    def _http_error(self, status: int, raw: bytes) -> Exception:
+    def _http_error(self, status: int, raw: bytes, headers: Mapping[str, str] | None = None) -> Exception:
         try:
             data: Any = json.loads(raw.decode("utf-8")) if raw else None
         except ValueError:
@@ -145,9 +161,15 @@ class OpenAITranscriptions:
         if status in (400, 413, 415, 422):
             return SpeechBadRequestError(f"the transcription endpoint rejected the request ({status}): {msg}", status_code=status)
         if status in (401, 403):
-            return SpeechAuthError(f"authentication/permission failed ({status}) at the transcription endpoint: check ${self.ep.api_key_env}: {msg}", status_code=status)
+            return SpeechAuthError(f"authentication/permission failed ({status}) at the transcription endpoint: {self._key_advice()}: {msg}", status_code=status)
         if status == 404:
             return SpeechNotFoundError(f"not found (404) at {self.url}: check speech.endpoint.base_url/path and the model name: {msg}", status_code=status)
+        ra = self._retry_after(headers or {})
+        if ra is not None and ra > MAX_RETRY_AFTER:
+            wait = (f"the server asked to wait {ra:g}s (Retry-After), longer than the {MAX_RETRY_AFTER:g}s this tool waits; try again later")
+            if status == 429:
+                return SpeechRateLimitError(f"rate limited (429) by the transcription endpoint; {wait}: {msg}", status_code=status)
+            return SpeechProviderError(f"the transcription endpoint returned HTTP {status}; {wait}: {msg}", status_code=status)
         if status == 429:
             return SpeechRateLimitError(f"rate limited (429) by the transcription endpoint; still failing after {self.ep.max_retries} retries: {msg}", status_code=status)
         return SpeechProviderError(f"the transcription endpoint returned HTTP {status}: {msg}", status_code=status)

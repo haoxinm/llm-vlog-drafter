@@ -10,11 +10,23 @@ import hashlib
 from pathlib import Path
 from typing import Mapping
 
-PHASH_VERSION = 1
+PHASH_VERSION = 2   # 2: near-flat pictures are not hashed
+FLAT_MAX_STEP = 4   # brightest step between neighbouring samples (0-255) below which a picture counts as flat
 
 
 def dhash(path: Path) -> int:
     """64-bit dHash of the orientation-corrected picture (9x8 grayscale, left pixel brighter than right). Raises OSError/ValueError."""
+    return _dhash(path)[0]
+
+
+def dhash_or_flat(path: Path) -> int | None:
+    """The dHash, or None for a near-flat picture (blank wall, lens cap, night sky): it has no gradient to compare, every such
+    picture would hash to 0 and be called a duplicate of every other one."""
+    h, flat = _dhash(path)
+    return None if flat else h
+
+
+def _dhash(path: Path) -> tuple[int, bool]:
     from PIL import Image, ImageOps
 
     from trip_vlog.paths import long_path
@@ -25,10 +37,13 @@ def dhash(path: Path) -> int:
         im = im.convert("L").resize((9, 8), Image.Resampling.LANCZOS)
         px = list(im.tobytes())
     bits = 0
+    step = 0
     for row in range(8):
         for col in range(8):
-            bits = (bits << 1) | (1 if px[row * 9 + col] > px[row * 9 + col + 1] else 0)
-    return bits
+            a, b = px[row * 9 + col], px[row * 9 + col + 1]
+            step = max(step, abs(a - b))
+            bits = (bits << 1) | (1 if a > b else 0)
+    return bits, step < FLAT_MAX_STEP
 
 
 def hamming(a: int, b: int) -> int:

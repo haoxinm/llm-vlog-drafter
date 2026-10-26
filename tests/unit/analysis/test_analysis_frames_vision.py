@@ -66,7 +66,7 @@ def test_extract_skips_when_frames_exist_and_reports_missing_ffmpeg(tmp_path):
 # ---------------------------------------------------------------- batching and requests
 def _item(i, n, kind="video", sheet=False, singleton=False):
     seg = {"segment_id": f"seg_{i:016x}", "start_seconds": 0.0, "end_seconds": 4.0}
-    asset = {"asset_id": "a", "relative_path": "Day 2/Secret Trip/IMG_0001.MOV", "display_width": 1920, "display_height": 1080, "width": 1920, "height": 1080}
+    asset = {"asset_id": "a", "content_version": "cv1", "relative_path": "Day 2/Secret Trip/IMG_0001.MOV", "display_width": 1920, "display_height": 1080, "width": 1920, "height": 1080}
     frames = [{"index": k, "timestamp_seconds": k + 0.5, "artifact": f"f{i}_{k}.jpg", "frame": k} for k in range(n)]
     return Item(kind, asset, seg, {}, __import__("pathlib").Path("/m/IMG_0001.MOV"), "k", frames=frames, sheet_mode=sheet, singleton=singleton)
 
@@ -139,3 +139,75 @@ def test_dhash_groups_near_duplicates(tmp_path):
     groups = ph.group_duplicates({"asset_a": ha, "asset_b": hb, "asset_c": hc}, 6)
     assert groups["asset_a"] == groups["asset_b"] and "asset_c" not in groups and groups["asset_a"].startswith("dup_")
     assert ph.group_duplicates({"asset_a": ha, "asset_c": hc}, 0) == {}
+
+
+def _gray_step_clip(ffmpeg_tools, tmp_path, n=12, fps=10):
+    """A clip where frame k is a flat gray of level 20*k + 10 (lossless-ish encode), so the frame number is readable from pixels."""
+    import subprocess
+
+    ffmpeg, _ = ffmpeg_tools
+    src = tmp_path / "gray"
+    src.mkdir()
+    for k in range(n):
+        Image.new("RGB", (64, 64), (20 * k + 10,) * 3).save(src / f"f{k:03d}.png")
+    clip = tmp_path / "gray.mp4"
+    subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-framerate", str(fps), "-i", str(src / "f%03d.png"),
+                    "-c:v", "libx264", "-qp", "0", "-pix_fmt", "yuv444p", str(clip)], check=True)
+    return clip
+
+
+def test_extract_returns_exactly_the_requested_frame_including_the_last(ffmpeg_tools, tmp_path):
+    from pathlib import Path
+
+    n, fps = 12, 10
+    clip = _gray_step_clip(ffmpeg_tools, tmp_path, n, fps)
+    seg = {"asset_id": "a1", "segment_id": "seg_1", "fps": str(fps), "start_frame": 0, "end_frame": n}
+    wanted = [0, 1, 5, n - 2, n - 1]
+    records = [{"index": i, "frame": f, "timestamp_seconds": f / fps, "artifact": f"frames/seg_1_{i:02d}.jpg"} for i, f in enumerate(wanted)]
+    root = tmp_path / "ws"
+    assert fr.extract_segment_frames(Path(ffmpeg_tools[0]), clip, seg, records, root, fr.SamplingSettings()) is None
+    for r in records:
+        px = Image.open(root / r["artifact"]).convert("L").getpixel((32, 32))
+        assert abs(px - (20 * r["frame"] + 10)) < 8, (r["frame"], px)
+
+
+def test_version_bumps_change_frame_names_and_sheet_identity(monkeypatch):
+    seg = {"asset_id": "a", "segment_id": "seg_1", "fps": "10", "start_frame": 0, "end_frame": 20}
+    st = fr.SamplingSettings()
+    names = [r["artifact"] for r in fr.frame_records(seg, "cv", st)]
+    sheet, key = fr.sheet_rel(seg, "cv", st), st.key()
+    monkeypatch.setattr(fr, "FRAMES_VERSION", fr.FRAMES_VERSION + 1)
+    assert [r["artifact"] for r in fr.frame_records(seg, "cv", st)] != names and st.key() != key and fr.sheet_rel(seg, "cv", st) != sheet
+    monkeypatch.undo()
+    monkeypatch.setattr(fr, "SHEET_VERSION", fr.SHEET_VERSION + 1)
+    assert fr.sheet_rel(seg, "cv", st) != sheet and [r["artifact"] for r in fr.frame_records(seg, "cv", st)] == names
+    it = _item(1, 3, sheet=True)
+    ident = _req_identity(it)
+    monkeypatch.setattr(fr, "SHEET_VERSION", fr.SHEET_VERSION + 1)
+    assert _req_identity(it) != ident
+
+
+def _req_identity(it):
+    req = build_request(VisionSettings.from_config(labeling_config(), {}), "video", [it], __import__("pathlib").Path("/ws"))
+    return [p.identity for p in req.parts if isinstance(p, ImagePart)]
+
+
+def test_frame_and_sheet_parts_carry_identity_so_jpeg_bytes_do_not_matter(tmp_path):
+    from llm_helpers import ScriptedProvider
+    from trip_vlog.llm import Gateway
+
+    settings = VisionSettings.from_config(labeling_config(), {})
+
+    def fingerprint(root, sheet, color):
+        it = _item(1, 3, sheet=sheet)
+        it.sheet = "sheet.jpg"
+        for name in ["sheet.jpg", *(f["artifact"] for f in it.frames)]:
+            Image.new("RGB", (40, 30), color).save(root / name)
+        return Gateway(ScriptedProvider()).fingerprint(build_request(settings, "video", [it], root))
+
+    for sheet in (False, True):
+        a, b = tmp_path / f"a{sheet}", tmp_path / f"b{sheet}"
+        a.mkdir(); b.mkdir()
+        assert fingerprint(a, sheet, (10, 10, 10)) == fingerprint(b, sheet, (240, 30, 30))
+    it = _item(1, 3)
+    assert all(p.identity for p in build_request(settings, "video", [it], tmp_path).parts if isinstance(p, ImagePart))

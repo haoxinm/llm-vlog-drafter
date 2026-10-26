@@ -36,17 +36,29 @@ def overlaps(t_start: float, t_end: float, start: float, end: float) -> bool:
     return t_start < end and t_end > start
 
 
-def refs_for(rows: Sequence[dict[str, Any]], start: float | None, end: float | None) -> list[str]:
-    """Transcript ids whose time range overlaps [start, end). Stills (no range) have none."""
+def usable_rows(rows: Sequence[dict[str, Any]], n_segments: int | None) -> Sequence[dict[str, Any]]:
+    """Rows that may be attached to a segment of an asset cut into `n_segments`. A coarse transcript (plain text, one row spanning
+    the whole clip) says nothing about WHERE the words were spoken, so it is only attached when the asset is a single segment."""
+    if n_segments is not None and n_segments > 1 and any(r.get("timestamps") == "coarse" for r in rows):
+        return []
+    return rows
+
+
+def refs_for(rows: Sequence[dict[str, Any]], start: float | None, end: float | None, n_segments: int | None = None) -> list[str]:
+    """Transcript ids whose time range overlaps [start, end). Stills (no range) have none; coarse transcripts only attach to
+    single-segment assets (`n_segments`)."""
     if start is None or end is None:
         return []
+    rows = usable_rows(rows, n_segments)
     return [r["transcript_id"] for r in rows if overlaps(r["start_seconds"], r["end_seconds"], start, end)]
 
 
-def text_for(rows: Sequence[dict[str, Any]], start: float | None, end: float | None) -> str:
-    """Verbatim text of the transcript segments overlapping [start, end), joined by spaces ('' when none)."""
+def text_for(rows: Sequence[dict[str, Any]], start: float | None, end: float | None, n_segments: int | None = None) -> str:
+    """Verbatim text of the transcript segments overlapping [start, end), joined by spaces ('' when none; coarse transcripts
+    only for single-segment assets)."""
     if start is None or end is None:
         return ""
+    rows = usable_rows(rows, n_segments)
     return " ".join(r["text"] for r in rows if overlaps(r["start_seconds"], r["end_seconds"], start, end)).strip()
 
 

@@ -37,7 +37,7 @@ def prepare_image(
     if cached is not None:
         try:
             data = cached.read_bytes()
-            return _prepared(data, src_hash, max_side, quality)
+            return _prepared(data, src_hash, max_side, quality, part.identity)
         except OSError:
             pass
     try:
@@ -66,8 +66,8 @@ def prepare_image(
             os.replace(tmp, cached)
         except OSError:
             pass  # the cache is an optimisation only
-    return _prepared(data, src_hash, max_side, quality)
+    return _prepared(data, src_hash, max_side, quality, part.identity)
 
 
-def _prepared(data: bytes, src_hash: str, max_side: int, quality: int) -> PreparedImage:
-    return PreparedImage("image/jpeg", data, hashlib.sha256(data).hexdigest(), src_hash, max_side, quality, IMAGE_PREP_VERSION)
+def _prepared(data: bytes, src_hash: str, max_side: int, quality: int, identity: str | None = None) -> PreparedImage:
+    return PreparedImage("image/jpeg", data, hashlib.sha256(data).hexdigest(), src_hash, max_side, quality, IMAGE_PREP_VERSION, identity)

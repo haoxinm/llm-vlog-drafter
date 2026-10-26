@@ -48,7 +48,10 @@ def test_remote_http_refused_unless_allowed():
 @pytest.mark.parametrize("bad", [
     {"api_key": "sk-123"}, {"apiKey": "x"}, {"token": "x"}, {"api": "grpc"}, {"base_url": "ftp://x"}, {"base_url": "not a url"},
     {"base_url": "https://user:pw@host.example"}, {"path": "https://x/y"}, {"params": {"model": "x"}}, {"params": {"messages": []}},
-    {"params": {"input": 1}}, {"params": {"system": "x"}}, {"params": {"instructions": "x"}}, {"timeout_seconds": 0}, {"max_retries": -1},
+    {"params": {"input": 1}}, {"params": {"system": "x"}}, {"params": {"instructions": "x"}}, {"params": {"stream": True}}, {"params": {"max_tokens": 5}},
+    {"params": {"max_completion_tokens": 5}}, {"params": {"response_format": {}}}, {"params": {"text": {"format": {}}}},
+    {"params": {"output_config": {"format": {}}}}, {"max_tokens_field": "token_limit", "params": {"token_limit": 5}},
+    {"params": {"when": __import__("datetime").date(2026, 1, 2)}}, {"timeout_seconds": 0}, {"max_retries": -1},
     {"model": "  "}, {"structured_output": "magic"}, {"headers": {"bad name": "x"}}, {"api_key_env": "has space"}, {"nonsense": 1},
 ])
 def test_endpoint_validation(bad):
@@ -92,3 +95,30 @@ def test_config_hash_is_stable_through_yaml_round_trip():
 
     c = parse_config(ep(api="openai_chat", api_key_env=None, base_url="http://localhost:1"))
     assert parse_config(yaml.safe_load(c.to_yaml())).config_hash() == c.config_hash()
+
+
+def test_reserved_param_error_names_the_key_and_unserializable_is_a_config_error():
+    with pytest.raises(ConfigError, match="stream"):
+        parse_config(ep(params={"stream": True}))
+    with pytest.raises(ConfigError, match=r"llm.endpoints.main.params.when \(date\)"):
+        parse_config(ep(params={"when": __import__("datetime").date(2026, 1, 2)}))
+    parse_config(ep(params={"text": {"verbosity": "low"}, "output_config": {"effort": "low"}, "temperature": 0}))  # non-format sub-fields are fine
+
+
+def test_response_format_is_reserved_only_for_native_structured_output():
+    for bad_params in ({"response_format": {"type": "json_object"}}, {"text": {"format": {}}}, {"output_config": {"format": {}}}):
+        with pytest.raises(ConfigError):
+            parse_config(ep(params=bad_params))
+        for mode in ("json_prompt", "none"):
+            parse_config(ep(structured_output=mode, params=bad_params))
+    for mode in ("native", "json_prompt", "none"):    # never overridable
+        for key in ("stream", "max_tokens", "max_completion_tokens"):
+            with pytest.raises(ConfigError, match=key):
+                parse_config(ep(structured_output=mode, params={key: 1}))
+
+
+def test_chunk_error_names_lan_servers_and_workarounds():
+    from trip_vlog.config import ConfigError as CE
+    with pytest.raises(CE, match=r"LAN.*flac|flac.*LAN|LAN[\s\S]*700[\s\S]*flac"):
+        parse_config({"speech": {"backend": "openai_transcriptions", "chunk_seconds": 900,
+                                 "endpoint": {"base_url": "http://192.168.1.5:8000", "allow_insecure_http": True, "model": "m"}}})

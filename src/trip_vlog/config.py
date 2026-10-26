@@ -142,7 +142,14 @@ class MediaConfig(_Model):
 
 
 API_KINDS = ("anthropic_messages", "openai_chat", "openai_responses")
-RESERVED_PARAMS = frozenset({"model", "messages", "input", "system", "instructions"})
+# Request-body fields the adapters set themselves; `params` may not override them (checked for every api, so a profile
+# stays valid if `api` is switched).
+RESERVED_PARAMS = frozenset({"model", "messages", "input", "system", "instructions", "stream",
+                             "max_tokens", "max_completion_tokens", "max_output_tokens"})
+# Only the adapters' structured-output fields: reserved while structured_output is "native" (the adapter writes them). With
+# json_prompt / none nothing is written there, so a local server may be given e.g. response_format {type: json_object}.
+NATIVE_RESERVED_PARAMS = frozenset({"response_format"})
+RESERVED_PARAM_SUBKEYS = {"text": "format", "output_config": "format"}   # text / output_config may carry other fields (verbosity, effort)
 _API_DEFAULTS = {  # api -> (base_url, api_key_env)
     "anthropic_messages": ("https://api.anthropic.com", "ANTHROPIC_API_KEY"),
     "openai_chat": ("https://api.openai.com", "OPENAI_API_KEY"),
@@ -218,14 +225,25 @@ class EndpointConfig(_Model):
 
     @field_validator("params")
     @classmethod
-    def _params(cls, v: dict[str, Any]) -> dict[str, Any]:
-        bad = sorted(RESERVED_PARAMS & set(v))
+    def _params(cls, v: dict[str, Any], info: Any) -> dict[str, Any]:
+        native = info.data.get("structured_output", "native") == "native"
+        bad = sorted((RESERVED_PARAMS | (NATIVE_RESERVED_PARAMS if native else frozenset())) & set(v))
         if bad:
             raise ValueError(f"params must not set reserved request fields: {', '.join(bad)}")
+        for key, sub in RESERVED_PARAM_SUBKEYS.items():
+            if native and isinstance(v.get(key), dict) and sub in v[key]:
+                raise ValueError(f"params must not set reserved request field {key}.{sub} (set structured_output instead)")
+        for k, val in v.items():
+            try:
+                json.dumps(val)
+            except (TypeError, ValueError):
+                raise ValueError(f"params.{k} is not JSON-serializable ({type(val).__name__}); write dates and other special values as quoted strings") from None
         return v
 
     @model_validator(mode="after")
     def _finish(self) -> "EndpointConfig":
+        if self.max_tokens_field and self.max_tokens_field in self.params:
+            raise ValueError(f"params must not set reserved request fields: {self.max_tokens_field} (it is the max_tokens_field)")
         default_url, default_key = _API_DEFAULTS[self.api]
         if "base_url" not in self.model_fields_set or self.base_url is None:
             self.__dict__["base_url"] = default_url
@@ -382,6 +400,10 @@ class SpeechCommandConfig(_Model):
         return self
 
 
+# 16 kHz mono 16-bit WAV is 32 000 bytes/s, so a hosted service's 25 MB upload limit is hit at about 820 s; 700 s leaves headroom.
+MAX_WAV_CHUNK_SECONDS = 700.0
+
+
 class SpeechConfig(_Model):
     """Optional speech transcription (DESIGN §7.3, §22). Off in effect until a backend is chosen: the default backend is `none`."""
 
@@ -407,6 +429,12 @@ class SpeechConfig(_Model):
             raise ValueError("speech.backend is 'command' but speech.command.executable is not set")
         if self.backend == "command" and not self.command.args:
             raise ValueError("speech.backend is 'command' but speech.command.args is empty (it must contain {input} and {output_dir})")
+        if (self.backend == "openai_transcriptions" and self.audio_format == "wav" and not self.endpoint.is_local
+                and self.chunk_seconds > MAX_WAV_CHUNK_SECONDS):
+            raise ValueError(f"speech.chunk_seconds {self.chunk_seconds:g} would make WAV chunks over the 25 MB upload limit that "
+                             "hosted transcription services enforce (16 kHz mono WAV is about 1.9 MB per minute). This applies to every "
+                             "non-loopback endpoint, LAN servers included; only 127.x / ::1 / localhost are exempt. Either set "
+                             f"speech.chunk_seconds to at most {MAX_WAV_CHUNK_SECONDS:g} or set speech.audio_format: flac")
         return self
 
     @property
@@ -573,9 +601,34 @@ def _format_errors(err: ValidationError) -> str:
     return "invalid configuration:\n" + "\n".join(lines)
 
 
+def _unserializable_path(value: Any, path: str = "<root>") -> str:
+    """Dotted path of the first value that cannot be written as JSON (for the error above)."""
+    if isinstance(value, dict):
+        for k, v in value.items():
+            found = _unserializable_path(v, f"{path}.{k}" if path != "<root>" else str(k))
+            if found:
+                return found
+        return ""
+    if isinstance(value, (list, tuple)):
+        for i, v in enumerate(value):
+            found = _unserializable_path(v, f"{path}[{i}]")
+            if found:
+                return found
+        return ""
+    try:
+        json.dumps(value)
+    except (TypeError, ValueError):
+        return f"{path} ({type(value).__name__})"
+    return ""
+
+
 def apply_overrides(raw: dict[str, Any], overrides: Mapping[str, Any] | None) -> dict[str, Any]:
     """Apply dotted-key overrides ('media.fingerprint': 'sha256'). None values are ignored."""
-    out = json.loads(json.dumps(raw))  # deep copy of plain data
+    try:
+        out = json.loads(json.dumps(raw))  # deep copy of plain data
+    except (TypeError, ValueError):
+        raise ConfigError(f"configuration value at {_unserializable_path(raw)} is not plain data (YAML reads an unquoted "
+                          "2026-01-02 or 12:30 as a date/time; put such values in quotes)") from None
     for key, value in (overrides or {}).items():
         if value is None:
             continue

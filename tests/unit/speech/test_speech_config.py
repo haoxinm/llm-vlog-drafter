@@ -76,3 +76,11 @@ def test_command_validation():
     assert "{input}" in bad({"speech": {"command": {"args": ["{output_dir}"]}}})
     assert "{output_dir}" in bad({"speech": {"command": {"args": ["{input}"]}}})
     assert parse_config({"speech": {"backend": "command", "command": {"executable": "x", "args": ["{input}", "{output_base}"], "output_format": "json"}}})
+
+
+def test_wav_chunk_seconds_cannot_exceed_the_hosted_upload_limit():
+    remote = {"backend": "openai_transcriptions", "endpoint": {"base_url": "https://api.example.com", "model": "m"}}
+    assert "25 MB" in bad({"speech": {**remote, "chunk_seconds": 900}})
+    parse_config({"speech": {**remote, "chunk_seconds": 700}})
+    parse_config({"speech": {**remote, "chunk_seconds": 900, "audio_format": "flac"}})
+    parse_config({"speech": {**remote, "endpoint": {"base_url": "http://127.0.0.1:8000", "model": "m"}, "chunk_seconds": 3600}})

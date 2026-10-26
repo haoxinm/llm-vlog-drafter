@@ -12,7 +12,7 @@ Originals are never modified. Everything the tool writes goes into a separate *o
 
 ## Install
 
-Requires Python 3.11+ and FFmpeg (`ffmpeg` and `ffprobe` on `PATH`).
+Requires Python 3.11+ and FFmpeg 4.3 or newer (`ffmpeg` and `ffprobe` on `PATH`; frame extraction uses the scale filter's `force_divisible_by`, added in 4.3).
 
 ```sh
 python -m venv .venv
@@ -200,10 +200,10 @@ llm:
       api_key_env: ANTHROPIC_API_KEY # NAME of the env var holding the key; null = no auth (local servers)
       headers: {}                    # extra headers; values may use ${VAR}; never logged
       timeout_seconds: 120
-      max_retries: 2                 # transport retries on 429/5xx/connection errors (backoff + Retry-After)
+      max_retries: 2                 # transport retries on 429/5xx/connection errors (backoff + Retry-After up to 60 s; a longer Retry-After stops retrying and is reported)
       structured_output: native      # native | json_prompt | none
       max_tokens: 4096               # cap on a request's max_tokens
-      max_tokens_field: null         # e.g. max_completion_tokens for newer OpenAI models
+      max_tokens_field: null         # body field for the token limit; null = adapter default (see below)
       supports_images: true
       params: {}                     # merged into the request body (temperature, top_p, seed, reasoning, store, ...)
       allow_insecure_http: false     # plain http to a non-loopback host is refused unless true
@@ -241,8 +241,13 @@ media: {local_only: true}
   neither, live and record modes fail with a clear message.
 - **Wire formats** (`api`): `anthropic_messages` (`x-api-key`, `anthropic-version`, `output_config.format`), `openai_chat` (`Authorization: Bearer`,
   `response_format`), `openai_responses` (`instructions`/`input`, `text.format`). They follow the providers' public API docs but could not be tested against live
-  servers here; verify against yours and adapt with `path`, `params`, `max_tokens_field` and `structured_output`. `params` may not set `model`, `messages`,
-  `input`, `system` or `instructions`; fields the gateway controls (model, messages, token limit, structured output) win over `params`.
+  servers here; verify against yours and adapt with `path`, `params`, `max_tokens_field` and `structured_output`. `params` may not set fields the
+  gateway controls: `model`, `messages`, `input`, `system`, `instructions`, `stream`, `response_format`, `max_tokens`, `max_completion_tokens`,
+  `max_output_tokens`, the profile's `max_tokens_field`, or a `format` inside `text` / `output_config` (use `structured_output`); such a config is rejected
+  naming the key, as is a value that is not plain data (quote YAML dates). The token-limit field defaults to `max_tokens` (`openai_chat`, `anthropic_messages`)
+  or `max_output_tokens` (`openai_responses`), except that `openai_chat` against `api.openai.com` sends `max_completion_tokens`, which current OpenAI
+  reasoning models require; other OpenAI-compatible servers keep `max_tokens`. Set `max_tokens_field` to override either way. When a server answers 400 and
+  mentions the token field, the error says which field was sent and points at `max_tokens_field`.
 - **Structured output**: `native` sends the provider's JSON-schema option (a sanitized copy: `additionalProperties: false`, no `minimum`/`maxLength`/...; OpenAI
   strict mode also wants every property listed in `required`). `json_prompt` sends no schema parameter and instead appends the schema to the prompt (most local
   servers need this); `none` sends nothing. In every mode the gateway extracts the first JSON value from the reply (fences and prose tolerated), validates it
@@ -252,8 +257,9 @@ media: {local_only: true}
   `llm.text` and `llm.vision` to be local (checked when the config loads). Each call's log record includes `endpoint` and `local`.
 - **Response cache**: `<workspace>/cache/llm/<fingerprint>.json` (`llm.cache_dir`). The fingerprint is a SHA-256 over the prompt template id + version, system text,
   schema, text parts, each image's *source file* hash plus the preparation settings (`image_max_side`, `image_quality`, prep version; not the re-encoded bytes,
-  which can differ across OSes), model id, `max_tokens`, effort, and the profile's `api` and `params`. It excludes `base_url`, `path`, headers, timeouts and keys,
-  so a recording made against one host replays against another. A changed frame, prompt version, schema, model or params is a miss; everything else is a hit with no call.
+  which can differ across OSes), model id, `max_tokens`, effort, and the profile's `api`, `params`, `structured_output`, `max_tokens` cap and token field. Frames cut from video are named in the fingerprint by the asset content
+  version, frame number and sampling settings rather than their (ffmpeg-build dependent) JPEG bytes; photos hash the original file. It excludes `base_url`, `path`, headers, timeouts and keys,
+  so a recording made against one host replays against another. A changed frame, prompt version, schema, model or params is a miss, and so is a changed `content_version` (a re-copied or touched file is re-labelled, even if its pixels are identical); everything else is a hit with no call.
 - **Record / replay** (tests and CI use replay only, no key needed): `TRIP_VLOG_LLM_MODE=replay` (or `llm.mode: replay`) returns stored responses and raises
   `ReplayMissError` naming the fingerprint and template on a miss. `record` calls the real endpoint and also saves each validated response to the fixture dir
   (`llm.fixture_dir` or `TRIP_VLOG_LLM_FIXTURE_DIR`; default the cache dir; tests use `tests/fixtures/llm/`). Replay must use the same model string as the recording.
@@ -459,7 +465,7 @@ speech:
   min_speech_seconds: 1.0        # skip assets with less non-silent audio than this (the segmenter's silence detection)
   audio_format: wav              # wav | flac: the temporary 16 kHz mono file handed to the backend
   keep_audio: false              # true keeps media_index/audio/<asset>/... instead of deleting it after use
-  chunk_seconds: 600             # HTTP backend only: longer audio is uploaded in chunks of this length (25 MB limits, retries)
+  chunk_seconds: 600             # HTTP backend only: longer audio is uploaded in chunks of this length (25 MB limits, retries); with wav and a remote endpoint at most 700
   context_max_chars: 1200        # transcript text per segment shown to the vision model in `analyze`; 0 = never send transcripts there
   endpoint:                      # backend: openai_transcriptions
     base_url: https://api.openai.com
@@ -480,6 +486,9 @@ speech:
     output_format: srt           # srt | vtt | json
     timeout_seconds: 3600
 ```
+
+`chunk_seconds` bounds each upload: 16 kHz mono 16-bit WAV is about 1.9 MB per minute, so against a remote (non-loopback) endpoint with `audio_format: wav` a value above 700 s
+(hosted services reject uploads over 25 MB) is a config error, as for any non-loopback server including LAN ones; use `flac` for longer chunks, or a local server, which has no such limit.
 
 **Backends**
 

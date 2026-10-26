@@ -68,6 +68,7 @@ def build_work(ctx: Any, limit: int | None = None) -> Work:
         base = {m["segment_id"]: m for m in moments_from_segments(segs, cv)}
         key = settings.cache_key(kind)
         tx_rows = sc.rows_for(cat, aid, cv) if (kind == "video" and ctx.config.speech.enabled) else []
+        tx_rows = list(sc.usable_rows(tx_rows, len(segs)))   # a whole-clip (coarse) transcript is not spread over several segments
         src = ctx.paths.media_root / Path(*row["relative_path"].split("/"))
         for seg in segs:
             if kind == "video" and seg.get("start_frame") is None:
@@ -144,6 +145,29 @@ def _default_gateway(ctx: Any) -> Gateway:
 
 
 # ---------------------------------------------------------------- stage
+HEIF_SUFFIXES = (".heic", ".heif")
+
+
+def _photo_problem(it: Item, gateway: Gateway) -> str | None:
+    """None when the photo can be sent; else why not. Decodes it through the same preparation the gateway will use (the result
+    lands in the prepared-image cache), so one undecodable file fails only itself instead of sinking the whole batch request."""
+    if not it.src.is_file():
+        return "photo file is missing"
+    from trip_vlog.llm.images import prepare_image
+    from trip_vlog.llm.types import ImagePart, LLMInputError
+    from trip_vlog.paths import long_path
+
+    try:
+        prepare_image(ImagePart(long_path(it.src)), max_side=gateway.image_max_side, quality=gateway.image_quality,
+                      cache_dir=gateway.image_cache_dir)
+    except LLMInputError as e:
+        name = it.src.name
+        if it.src.suffix.lower() in HEIF_SUFFIXES:
+            return f"cannot decode {name}; HEIC is not supported by the installed image library"
+        return f"cannot decode {name}: {str(e).rsplit(': ', 1)[-1]}"
+    return None
+
+
 def analyze_stage(ctx: Any) -> StageResult:
     t0 = time.perf_counter()
     cfg, cat, ws = ctx.config, ctx.catalog, ctx.workspace
@@ -161,7 +185,7 @@ def analyze_stage(ctx: Any) -> StageResult:
 
     def prepare(it: Item) -> str | None:
         if it.kind == "photo":
-            return None if it.src.is_file() else "photo file is missing"
+            return _photo_problem(it, lab.gateway)
         err = fr.extract_segment_frames(ctx.ffmpeg, it.src, it.seg, it.frames, root, s.sampling)
         if err:
             return f"frame extraction failed: {err}"
@@ -233,15 +257,17 @@ def photo_groups(ctx: Any, photos: list[Item], distance: int) -> dict[str, str]:
         aid, cv = it.asset["asset_id"], it.asset["content_version"]
         rec = ctx.catalog.cache_get(aid, PHASH_ANALYZER, PHASH_KEY, cv)
         if rec is not None:
-            hashes[aid] = int(rec["dhash"], 16)
+            if rec["dhash"] is not None:
+                hashes[aid] = int(rec["dhash"], 16)
             continue
         try:
-            h = ph.dhash(it.src)
+            h = ph.dhash_or_flat(it.src)
         except Exception as e:  # noqa: BLE001 - undecodable pictures simply have no duplicate group
             ctx.logger.event("analyze", Status.SKIPPED, asset_id=aid, phase="dhash", message=f"{type(e).__name__}")
             continue
-        ctx.catalog.cache_put(aid, PHASH_ANALYZER, PHASH_KEY, cv, {"dhash": f"{h:016x}"})
-        hashes[aid] = h
+        ctx.catalog.cache_put(aid, PHASH_ANALYZER, PHASH_KEY, cv, {"dhash": None if h is None else f"{h:016x}"})
+        if h is not None:   # a flat picture has no duplicate group
+            hashes[aid] = h
     return ph.group_duplicates(hashes, distance)
 
 

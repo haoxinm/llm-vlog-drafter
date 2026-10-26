@@ -127,3 +127,30 @@ def test_unreadable_or_bad_image_is_typed_error(tmp_path):
         prepare_image(ImagePart(tmp_path / "missing.jpg"))
     with pytest.raises(LLMInputError):
         ImagePart(bad, "application/pdf")
+
+
+def test_explicit_identity_replaces_the_byte_hash(tmp_path):
+    a = make_image(tmp_path / "a.jpg", color=(10, 10, 10))
+    b = make_image(tmp_path / "b.jpg", color=(200, 20, 20))   # different bytes, e.g. another ffmpeg build
+    assert fp(make_request([a])) != fp(make_request([b]))
+
+    def with_identity(path, ident):
+        req = make_request([path])
+        return type(req)(**{**req.__dict__, "parts": tuple(ImagePart(p.path, identity=ident) if isinstance(p, ImagePart) else p for p in req.parts)})
+
+    assert fp(with_identity(a, "cv1:frame:7")) == fp(with_identity(b, "cv1:frame:7"))
+    assert fp(with_identity(a, "cv1:frame:7")) != fp(with_identity(a, "cv1:frame:8"))
+    assert fp(with_identity(a, "cv1:frame:7")) != fp(make_request([a]))
+
+
+def test_sampled_frames_carry_a_stable_identity(tmp_path):
+    from analysis_helpers import fake_frames  # noqa: F401  (documents that frames are fake files in these tests)
+    from trip_vlog.analysis.vision import _identity
+    from types import SimpleNamespace
+
+    st = SimpleNamespace(sampling=__import__("trip_vlog.analysis.frames", fromlist=["x"]).SamplingSettings())
+    it = SimpleNamespace(asset={"content_version": "cv1"}, sid="s")
+    assert _identity(st, it, "frame", 3) == _identity(st, it, "frame", 3)
+    assert _identity(st, it, "frame", 3) != _identity(st, it, "frame", 4)
+    it2 = SimpleNamespace(asset={"content_version": "cv2"}, sid="s")
+    assert _identity(st, it, "frame", 3) != _identity(st, it2, "frame", 3)

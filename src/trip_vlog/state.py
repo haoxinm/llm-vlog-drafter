@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 from trip_vlog import __version__
 from trip_vlog.logging_utils import RunLogger, Status, utc_now_iso
+from trip_vlog.paths import long_path
 
 MANIFEST_SCHEMA = 1
 
@@ -22,25 +23,25 @@ MANIFEST_SCHEMA = 1
 def atomic_write_text(path: Path, text: str) -> None:
     """Write UTF-8 with '\\n' newlines via temp file + os.replace (retries briefly on Windows locks)."""
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    long_path(path.parent).mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
-        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        with open(long_path(tmp), "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
         for attempt in range(8):
             try:
-                os.replace(tmp, path)
+                os.replace(long_path(tmp), long_path(path))
                 return
             except PermissionError:
                 if attempt == 7:
                     raise
                 time.sleep(0.05 * (attempt + 1))
     finally:
-        if tmp.exists():
+        if long_path(tmp).exists():
             try:
-                tmp.unlink()
+                long_path(tmp).unlink()
             except OSError:
                 pass
 

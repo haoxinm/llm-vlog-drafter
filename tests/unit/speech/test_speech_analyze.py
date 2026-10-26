@@ -158,3 +158,23 @@ def test_unlabeled_fallback_moments_keep_their_refs(tmp_path):
     assert res.summary["fallback_unlabeled"] == 1
     m = json.loads(ctx.catalog.get_moment("moment_" + segs[0]["segment_id"][4:])["data_json"])
     assert m["labeled"] is False and m["transcript_refs"] == ids
+
+
+def test_coarse_transcript_is_only_attached_to_single_segment_assets():
+    coarse = [{"transcript_id": "tr_1", "start_seconds": 0.0, "end_seconds": 30.0, "text": "whole clip words", "timestamps": "coarse"}]
+    assert sc.text_for(coarse, 5.0, 8.0, n_segments=1) == "whole clip words" and sc.refs_for(coarse, 5.0, 8.0, 1) == ["tr_1"]
+    assert sc.text_for(coarse, 5.0, 8.0, n_segments=3) == "" and sc.refs_for(coarse, 5.0, 8.0, 3) == []
+    timed = [{**coarse[0], "timestamps": "segment"}]
+    assert sc.text_for(timed, 5.0, 8.0, n_segments=3) == "whole clip words" and sc.refs_for(timed, 5.0, 8.0, 3) == ["tr_1"]
+
+
+def test_coarse_transcript_is_not_sent_to_any_segment_of_a_multi_segment_asset(tmp_path):
+    ctx, tr, aid, segs = setup(tmp_path)
+    assert len(segs) > 1
+    cat = ctx.catalog
+    rows = sc.to_records(aid, "fast:a.mp4", [TranscriptSegment(0.0, segs[-1]["end_seconds"], "everything said in the clip")], language=None,
+                         timestamps="coarse", backend="b", model=None)
+    cat.replace_transcripts(aid, "fast:a.mp4", rows)
+    st.analyze_stage(ctx)
+    assert tr.calls and "everything said" not in texts(tr)
+    assert all(json.loads(m["data_json"]).get("transcript_refs") == [] for m in cat.list_moments(aid))

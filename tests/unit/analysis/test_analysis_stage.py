@@ -140,9 +140,9 @@ def test_changed_content_version_relabels_that_asset_only(tmp_path):
     aid, segs = add_video(ctx.catalog, "a.mp4", 14.0, cv="fast:changed")
     fake_frames(ctx.workspace.root, segs, aid, "fast:changed", fr.SamplingSettings.from_config(ctx.config, 16))
     res = st.analyze_stage(ctx)
-    # the catalog label of the changed asset is invalid; identical frames are then answered by the gateway's response cache
-    assert res.summary["already_labeled"] == 2 and res.summary["labeled"] == 3 and len(tr.calls) == n
-    assert res.summary["response_cache_hits"] == 1
+    # the catalog label of the changed asset is invalid; its frames are named by content version, so the old answer is not reused
+    assert res.summary["already_labeled"] == 2 and res.summary["labeled"] == 3 and len(tr.calls) == n + 1
+    assert res.summary["response_cache_hits"] == 0
 
 
 def test_referential_validation_partial_retry_and_fallback(tmp_path):
@@ -292,3 +292,84 @@ def test_stale_llm_moments_are_dropped_when_segments_change(tmp_path):
     ctx.catalog.replace_moments(aid, "fast:a.mp4", moments_from_segments(new, "fast:a.mp4"))
     ms = moments(ctx)
     assert len(ms) == len(new) and all(m["source"] == "baseline" for m in ms.values())
+
+
+def test_undecodable_photo_fails_alone_and_is_left_out_of_the_batch(tmp_path):
+    ctx, tr, _ = setup(tmp_path, photos=2)
+    add_photo(ctx.catalog, "IMG_0001.HEIC")
+    (ctx.paths.media_root / "IMG_0001.HEIC").write_bytes(b"\x00\x00\x00\x18ftypheic" + b"\x00" * 64)   # no decoder for this
+    res = st.analyze_stage(ctx)
+    assert res.status == Status.PARTIAL and res.summary["labeled"] == 5 and res.summary["fallback_unlabeled"] == 1
+    assert any("cannot decode IMG_0001.HEIC; HEIC is not supported by the installed image library" in e["error"] for e in res.summary["errors"])
+    photo_calls = [c for c in tr.calls if c.images and len(c.sids) <= 2 and not c.frames]
+    assert photo_calls and all(len(c.sids) == 2 for c in photo_calls) and len(tr.calls) == 2   # the two good photos travel together; no retry round
+    bad = [m for m in moments(ctx).values() if m.get("labeled") is False]
+    assert len(bad) == 1 and "HEIC" in bad[0]["label_error"]
+
+
+def _four_hundred(msg):
+    return lambda call, default: HttpResponse(400, {}, json.dumps({"error": {"message": msg}}).encode())
+
+
+def test_config_level_400_aborts_after_three_requests_with_the_server_message(tmp_path):
+    ctx, tr, _ = setup(tmp_path, photos=3, vision_batch_max_images=1)
+    tr.respond = _four_hundred("Unsupported parameter: 'max_tokens'")
+    with pytest.raises(LLMConfigError, match="Unsupported parameter") as ei:
+        st.analyze_stage(ctx)
+    assert len(tr.calls) == 3 and "configuration" in str(ei.value)
+
+
+def test_single_batch_all_400_aborts_after_three_calls(tmp_path):
+    ctx, tr, _ = setup(tmp_path, photos=0)          # one round-1 batch, then singleton re-asks
+    tr.respond = _four_hundred("unknown model")
+    with pytest.raises(LLMConfigError, match="unknown model"):
+        st.analyze_stage(ctx)
+    assert len(tr.calls) == 3
+
+
+def test_item_specific_400_after_a_success_is_still_recoverable(tmp_path):
+    ctx, tr, _ = setup(tmp_path, photos=3, vision_batch_max_images=1)
+    bad = _four_hundred("image rejected")
+    tr.respond = lambda call, default: default if len(tr.calls) == 1 else bad(call, default)
+    res = st.analyze_stage(ctx)
+    assert res.status == Status.PARTIAL and len(tr.calls) > 3 and res.summary["labeled"] >= 1
+
+
+def test_reply_that_fails_label_validation_is_evicted_from_the_response_cache(tmp_path):
+    ctx, tr, segs = setup(tmp_path, photos=0)
+    cache = ctx.workspace.root / "cache" / "llm"
+
+    def respond(call: Call, default):
+        out = [dict(e) for e in default]
+        if not call.retry:
+            out[0]["best_frames"] = {"first_index": 3, "last_index": 1}                 # schema-valid, referentially wrong
+        return out
+    tr.respond = respond
+    st.analyze_stage(ctx)
+    first, retry = tr.calls[0], tr.calls[1]
+    assert not first.retry and retry.retry
+    # retry requests bypass the cache and the unusable first reply was evicted, so nothing is left to be reused
+    assert len(list(cache.glob("*.json"))) == 0
+
+
+def test_flat_photos_are_not_grouped_as_duplicates(tmp_path):
+    from PIL import Image
+
+    from trip_vlog.analysis import photos as ph
+    from trip_vlog.media.ids import asset_id_for
+
+    ctx, tr, _ = setup(tmp_path, photos=3)
+    for i, color in enumerate([(10, 10, 10), (200, 200, 200)]):          # two different blank pictures, p2 stays patterned
+        Image.new("RGB", (64, 48), color).save(ctx.paths.media_root / f"p{i}.jpg")
+    assert ph.dhash_or_flat(ctx.paths.media_root / "p0.jpg") is None and ph.dhash_or_flat(ctx.paths.media_root / "p2.jpg") is not None
+    st.analyze_stage(ctx)
+    groups = {m["asset_id"]: m["duplicate_group"] for m in moments(ctx).values() if m["media_type"] == "image"}
+    assert all(groups[asset_id_for(f"p{i}.jpg")] is None for i in range(3))
+
+
+def test_a_batch_400_and_its_singleton_retry_do_not_trip_the_breaker(tmp_path):
+    ctx, tr, _ = setup(tmp_path, photos=3)
+    bad = _four_hundred("this batch is too large")
+    tr.respond = lambda call, default: bad(call, default) if len(tr.calls) <= 2 else default
+    res = st.analyze_stage(ctx)          # request 1 = video batch rejected, request 2 = its first singleton retry rejected, 3+ succeed
+    assert res.summary["labeled"] >= 3 and len(tr.calls) > 3

@@ -25,6 +25,13 @@ class ResponseStore:
     def has(self, fingerprint: str) -> bool:
         return self.path_for(fingerprint).is_file()
 
+    def discard(self, fingerprint: str) -> None:
+        """Remove a stored record (a reply that parsed but turned out to be unusable). Missing is fine."""
+        try:
+            self.path_for(fingerprint).unlink()
+        except OSError:
+            pass
+
     def get(self, fingerprint: str) -> dict[str, Any] | None:
         """Stored record, or None when absent. Raises LLMStoreError for a malformed file."""
         path = self.path_for(fingerprint)
