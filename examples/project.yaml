@@ -113,7 +113,7 @@ qc:
   critic: "off"                  # off | report | apply
   critic_max_rounds: 1           # apply: critic -> fix -> rebuild -> QC rounds per plan
   critic_max_ops_per_round: 3    # apply: most changes applied in one round
-  critic_apply_min_severity: minor   # apply: findings below this severity are reported, never applied (minor | major)
+  critic_apply_min_severity: major   # apply: findings below this severity are reported, never applied (minor | major)
   critic_images: true            # send the preview sheets to a vision-capable endpoint; false (or an endpoint without images) = text only
   critic_max_sheets: 4           # most preview sheet images in one request
   critic_max_tokens: 6000        # upper bound on the reply (also capped by the endpoint's max_tokens)

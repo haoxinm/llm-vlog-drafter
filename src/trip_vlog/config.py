@@ -518,7 +518,7 @@ class QcConfig(_Model):
     critic: Literal["off", "report", "apply"] = "off"
     critic_max_rounds: int = Field(1, ge=1, le=5)                  # apply: critic -> fix -> rebuild -> QC rounds per plan
     critic_max_ops_per_round: int = Field(3, ge=1, le=20)          # apply: most proposals applied in one round
-    critic_apply_min_severity: Literal["minor", "major"] = "minor"  # apply: proposals of findings below this severity are reported, not applied
+    critic_apply_min_severity: Literal["minor", "major"] = "major"  # apply: proposals of findings below this severity are reported, not applied
     critic_images: bool = True                                     # send the preview sheets to a vision-capable endpoint (false: text only)
     critic_max_sheets: int = Field(4, ge=1, le=20)                 # most preview sheet images sent in one request
     critic_max_tokens: int = Field(6000, ge=256)                   # upper bound on the critic reply (also capped by the endpoint's max_tokens)

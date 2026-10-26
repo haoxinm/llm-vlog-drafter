@@ -11,7 +11,7 @@ from trip_vlog.llm.check import endpoints_to_check
 
 def test_defaults_modes_and_limits():
     q = parse_config({}).qc
-    assert (q.critic, q.critic_max_rounds, q.critic_max_ops_per_round, q.critic_apply_min_severity, q.critic_images) == ("off", 1, 3, "minor", True)
+    assert (q.critic, q.critic_max_rounds, q.critic_max_ops_per_round, q.critic_apply_min_severity, q.critic_images) == ("off", 1, 3, "major", True)
     for mode in ("report", "apply"):
         assert parse_config({"qc": {"critic": mode}}).qc.critic == mode
     for bad in ({"critic": "auto"}, {"critic": True}, {"critic_max_rounds": 0}, {"critic_max_rounds": 9}, {"critic_max_ops_per_round": 0}, {"critic_apply_min_severity": "info"},

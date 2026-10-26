@@ -337,7 +337,7 @@ class Finding:
     dropped_evidence: list[dict[str, str]] = field(default_factory=list)
     proposed_change: dict[str, Any] | None = None     # as the model gave it (nulls removed)
     op: PlanOp | None = None
-    change_status: str = "none"                         # none | invalid | not_local | below_severity | valid | over_limit | applied | refused | pending
+    change_status: str = "none"                         # none | invalid | not_local | below_severity | unsupported | valid | over_limit | applied | refused | pending
     change_note: str = ""
     notes: list[str] = field(default_factory=list)
 
@@ -363,11 +363,16 @@ class EvidenceSpace:
     tiles: set[str]                      # tiles whose image was supplied
     audio_clips: set[str]
     images: bool
+    tile_clip: dict[str, str] = field(default_factory=dict)       # tile id -> clip_instance_id it shows
+    check_data: dict[str, str] = field(default_factory=dict)      # qc check name -> its data as compact JSON text (to find the clips it names)
 
     @classmethod
     def from_inputs(cls, inp: CriticInputs) -> "EvidenceSpace":
+        tile_clip = {t.tile_id: t.clip_instance_id for t in inp.index.tiles.values()} if inp.index is not None else {}
+        check_data = {c["name"]: _q(c.get("data") or {}) for c in inp.qc.get("checks", [])}
         return cls({s.scene_id for s in inp.plan.scenes}, {c.clip_instance_id: s.scene_id for s in inp.plan.scenes for c in s.clips},
-                   {c["name"] for c in inp.qc.get("checks", [])}, visible_tiles(inp), set(clip_audio_features(inp.plan, inp.catalog)), bool(shown_sheets(inp)))
+                   {c["name"] for c in inp.qc.get("checks", [])}, visible_tiles(inp), set(clip_audio_features(inp.plan, inp.catalog)), bool(shown_sheets(inp)),
+                   tile_clip, check_data)
 
 
 def _text(v: Any, limit: int = MAX_TEXT) -> str:
@@ -470,18 +475,46 @@ def locality_problem(f: Finding, op: PlanOp, plan: EditPlan) -> str | None:
 @dataclass
 class ProposalPolicy:
     mode: str = "report"                  # report | apply
-    min_severity: str = "minor"
+    min_severity: str = "major"
     max_ops: int = 3
 
 
+def _mentions(text: str, ident: str) -> bool:
+    return re.search(r"(?<![A-Za-z0-9_.-])" + re.escape(ident) + r"(?![A-Za-z0-9_.-])", text) is not None
+
+
+def evidence_problem(f: Finding, op: PlanOp, plan: EditPlan, space: EvidenceSpace) -> str | None:
+    """None when at least one evidence item of the finding refers to what the change touches (the clip, or for shorten_scene the scene): a tile of that
+    clip, a plan entry for that clip or its scene, audio measurements of that clip, or a check whose data names it. Else why not."""
+    clip_scene = {c.clip_instance_id: s.scene_id for s in plan.scenes for c in s.clips}
+    if op.op == "shorten_scene":
+        scene = op.scene_id or ""
+        clips = {c for c, sc in clip_scene.items() if sc == scene}
+        target = f"scene {scene}"
+    else:
+        cid = op.clip_instance_id or ""
+        scene, clips, target = clip_scene.get(cid, ""), {cid}, f"clip {cid}"
+    for ev in f.evidence:
+        kind, ref = ev.get("kind"), str(ev.get("ref") or "").strip()
+        if kind == "tile" and space.tile_clip.get(ref) in clips:
+            return None
+        if kind == "plan" and (ref in clips or ref == scene):
+            return None
+        if kind == "audio" and ref in clips:
+            return None
+        if kind == "qc_check" and any(_mentions(space.check_data.get(ref, ""), x) for x in (*clips, scene) if x):
+            return None
+    return f"none of the evidence cited refers to {target}, which the change touches (cite its tile, its plan entry, its audio or a check that names it)"
+
+
 def assess_proposals(findings: list[Finding], plan: EditPlan, ctx: PlanContext, policy: ProposalPolicy,
-                     *, base_selection: Any = None) -> tuple[list[Finding], ApplyResult | None]:
+                     *, base_selection: Any = None, space: EvidenceSpace | None = None) -> tuple[list[Finding], ApplyResult | None]:
     """Judge every proposed change through the real resolver and validators and pick the ones to apply.
 
     Proposals that are local and of enough severity are tried one after the other, most severe first, each on top of the ones already chosen (a
     dissolve that needs the source handle a trim frees is judged after that trim); the first `policy.max_ops` that pass are chosen. Sets
     `change_status` / `change_note` on each finding and returns the chosen findings in order with the combined `ApplyResult` (None when nothing was
-    chosen). Raises `PlanBaseError` when the plan cannot serve as a base (see `plan_diff.check_roundtrip`)."""
+    chosen). With `space`, a proposal whose evidence does not refer to what it changes is reported (`unsupported`), not chosen. Raises `PlanBaseError` when the plan cannot serve as a base (see `plan_diff.check_roundtrip`)."""
     eligible: list[Finding] = []
     verified = False
     for f in findings:
@@ -496,6 +529,10 @@ def assess_proposals(findings: list[Finding], plan: EditPlan, ctx: PlanContext, 
             verified = True
             verdict = "it would be accepted" if not r.refused else "it would be refused: " + r.refused[0].message
             f.change_status, f.change_note = "below_severity", f"a {f.severity} finding; changes are applied for {policy.min_severity} and above ({verdict})"
+            continue
+        why = evidence_problem(f, f.op, plan, space) if space is not None else None
+        if why:
+            f.change_status, f.change_note = "unsupported", why
             continue
         eligible.append(f)
     eligible.sort(key=lambda f: -SEVERITY_RANK[f.severity])      # major first, otherwise the reply's order
@@ -579,6 +616,10 @@ def render_markdown(r: Mapping[str, Any]) -> str:
             L.append(f"- Revision: `{rd['revision']}` (parent plan `{str(rd.get('parent_plan_hash'))[:12]}` -> `{str(rd.get('plan_hash'))[:12]}`)")
         if rd.get("project"):
             L.append(f"- FilmCraft project: `{rd['project']}` (the earlier version is kept)")
+        if rd.get("error"):
+            L.append(f"- Error: {esc(rd['error'])}")
+        if rd.get("halt_note"):
+            L.append(f"- WARNING: {esc(rd['halt_note'])}")
         L += [f"- {x}" for x in rd.get("ops_text", [])] + [f"    {x}" for x in rd.get("diff_lines", [])] + [""]
     if r.get("notes"):
         L += ["## Notes", ""] + [f"- {esc(n)}" for n in r["notes"]] + [""]
