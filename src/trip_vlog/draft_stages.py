@@ -43,7 +43,8 @@ from trip_vlog.state import StageResult, StageRunner, atomic_write_json, atomic_
 if TYPE_CHECKING:  # pragma: no cover
     from trip_vlog.orchestrator import RunContext
 
-DRAFT_STAGES = ("scan", "probe", "catalog", "thumbnails", "segment", "plan", "approval", "assemble", "preview", "qc", "critic", "handoff")   # critic: only with qc.critic != off
+DRAFT_STAGES = ("scan", "probe", "catalog", "thumbnails", "segment", "plan", "approval", "assemble", "preview", "qc", "revise", "critic", "handoff")   # revise: only for `trip-vlog revise`; critic: only with qc.critic != off
+CHANGE_APPROVAL_MODES = ("critic_fix", "revision")   # approval modes of a plan that a round of localized changes produced (bound to the new plan's hash)
 
 # Test hook: replace to drive a fake FilmCraft server (``lambda ctx: FilmCraftAdapter(..., argv_prefix=...)``).
 adapter_factory: Callable[["RunContext"], FilmCraftAdapter] | None = None
@@ -98,7 +99,7 @@ def validate_plan_file(ctx: Any) -> tuple[EditPlan, ValidationReport]:
     except (OSError, ValueError) as e:
         raise PlanRejected(f"{path.name} is not readable JSON: {e}") from None
     view = PlanningCatalog.from_catalog(ctx.catalog)
-    report = validate_edit_plan(doc, view, ValidationSettings.from_config(ctx.config))
+    report = validate_edit_plan(doc, view, ValidationSettings.effective(ctx.config))
     if not report.ok:
         atomic_write_json(_pp(ctx).plans_dir / "assemble_validation_report.json", report.to_dict())
         raise PlanRejected("edit plan rejected before any FilmCraft change:\n" + report.format(), report)
@@ -140,10 +141,10 @@ def approval_stage(ctx: Any) -> StageResult:
     cur = plan_file_hash(path)
     m = ctx.manifest
     held = approval_record(m)
-    if held and held.get("status") == "approved" and held.get("mode") == "critic_fix" and held.get("plan_hash") == cur:
-        # the plan is the product of a critic fix (qc.critic: apply): approved on the strength of its approved parent and the revision it records,
-        # bound to this plan's hash; any edit changes the hash and falls through to the normal rules below
-        return StageResult(Status.SUCCEEDED, {"mode": "critic_fix", "plan_hash": cur, "parent_plan_hash": held.get("parent_plan_hash"), "revision": held.get("revision")})
+    if held and held.get("status") == "approved" and held.get("mode") in CHANGE_APPROVAL_MODES and held.get("plan_hash") == cur:
+        # the plan is the product of a critic fix (qc.critic: apply) or a natural-language revision: approved on the strength of its approved parent and
+        # the revision it records, bound to this plan's hash; any edit changes the hash and falls through to the normal rules below
+        return StageResult(Status.SUCCEEDED, {"mode": held.get("mode"), "plan_hash": cur, "parent_plan_hash": held.get("parent_plan_hash"), "revision": held.get("revision")})
     if ctx.config.workflow.approval == "auto_approve":
         approve_current_plan(m, cur, "automatic")
         return StageResult(Status.SUCCEEDED, {"mode": "automatic", "plan_hash": cur})
@@ -413,6 +414,7 @@ def _qc_inputs(ctx: Any) -> Any:
     audio = [(m.moment_id, (m.features or {}).get("audio")) for m in PlanningCatalog.from_catalog(ctx.catalog).moments.values()]
     return {"project": _project_sha(ctx), "preview": _file_sha(_preview_path(ctx)), "plan": plan_file_hash(_pp(ctx).edit_plan),
             "qc": ctx.config.qc.model_dump(), "tol": [ctx.config.project.duration_tolerance_pct, ctx.config.project.duration_tolerance_seconds],
+            **({"target": ctx.config.effective_target_seconds} if ctx.config.revision_overrides.get("target_duration_seconds") else {}),
             "ambient_db": ctx.config.filmcraft.ambient_low_gain_db, "ffmpeg": ctx.ffmpeg is not None,
             "evidence": stable_hash({"audio": sorted(audio, key=lambda x: x[0]),
                                      "transcripts": {a: [(t.start, t.end, t.text, t.coarse) for t in ts] for a, ts in _qc_transcripts(ctx).items()}}),
@@ -524,6 +526,10 @@ def handoff_stage(ctx: Any) -> StageResult:
         if applied:
             notes.append(f"this is project version v{run['version']}: {len(applied)} critic round(s) changed the plan after the first draft (" + ", ".join(
                 a["revision"] for a in applied if a.get("revision")) + "); the earlier project versions are kept in filmcraft/ and the parent plans in plans/revisions/")
+    if (ctx.manifest.get("revise") or {}).get("rounds"):
+        from trip_vlog.revise_stages import handoff_notes
+
+        notes += handoff_notes(ctx, prep.plan.plan_hash, run["version"])
     if _qc_paths_critic(ctx).is_file():
         notes.append(f"critic report: {_rel(ctx, _qc_paths_critic(ctx))}")
     export = export_handoff(get_adapter(ctx), eff, cfg.filmcraft.interchange_formats, out, proj)
@@ -598,7 +604,12 @@ def build_draft_runner(ctx: Any) -> StageRunner:
     runner.register("preview", preview_stage, deps=("assemble",), inputs=_preview_inputs, verify=lambda c: _preview_path(c).is_file())
     runner.register("qc", qc_stage, deps=("assemble",), inputs=_qc_inputs, verify=_qc_verify)
     from trip_vlog.critic_stages import critic_inputs, critic_stage, critic_verify, critic_wanted
+    from trip_vlog.revise_stages import revise_inputs, revise_stage, revise_wanted
 
+    if revise_wanted(ctx):
+        # after qc, before the critic and the handoff: a revision rebuilds the project, preview and QC, and everything after it works on the latest version.
+        # Registered for `trip-vlog revise`, and (in apply mode) when a proposed revision was approved with `approve --revision`.
+        runner.register("revise", revise_stage, deps=("qc",), inputs=revise_inputs)
     if critic_wanted(ctx):
         # after qc, before handoff: a critic fix rebuilds the project, preview and QC, and the handoff then packages the latest version.
         # Also registered (in apply mode) when a revision was approved with `approve --critic`, whatever qc.critic says now.

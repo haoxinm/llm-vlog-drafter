@@ -129,6 +129,49 @@ def halt_text(rec: Mapping[str, Any], kind: RoundKind) -> str | None:
     return None
 
 
+def outline_alternatives(ctx: Any) -> tuple[dict[str, list[str]] | None, dict[str, str]]:
+    """scene_id -> candidate moment ids of the approved outline this plan was made from, plus a line of description per moment. (None, {}) when
+    the plan has no approved outline behind it (baseline planner, or the outline was edited after the plan was made)."""
+    if ctx.config.workflow.planner != "llm" or ds._qc_outline_scene_ids(ctx) is None:
+        return None, {}
+    try:
+        from trip_vlog.planning import selection as sl
+        from trip_vlog.selection_stages import build_context
+
+        sctx, _ = build_context(ctx)
+        cands: dict[str, list[str]] = {}
+        notes: dict[str, str] = {}
+        for si, sc in enumerate(sctx.outline.scenes):
+            ms = sl.scene_candidates(sctx, si)
+            cands[sc.scene_id] = [m.moment_id for m in ms]
+            notes.update({m.moment_id: " ".join((m.description or "").split())[:200] for m in ms})
+        return cands, notes
+    except Exception:  # noqa: BLE001 - alternatives are an extra; without them swap_moment is simply unavailable
+        return None, {}
+
+
+def llm_key(cfg: Any, profile: str, ep: Any) -> dict[str, Any]:
+    """What about the endpoint can change a reply (part of a stage's input hash)."""
+    from trip_vlog.llm.factory import resolve_mode, resolve_model
+
+    return {"endpoint": profile, "api": ep.api, "model": resolve_model(ep), "params": ep.params, "structured_output": ep.structured_output, "mode": resolve_mode(cfg)}
+
+
+# ---- what accepted revisions changed about the rules ------------------------------------------------------------------------
+
+def manifest_overrides(manifest: Any) -> dict[str, Any] | None:
+    """``revise.overrides`` (target duration, waived must_include references) while the plan stage's plan is still the one they were made on top of: a
+    plan made again (config or media changed, the plan stage re-ran) starts from the configured rules."""
+    ov = (manifest.get("revise") or {}).get("overrides")
+    if not isinstance(ov, dict):
+        return None
+    return ov if ov.get("base_plan_hash") == (manifest.get("plan") or {}).get("plan_hash") else None
+
+
+def apply_manifest_overrides(config: Any, manifest: Any) -> None:
+    config.set_revision_overrides(manifest_overrides(manifest))
+
+
 # ---- files ------------------------------------------------------------------------------------------------------------
 
 PARENT_NAMES = {"edit_plan": "parent_edit_plan.json", "selection_plan": "parent_selection_plan.json", "summary": "parent_plan_summary.md",
@@ -286,6 +329,7 @@ class RoundHooks:
     snapshot: tuple[Path, dict[str, Any]] | None = None                            # a document kept as it was when the round started (the critic's report)
     rollback: Callable[..., str] | None = None
     ran_by: str = ""
+    state_update: Callable[[dict[str, Any]], dict[str, Any]] | None = None    # (round record) -> fields saved with the round, in the same write
 
 
 def apply_round(ctx: Any, kind: RoundKind, parent: EditPlan, res: ApplyResult, *, number: int | None, authorization: str, qc_before: Mapping[str, Any],
@@ -352,7 +396,7 @@ def apply_round(ctx: Any, kind: RoundKind, parent: EditPlan, res: ApplyResult, *
     try:
         try:
             view = PlanningCatalog.from_catalog(ctx.catalog)
-            vrep = validate_edit_plan(res.edit, view, ValidationSettings.from_config(cfg))
+            vrep = validate_edit_plan(res.edit, view, ValidationSettings.effective(cfg))
             if vrep.errors:
                 return restore(f"the new plan does not validate ({vrep.errors[0].message}); the previous plan was put back", remember=True)
             _write_all(ctx.workspace, cfg, dict(ctx.paths.outputs), res.selection, res.edit, vrep, view,
@@ -385,7 +429,8 @@ def apply_round(ctx: Any, kind: RoundKind, parent: EditPlan, res: ApplyResult, *
         rdoc.update(status="applied", project=rec["project"], project_version=rec["project_version"], qc_before=rec["qc_before"], qc_after=rec["qc_after"],
                     preview_before=rec["preview_before"], qc_regressed=rec["qc_regressed"], qc_new_failures=new_failures, halt=halt, halt_note=rec["halt_note"])
         hooks.write_revision(ctx, n, rdoc, res)
-        save_state(ctx, kind, rounds=[*state_of(ctx, kind).get("rounds", []), rec], pending=None, applying=None)
+        save_state(ctx, kind, rounds=[*state_of(ctx, kind).get("rounds", []), rec], pending=None, applying=None,
+                   **(hooks.state_update(rec) if hooks.state_update else {}))
     except BaseException:   # Ctrl-C, SystemExit (also while the round is being recorded): the previous plan goes back, then it goes on
         try:
             restore("the round was interrupted; the previous plan was put back", remember=False)

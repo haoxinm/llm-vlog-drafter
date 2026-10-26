@@ -43,14 +43,14 @@ from typing import Any, Callable
 
 from trip_vlog import draft_stages as ds
 from trip_vlog import revision_common as rc
-from trip_vlog.llm.factory import make_gateway, resolve_mode, resolve_model
+from trip_vlog.llm.factory import make_gateway, resolve_model
 from trip_vlog.llm.gateway import Gateway
 from trip_vlog.llm.types import LLMError, LLMResponse
 from trip_vlog.logging_utils import Status, utc_now_iso
 from trip_vlog.planning.catalog_view import PlanningCatalog
 from trip_vlog.planning.models import EditPlan
 from trip_vlog.planning.plan_diff import ApplyResult, PlanBaseError, PlanContext, load_selection_file, render_ops_markdown
-from trip_vlog.planning.resolve_plan import PlanSettings
+from trip_vlog.planning.resolve_plan import effective_plan_settings
 from trip_vlog.planning.validate import ValidationSettings
 from trip_vlog.qc import critic as cr
 from trip_vlog.qc.preview import PreviewSheetIndex, load_preview_sheet_index
@@ -146,25 +146,7 @@ class Aux:
     notes: list[str] = field(default_factory=list)
 
 
-def _outline_alternatives(ctx: Any) -> tuple[dict[str, list[str]] | None, dict[str, str]]:
-    """scene_id -> candidate moment ids of the approved outline this plan was made from, plus a line of description per moment. (None, {}) when
-    the plan has no approved outline behind it (baseline planner, or the outline was edited after the plan was made)."""
-    if ctx.config.workflow.planner != "llm" or ds._qc_outline_scene_ids(ctx) is None:
-        return None, {}
-    try:
-        from trip_vlog.planning import selection as sl
-        from trip_vlog.selection_stages import build_context
-
-        sctx, _ = build_context(ctx)
-        cands: dict[str, list[str]] = {}
-        notes: dict[str, str] = {}
-        for si, sc in enumerate(sctx.outline.scenes):
-            ms = sl.scene_candidates(sctx, si)
-            cands[sc.scene_id] = [m.moment_id for m in ms]
-            notes.update({m.moment_id: " ".join((m.description or "").split())[:200] for m in ms})
-        return cands, notes
-    except Exception:  # noqa: BLE001 - alternatives are an extra; without them swap_moment is simply unavailable
-        return None, {}
+_outline_alternatives = rc.outline_alternatives
 
 
 def build_inputs(ctx: Any) -> tuple[cr.CriticInputs, Aux]:
@@ -207,27 +189,26 @@ def build_inputs(ctx: Any) -> tuple[cr.CriticInputs, Aux]:
     elif not sheets:
         reason = "no preview sheets exist for this plan (the preview was not rendered or ffmpeg is missing)"
     alts, alt_notes = _outline_alternatives(ctx)
-    pc = PlanContext(PlanningCatalog.from_catalog(ctx.catalog), ValidationSettings.from_config(cfg), PlanSettings.from_config(cfg), alts,
+    pc = PlanContext(PlanningCatalog.from_catalog(ctx.catalog), ValidationSettings.effective(cfg), effective_plan_settings(cfg), alts,
                      float(q.min_still_seconds))
     p = cfg.project
     inp = cr.CriticInputs(
         plan=plan, catalog=pc.catalog, qc=qc, index=index, sheet_paths=sheets,
-        project={"title": p.title, "target_duration_seconds": float(p.target_duration_seconds), "style": p.style, "audience": p.audience, "language": p.language},
+        project={"title": p.title, "target_duration_seconds": float(cfg.effective_target_seconds), "style": p.style, "audience": p.audience, "language": p.language},
         alternatives=alts, alternative_notes=alt_notes, max_sheets=q.critic_max_sheets, images=reason is None)
     aux = Aux(prep, pc, load_selection_file(ds._pp(ctx).selection_plan), profile, ep, reason, max(256, min(q.critic_max_tokens, ep.max_tokens)), notes)
     return inp, aux
 
 
-def _llm_key(cfg: Any, profile: str, ep: Any) -> dict[str, Any]:
-    return {"endpoint": profile, "api": ep.api, "model": resolve_model(ep), "params": ep.params, "structured_output": ep.structured_output, "mode": resolve_mode(cfg)}
+_llm_key = rc.llm_key
 
 
 def critic_inputs(ctx: Any) -> Any:
     cfg = ctx.config
     q = cfg.qc
     base: dict[str, Any] = {"mode": effective_mode(ctx), "limits": [q.critic_max_rounds, q.critic_max_ops_per_round, q.critic_apply_min_severity],
-                            "plan_review": cfg.workflow.plan_review, "validation": stable_hash(ValidationSettings.from_config(cfg).__dict__),
-                            "planning": stable_hash(PlanSettings.from_config(cfg).__dict__), "min_still_seconds": float(q.min_still_seconds),
+                            "plan_review": cfg.workflow.plan_review, "validation": stable_hash(ValidationSettings.effective(cfg).__dict__),
+                            "planning": stable_hash(effective_plan_settings(cfg).__dict__), "min_still_seconds": float(q.min_still_seconds),
                             "failed": sorted(state_of(ctx).get("failed", []))}
     try:
         inp, aux = build_inputs(ctx)
