@@ -5,10 +5,11 @@ Runs after `outline_approval`, so it only ever sees an outline a person approved
 the same files as the baseline planner: `plans/selection_plan.json`, `plans/edit_plan.json`, `plans/plan_summary.md`,
 `plans/validation_report.json` and the schemas, plus `plans/selection_report.json` (attempts, findings, repairs, usage).
 
-Cache key (``selection_inputs``): the approved outline (its content hash), the catalog records of its candidate moments, the
+Cache key (``selection_inputs``): the approved outline (its content hash), the catalog records of its candidate moments (as the
+model sees them) and the planning-relevant catalog fields the resolver reads (ranges, lengths, frame rates, audio), the
 whole request text, prompt and schema versions, the editor capabilities, endpoint / model / parameters / mode, retry and token
 limits, and the project, editorial, validation and title settings. Edit the outline, change the model or the target duration
-(which makes a new outline) and the plan is made again; nothing else does.
+(which makes a new outline) or change what the resolver reads of a candidate moment and the plan is made again; nothing else does.
 """
 
 from __future__ import annotations
@@ -54,7 +55,9 @@ def selection_inputs(ctx: Any) -> Any:
     cfg = ctx.config
     sctx, h = build_context(ctx)
     profile, ep = cfg.llm.endpoint_for("text")
-    return {"outline": h, "candidates": sl.candidate_digest(sctx), "request": stable_hash(sl.user_text(sctx)), "prompt": sl.prompt_info(),
+    # "catalog": what the resolver and validators read (ranges, best sub-ranges, lengths, frame rates, audio, versions), which the
+    # candidate digest (the text a model sees) does not cover
+    return {"outline": h, "candidates": sl.candidate_digest(sctx), "catalog": sctx.view.fingerprint(sctx.outline.moment_ids()), "request": stable_hash(sl.user_text(sctx)), "prompt": sl.prompt_info(),
             "schema": stable_hash(sl.response_schema()), "capabilities": capability_facts(cfg, read_snapshot(ctx.workspace.root)),
             "settings": {"validation": sctx.vset.__dict__, "plan": sctx.pset.__dict__, "titles": sctx.tset.key(), "min_still": sctx.min_still_seconds},
             "max_tokens": sl.max_tokens(cfg), "retries": cfg.planning.selection_retries, "planner": "llm",

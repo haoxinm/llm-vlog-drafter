@@ -127,7 +127,7 @@ class Manifest:
         path = Path(path)
         if path.exists():
             try:
-                data = json.loads(path.read_text(encoding="utf-8"))
+                data = json.loads(path.read_text(encoding="utf-8-sig"))
                 if isinstance(data, dict) and isinstance(data.get("stages"), dict):
                     return cls(path, data)
             except (OSError, ValueError):
