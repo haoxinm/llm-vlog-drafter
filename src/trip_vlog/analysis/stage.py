@@ -256,7 +256,7 @@ def analyze_stage(ctx: Any) -> StageResult:
         summary["fine_sampling"] = {
             "fps": rs.sampling.fps, "window_seconds": rs.window_seconds, "min_score": rs.min_score, "candidates": rst.candidates,
             "from_cache": rst.cached, "requests": rst.requests, "response_cache_hits": rst.cache_hits, "refined": rst.refined,
-            "unchanged": rst.unchanged, "rejected": rst.rejected, "failed": len(rst.errors) - rst.rejected,
+            "unchanged": rst.unchanged, "rejected": rst.rejected, "failed": rst.failed, "skipped": sum(rst.skipped.values()), "skipped_reasons": dict(rst.skipped),
             "input_tokens": rst.usage.input_tokens, "output_tokens": rst.usage.output_tokens}
         if rst.errors:
             warnings.append(f"fine sampling could not refine {len(rst.errors)} moment(s); they keep their labeled range and are retried by the next run")
@@ -295,6 +295,7 @@ def _refine(ctx: Any, work: Work, rs: rf.RefineSettings, gateway: Callable[[], G
     chosen = rf.select([(p[0], p[1]) for p in pool], rs)
     todo: list[rf.RefineItem] = []
     cached = 0
+    stats_skipped: dict[str, int] = {}
     for it in chosen:
         aid, cv = it.asset["asset_id"], it.asset["content_version"]
         rec = cat.cache_get(aid, rf.REFINE_ANALYZER + it.sid, it.refine_key, cv)
@@ -303,6 +304,8 @@ def _refine(ctx: Any, work: Work, rs: rf.RefineSettings, gateway: Callable[[], G
             continue
         ri = rf.make_refine_item(it, rs, *ranges[id(it)])
         if ri.windows is None:
+            reason = "no room for the boundary windows"
+            stats_skipped[reason] = stats_skipped.get(reason, 0) + 1
             continue
         rf.plan_frames(ri, rs)
         todo.append(ri)
@@ -314,7 +317,7 @@ def _refine(ctx: Any, work: Work, rs: rf.RefineSettings, gateway: Callable[[], G
         it.refinement = rec
         cat.upsert_moments(it.asset["asset_id"], it.asset["content_version"], [_moment(it, work.settings, None)])
 
-    stats = rf.RefineStats(candidates=len(chosen), cached=cached)
+    stats = rf.RefineStats(candidates=len(chosen), cached=cached, skipped=stats_skipped)
     if todo:
         if not rs.supports_images:
             raise LLMConfigError(f"endpoint {rs.endpoint!r} has supports_images: false; point llm.vision at a vision-capable profile")
@@ -373,7 +376,8 @@ def _finalize(ctx: Any, work: Work) -> int:
                  if r["moment_id"] not in current and json.loads(r["data_json"] or "{}").get("source") == "llm"]
         cat.delete_moments(stale)
         cat.prune_cache(aid, ANALYZER, keys)
-        cat.prune_cache(aid, rf.REFINE_ANALYZER, {it.refine_key for it in items if it.refine_key})
+        if ctx.config.media.fine_sampling_enabled:   # while it is off the rows are kept, so toggling it back on does not re-pay them
+            cat.prune_cache(aid, rf.REFINE_ANALYZER, {it.refine_key for it in items if it.refine_key})
         if all(it.label is not None for it in items):
             cat.mark_analysis_complete(aid)
     return fallback

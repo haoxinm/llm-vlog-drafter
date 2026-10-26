@@ -126,7 +126,8 @@ def resolve_reply(entry: Mapping[str, Any], windows: tuple[Window, Window], samp
                   in_f: int, out_f: int, total_frames: int, fps: Fraction) -> tuple[dict[str, Any] | None, str | None]:
     """Turn one reply entry into a refined frame range. Returns ({"in_frame", "out_frame", ...}, None) or (None, why-invalid).
     The result lies inside the two windows and the asset, is at least MIN_REFINED_SECONDS long, and `applied` is False when
-    it equals the labeled range (null indices, or indices that land on the current boundaries)."""
+    it equals the labeled range (null indices, indices that land on the current boundaries, or a result that would be too short:
+    then `reason` says so). Only out-of-range or non-integer indices are errors."""
     sw, ew = windows
     a, err = _index(entry.get("start_frame_index"), len(sampled[0]), "start_frame_index")
     if err:
@@ -140,7 +141,9 @@ def resolve_reply(entry: Mapping[str, Any], windows: tuple[Window, Window], samp
     new_out = min(max(new_out, ew.start), ew.end)
     new_in, new_out = max(0, new_in), min(total_frames, new_out)
     if new_out <= new_in or (new_out - new_in) / float(fps) < MIN_REFINED_SECONDS - 1e-9:
-        return None, f"refined range {new_in}..{new_out} (frames) is shorter than {MIN_REFINED_SECONDS:g} s or reversed"
+        # two individually valid indices that leave too little: a usable "no better boundary" answer, not an invalid reply
+        return {"in_frame": in_f, "out_frame": out_f, "applied": False,
+                "reason": f"the chosen boundaries would leave less than {MIN_REFINED_SECONDS:g} s; kept the labeled range"}, None
     return {"in_frame": new_in, "out_frame": new_out, "applied": (new_in, new_out) != (in_f, out_f)}, None
 
 
@@ -356,7 +359,7 @@ def make_record(ri: RefineItem, s: RefineSettings, model: str) -> dict[str, Any]
         "version": REFINE_VERSION, "applied": bool(r["applied"]),
         "original_in_seconds": ri.orig_in, "original_out_seconds": ri.orig_out,
         "refined_in_seconds": frames_to_float(r["in_frame"], ri.fps), "refined_out_seconds": frames_to_float(r["out_frame"], ri.fps),
-        "start_frame_index": r["start_frame_index"], "end_frame_index": r["end_frame_index"],
+        "start_frame_index": r["start_frame_index"], "end_frame_index": r["end_frame_index"], "reason": r.get("reason"),
         "fps": s.sampling.fps, "window_seconds": s.window_seconds,
         "windows": {w.side: {"start_seconds": frames_to_float(w.start, ri.fps), "end_seconds": frames_to_float(w.end, ri.fps),
                              "frames": list(recs)} for w, recs in zip(ri.windows, ri.records)},
@@ -386,7 +389,9 @@ class RefineStats:
     cache_hits: int = 0
     refined: int = 0
     unchanged: int = 0
-    rejected: int = 0
+    rejected: int = 0        # reply invalid or moment missing from it (response evicted from the cache)
+    failed: int = 0          # frames could not be extracted / request failed
+    skipped: dict[str, int] = field(default_factory=dict)   # reason -> moments selected but not refined
     usage: Usage = field(default_factory=Usage)
     errors: list[dict[str, str]] = field(default_factory=list)
 
@@ -404,6 +409,10 @@ class Refiner:
 
     def _error(self, ri: RefineItem, msg: str, phase: str) -> None:
         ri.error = msg
+        if phase == "validate":
+            self.stats.rejected += 1
+        else:
+            self.stats.failed += 1
         self.stats.errors.append({"segment_id": ri.item.sid, "asset_id": ri.item.asset["asset_id"], "path": ri.item.asset["relative_path"], "error": msg})
         if self.logger is not None:
             self.logger.event("analyze", Status.FAILED, asset_id=ri.item.asset["asset_id"], segment_id=ri.item.sid, phase=f"refine_{phase}", error=msg)
@@ -463,7 +472,6 @@ class Refiner:
                     self.accept(ri)
                     continue
             bad += 1
-            self.stats.rejected += 1
         if bad and gw.cache is not None:
             gw.cache.discard(resp.fingerprint)   # schema-valid but unusable: a later run must ask again, not reuse it
         if self.logger is not None:

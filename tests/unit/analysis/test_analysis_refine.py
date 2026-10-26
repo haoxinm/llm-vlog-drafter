@@ -106,12 +106,12 @@ def test_invalid_indices_are_rejected(bad):
     assert res is None and err
 
 
-def test_too_short_or_reversed_result_is_rejected():
+def test_too_short_result_is_a_valid_no_better_boundary_answer():
     sw, ew = rf.plan_windows(in_f=300, out_f=345, seg_start=0, seg_end=900, total_frames=900, span_f=30)
     fs = rf.fr.sample_frame_numbers(sw.start, sw.end, F30, 4.0, 8)
     fe = rf.fr.sample_frame_numbers(ew.start, ew.end, F30, 4.0, 8)
     res, err = rf.resolve_reply({"start_frame_index": len(fs) - 1, "end_frame_index": 0}, (sw, ew), (fs, fe), in_f=300, out_f=345, total_frames=900, fps=F30)
-    assert res is None and "shorter" in err
+    assert err is None and res["applied"] is False and (res["in_frame"], res["out_frame"]) == (300, 345) and "less than" in res["reason"]
 
 
 def test_result_is_clamped_to_the_asset_duration():
@@ -291,7 +291,8 @@ def test_missing_moment_in_reply_keeps_only_that_one_original(tmp_path, monkeypa
     ctx, tr, segs, _ = stage_setup(tmp_path, monkeypatch)
     tr.refine = lambda call, default: [{**d, "start_frame_index": 1, "end_frame_index": 1} for d in default[:-1]]
     res = st.analyze_stage(ctx)
-    assert res.status == Status.PARTIAL and res.summary["fine_sampling"]["refined"] == 2 and res.summary["fine_sampling"]["rejected"] == 1
+    fine = res.summary["fine_sampling"]
+    assert res.status == Status.PARTIAL and fine["refined"] == 2 and fine["rejected"] == 1 and fine["failed"] == 0
     assert sum("refinement" in m for m in moments(ctx).values()) == 2
 
 
@@ -317,7 +318,12 @@ def test_disabled_does_nothing_and_turning_it_off_restores_the_labeled_range(tmp
     ctx.config.media.fine_sampling_enabled = False
     st.analyze_stage(ctx)
     assert moments(ctx) == labeled                                # original ranges back, record gone
-    assert ctx.catalog.conn.execute("SELECT COUNT(*) FROM analysis_cache WHERE analyzer LIKE 'vision_refine:%'").fetchone()[0] == 0
+    n_rows = lambda: ctx.catalog.conn.execute("SELECT COUNT(*) FROM analysis_cache WHERE analyzer LIKE 'vision_refine:%'").fetchone()[0]
+    assert n_rows() == 3                                          # rows are kept while off: toggling back on re-pays nothing
+    calls = len(tr.refine_calls)
+    ctx.config.media.fine_sampling_enabled = True
+    res = st.analyze_stage(ctx)
+    assert len(tr.refine_calls) == calls and res.summary["fine_sampling"]["from_cache"] == 3 and any("refinement" in m for m in moments(ctx).values())
 
 
 def test_changing_the_fine_settings_re_asks_and_prunes_the_old_rows(tmp_path, monkeypatch):
@@ -358,7 +364,7 @@ def test_extraction_failure_keeps_the_original_and_is_reported(tmp_path, monkeyp
     real = fr.extract_segment_frames
     monkeypatch.setattr(fr, "extract_segment_frames", lambda f, src, seg, *a, **k: "ffmpeg failed: boom" if seg["segment_id"].startswith("moment_") else real(f, src, seg, *a, **k))
     res = st.analyze_stage(ctx)
-    assert res.status == Status.PARTIAL and tr.refine_calls == [] and res.summary["fine_sampling"]["failed"] == 3
+    assert res.status == Status.PARTIAL and tr.refine_calls == [] and res.summary["fine_sampling"]["failed"] == 3 and res.summary["fine_sampling"]["rejected"] == 0
 
 
 def test_endpoint_without_images_is_refused(tmp_path, monkeypatch):
@@ -404,3 +410,27 @@ def test_planning_view_sees_refined_ranges_and_its_fingerprint_changes(tmp_path,
     assert after.fingerprint() != before.fingerprint()
     from trip_vlog.planning.pipeline import plan_inputs
     assert plan_inputs(ctx)["catalog"] == after.fingerprint()
+
+
+def test_too_short_answer_is_cached_not_evicted_and_not_asked_again(tmp_path, monkeypatch):
+    ctx, tr, segs, _ = stage_setup(tmp_path, monkeypatch)
+    tr.refine = refine_answer()
+    monkeypatch.setattr(rf, "MIN_REFINED_SECONDS", 50.0)      # any range is "too short"
+    res = st.analyze_stage(ctx)
+    fine = res.summary["fine_sampling"]
+    assert res.status == Status.SUCCEEDED and fine["unchanged"] == 3 and fine["rejected"] == 0
+    m = next(iter(moments(ctx).values()))
+    assert m["refinement"]["applied"] is False and "less than" in m["refinement"]["reason"]
+    assert list((ctx.workspace.root / "cache" / "llm").glob("*.json"))      # the reply stays cached
+    n = len(tr.refine_calls)
+    st.analyze_stage(ctx)
+    assert len(tr.refine_calls) == n
+
+
+def test_moments_without_room_for_windows_are_counted_as_skipped(tmp_path, monkeypatch):
+    ctx, tr, _, _ = stage_setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(rf, "plan_windows", lambda *a, **k: None)
+    res = st.analyze_stage(ctx)
+    fine = res.summary["fine_sampling"]
+    assert fine["skipped"] == 3 and fine["skipped_reasons"] == {"no room for the boundary windows": 3} and tr.refine_calls == []
+    assert res.status == Status.SUCCEEDED

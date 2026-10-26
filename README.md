@@ -376,11 +376,12 @@ trip-vlog analyze --output C:\vlogs\lisbon --media D:\Trips\Lisbon --limit 3 --s
   a neighbour. A second request (prompt `boundary_refine.v1` on top of `media_analyst.v1`, schema `schemas/boundary_refine_response.schema.json`, same `llm.vision` profile,
   so `llm-check` already covers it) shows those frames, each announced with its time, and asks only for the first frame to keep in the start window and the last frame to
   keep in the end window, as frame indices; `null` keeps the current boundary. The code converts indices to frame-rounded seconds, clamps them to the windows and the
-  asset and keeps the labeled range when a reply is invalid (out-of-range index, result shorter than 0.5 s, moment missing); such a reply is not cached and is asked again by
-  the next run. The refined range becomes the moment's `source_in/out_seconds` - what selection, planning and validation read, so their cache keys change with it -
+  asset and keeps the labeled range when a reply is invalid (out-of-range index, moment missing); such a reply is not cached and is asked again by
+  the next run. Indices that would leave a range under 0.5 s count as "no better boundary" (cached, `refinement.reason` says why). Selected moments with no room for the windows are
+  counted under `fine_sampling.skipped` in the summary. The refined range becomes the moment's `source_in/out_seconds` - what selection, planning and validation read, so their cache keys change with it -
   and the labeled range, the windows, the frame artifacts (`media_index/analysis/fine/`, or `fine_sheets/` with `vision_input: contact_sheet`) and the indices stay in the
   moment's `refinement` record. Refinements are cached per moment by labeled range, prompt/schema, model, endpoint params and the fine settings; turning the option off restores
-  the labeled ranges. `--dry-run` prints the settings but cannot count candidates before labeling. The summary in `manifest.json` has a `fine_sampling` block; moments that
+  the labeled ranges and keeps the cached refinements, so turning it back on re-asks nothing (stale rows are pruned only while it is on). `--dry-run` prints the settings but cannot count candidates before labeling. The summary in `manifest.json` has a `fine_sampling` block; moments that
   could not be refined make the stage `partial`. Moments shorter than 1 s are not refined. Not verified with a real model yet (see DESIGN Phase 7c).
 - **Photos**: near-duplicates are found with a 64-bit dHash (Pillow only; `media.photo_duplicate_distance`, default 6 bits) and share a `duplicate_group` on their moments.
 - **Caching**: a label is cached per segment by asset content version, segment bounds, prompt id/version/text hash, schema hash, model, endpoint `api`/`params`, sampling

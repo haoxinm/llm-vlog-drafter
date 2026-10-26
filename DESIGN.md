@@ -1534,10 +1534,13 @@ model.
     a schema-valid but unusable one is evicted), `media.local_only`,
     `llm-check` and the 3-consecutive-400s breaker apply (the breaker
     counts successes of the labeling requests of the same run too).
--   *Clamping:* an index outside the frames shown, a non-integer, a
-    missing moment or a result shorter than 0.5 s makes that moment keep
-    its labeled range (not cached, asked again next run); the range is
-    always inside the windows and the asset.
+-   *Clamping:* an index outside the frames shown, a non-integer or a
+    missing moment makes that moment keep its labeled range (not cached,
+    response evicted, asked again next run). Two valid indices that
+    would leave under 0.5 s are a cached "no better boundary" answer
+    (`applied: false`, with a `reason`). The range is always inside the
+    windows and the asset. Selected moments with no room for windows
+    are counted in the summary's `fine_sampling.skipped`.
 -   *Storage:* the refined range replaces `source_in/out_seconds` of the
     moment (the table columns and `moments.jsonl`), so selection,
     planning, validation and every cache key that fingerprints the
@@ -1550,7 +1553,8 @@ model.
     (fps, cap, image size, `FRAMES_VERSION`, sheet version), window span
     and input mode; the selection settings are in the stage input hash
     but not in the item key. Turning the option off rebuilds the moments
-    from the labels and prunes the rows.
+    from the labels but keeps the rows (toggling back on re-pays
+    nothing); stale rows are pruned only while it is on.
 
 Runbook items for the first live run (not automated): (1) on a real
 trip with `fine_sampling_enabled`, compare refined and labeled ranges in
