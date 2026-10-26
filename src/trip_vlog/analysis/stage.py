@@ -18,6 +18,7 @@ from typing import Any, Callable
 
 from trip_vlog.analysis import frames as fr
 from trip_vlog.analysis import photos as ph
+from trip_vlog.analysis import refine as rf
 from trip_vlog.analysis.labels import labeled_moment, unlabeled_moment
 from trip_vlog.analysis.vision import Item, Labeler, VisionSettings, make_batches
 from trip_vlog.llm.factory import make_gateway
@@ -101,7 +102,16 @@ def dry_run_report(ctx: Any, limit: int | None = None) -> dict[str, Any]:
         "frames": sum(len(i.frames) for i in tv), "input": s.input_mode,
         "images": sum(i.n_images for i in [*tv, *tp]), "requests": len(batches_v) + len(batches_p),
         "batch_max_images": s.batch_max_images, "sampling_fps": s.sampling.fps, "max_frames_per_segment": s.sampling.max_frames,
+        "fine_sampling": _fine_plan(ctx.config, s),
     }
+
+
+def _fine_plan(cfg: Any, s: VisionSettings) -> dict[str, Any] | None:
+    rs = rf.RefineSettings.from_config(cfg, s)
+    if not rs.enabled:
+        return None
+    return {"fps": rs.sampling.fps, "window_seconds": rs.window_seconds, "min_score": rs.min_score, "max_per_asset": rs.max_per_asset,
+            "max_moments": rs.max_moments}
 
 
 def format_dry_run(rep: dict[str, Any]) -> str:
@@ -115,6 +125,11 @@ def format_dry_run(rep: dict[str, Any]) -> str:
         f"  images to send        : {rep['images']} ({rep['input']} for videos, one image per photo)",
         f"  requests              : {rep['requests']} (up to {rep['batch_max_images']} images each)",
     ]
+    fine = rep.get("fine_sampling")
+    if fine:
+        lines.append(f"  fine sampling         : after labeling, moments with interest >= {fine['min_score']:g} (at most {fine['max_per_asset']} per asset, "
+                     f"{fine['max_moments']} per run) are resampled at {fine['fps']:g} fps within {fine['window_seconds']:g} s of each boundary "
+                     f"and refined with one more request per batch (counts are known only after labeling)")
     if rep["where"] == "remote" and rep["images"]:
         lines.append("  note: the images above would leave this machine for the remote endpoint")
     if not rep["supports_images"] and rep["images"]:
@@ -130,7 +145,8 @@ def analyze_inputs(ctx: Any) -> Any:
     return {"assets": [(r["asset_id"], r["content_version"], r["media_type"]) for r in _eligible(cat, ctx.data.get("analyze_limit"))],
             "segments": [(r["segment_id"], r["content_version"]) for r in cat.list_segments()],
             "keys": [s.cache_key("video"), s.cache_key("photo")], "dup": s.duplicate_distance,
-            "tx": _transcript_digest(ctx, s), "limit": ctx.data.get("analyze_limit")}
+            "tx": _transcript_digest(ctx, s), "limit": ctx.data.get("analyze_limit"),
+            "fine": rf.RefineSettings.from_config(ctx.config, s).stage_key()}
 
 
 def _transcript_digest(ctx: Any, s: VisionSettings) -> str | None:
@@ -174,9 +190,8 @@ def analyze_stage(ctx: Any) -> StageResult:
     limit = ctx.data.get("analyze_limit")
     work = build_work(ctx, limit)
     s = work.settings
+    rs = rf.RefineSettings.from_config(cfg, s)
     warnings: list[str] = []
-    if cfg.media.fine_sampling_enabled:
-        warnings.append("media.fine_sampling_enabled is not implemented yet and is ignored")
     todo_v, todo_p = work.todo("video"), work.todo("photo")
     if (todo_v or todo_p) and not s.supports_images:
         raise LLMConfigError(f"endpoint {s.endpoint!r} has supports_images: false; point llm.vision at a vision-capable profile")
@@ -204,14 +219,23 @@ def analyze_stage(ctx: Any) -> StageResult:
                                                           "model": it.model, "kind": it.kind})
         cat.upsert_moments(aid, cv, [_moment(it, s, None)])
 
+    gws: list[Gateway] = []
+
+    def gateway() -> Gateway:
+        if not gws:
+            gws.append((gateway_factory or _default_gateway)(ctx))
+        return gws[0]
+
+    rst: rf.RefineStats | None = None
     try:
         if todo_v or todo_p:
-            gw = (gateway_factory or _default_gateway)(ctx)
-            lab = Labeler(gw, s, root, prepare=prepare, accept=accept, logger=ctx.logger)
+            lab = Labeler(gateway(), s, root, prepare=prepare, accept=accept, logger=ctx.logger)
             if todo_v:
                 lab.run(todo_v, "video")
             if todo_p:
                 lab.run(todo_p, "photo")
+        if rs.enabled:
+            rst = _refine(ctx, work, rs, gateway, lab._answered if lab else 0)
         fallback = _finalize(ctx, work)
     finally:
         n_exported = cat.export_moments_jsonl(ws.moments_jsonl)
@@ -227,20 +251,75 @@ def analyze_stage(ctx: Any) -> StageResult:
         "input_tokens": st.usage.input_tokens if st else 0, "output_tokens": st.usage.output_tokens if st else 0,
         "moments_exported": n_exported, "elapsed_seconds": round(time.perf_counter() - t0, 3),
     }
-    if st and st.errors:
-        summary["errors"] = st.errors[:MAX_ERRORS_IN_SUMMARY]
-        summary["error_count"] = len(st.errors)
+    errors = [*(st.errors if st else []), *(rst.errors if rst else [])]
+    if rst is not None:
+        summary["fine_sampling"] = {
+            "fps": rs.sampling.fps, "window_seconds": rs.window_seconds, "min_score": rs.min_score, "candidates": rst.candidates,
+            "from_cache": rst.cached, "requests": rst.requests, "response_cache_hits": rst.cache_hits, "refined": rst.refined,
+            "unchanged": rst.unchanged, "rejected": rst.rejected, "failed": len(rst.errors) - rst.rejected,
+            "input_tokens": rst.usage.input_tokens, "output_tokens": rst.usage.output_tokens}
+        if rst.errors:
+            warnings.append(f"fine sampling could not refine {len(rst.errors)} moment(s); they keep their labeled range and are retried by the next run")
+    if errors:
+        summary["errors"] = errors[:MAX_ERRORS_IN_SUMMARY]
+        summary["error_count"] = len(errors)
     if warnings:
         summary["warnings"] = warnings
     return StageResult(Status.PARTIAL if (fallback or warnings) else Status.SUCCEEDED, summary)
 
 
-def _moment(it: Item, s: VisionSettings, dup_group: str | None) -> dict[str, Any]:
+def _moment(it: Item, s: VisionSettings, dup_group: str | None, *, refined: bool = True) -> dict[str, Any]:
     if it.label is None:
         return _with_refs(it, unlabeled_moment(it.baseline, it.error, dup_group))
     sheet = it.sheet
-    return _with_refs(it, labeled_moment(it.baseline, it.seg, it.label, frames=it.frames, content_version=it.asset["content_version"],
-                                         model=it.model, prompt=s.prompt_info(it.kind), contact_sheet=sheet, duplicate_group=dup_group))
+    m = labeled_moment(it.baseline, it.seg, it.label, frames=it.frames, content_version=it.asset["content_version"],
+                       model=it.model, prompt=s.prompt_info(it.kind), contact_sheet=sheet, duplicate_group=dup_group)
+    return _with_refs(it, rf.apply_refinement(m, it.refinement) if refined else m)
+
+
+def _refine(ctx: Any, work: Work, rs: rf.RefineSettings, gateway: Callable[[], Gateway], answered: int) -> rf.RefineStats:
+    """Fine sampling (DESIGN §7.2 step 5): pick the best-scoring labeled video moments, reuse cached refinements, and ask for the rest.
+    Every item gets `refine_key` (so its cache row survives a lower cap) and, when selected and refined, `refinement`."""
+    cat = ctx.catalog
+    pool: list[tuple[Item, float, float, float]] = []
+    for it in work.videos:
+        it.refinement = it.refine_key = None
+        if it.label is None:
+            continue
+        m = _moment(it, work.settings, None, refined=False)
+        a, b = m.get("source_in_seconds"), m.get("source_out_seconds")
+        if rf.eligible(it, a, b):
+            it.refine_key = rs.item_key(a, b)
+            pool.append((it, float(it.label["interest"]), a, b))
+    ranges = {id(p[0]): (p[2], p[3]) for p in pool}
+    chosen = rf.select([(p[0], p[1]) for p in pool], rs)
+    todo: list[rf.RefineItem] = []
+    cached = 0
+    for it in chosen:
+        aid, cv = it.asset["asset_id"], it.asset["content_version"]
+        rec = cat.cache_get(aid, rf.REFINE_ANALYZER + it.sid, it.refine_key, cv)
+        if rec is not None:
+            it.refinement, cached = rec, cached + 1
+            continue
+        ri = rf.make_refine_item(it, rs, *ranges[id(it)])
+        if ri.windows is None:
+            continue
+        rf.plan_frames(ri, rs)
+        todo.append(ri)
+
+    def accept(ri: rf.RefineItem) -> None:
+        it = ri.item
+        rec = rf.make_record(ri, rs, ri.model)
+        cat.cache_put(it.asset["asset_id"], rf.REFINE_ANALYZER + it.sid, ri.key, it.asset["content_version"], rec)
+        it.refinement = rec
+        cat.upsert_moments(it.asset["asset_id"], it.asset["content_version"], [_moment(it, work.settings, None)])
+
+    stats = rf.RefineStats(candidates=len(chosen), cached=cached)
+    if todo:
+        if not rs.supports_images:
+            raise LLMConfigError(f"endpoint {rs.endpoint!r} has supports_images: false; point llm.vision at a vision-capable profile")
+        rf.Refiner(gateway(), rs, ctx.workspace.root, ctx.ffmpeg, accept=accept, logger=ctx.logger, answered=answered, stats=stats).run(todo)
+    return stats
 
 
 def _with_refs(it: Item, m: dict[str, Any]) -> dict[str, Any]:
@@ -294,6 +373,7 @@ def _finalize(ctx: Any, work: Work) -> int:
                  if r["moment_id"] not in current and json.loads(r["data_json"] or "{}").get("source") == "llm"]
         cat.delete_moments(stale)
         cat.prune_cache(aid, ANALYZER, keys)
+        cat.prune_cache(aid, rf.REFINE_ANALYZER, {it.refine_key for it in items if it.refine_key})
         if all(it.label is not None for it in items):
             cat.mark_analysis_complete(aid)
     return fallback

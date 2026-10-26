@@ -110,6 +110,11 @@ class MediaConfig(_Model):
     vision_sampling_fps: float = Field(1.0, gt=0, le=30)
     fine_sampling_fps: float = Field(4.0, gt=0, le=60)
     fine_sampling_enabled: bool = False
+    # Phase 7c boundary refinement (DESIGN §7.2 step 5); only read while fine_sampling_enabled
+    fine_sampling_min_score: float = Field(0.7, ge=0, le=1)        # a labeled moment is refined when its `interest` is at least this
+    fine_sampling_window_seconds: float = Field(1.0, gt=0, le=10)  # span either side of each boundary that is resampled (clipped to the segment)
+    fine_sampling_max_per_asset: int = Field(3, ge=1, le=50)       # most moments refined per asset (highest interest first)
+    fine_sampling_max_moments: int = Field(30, ge=1, le=1000)      # most moments refined per run
     segment_window_seconds: float = Field(6.0, gt=0, le=120)
     transcribe_speech: bool | None = None  # DEPRECATED alias of speech.enabled; folded into it at load time (see Config._speech_alias)
     local_only: bool = False       # true: every LLM endpoint used for text and vision must be loopback (see `llm.endpoints`)
