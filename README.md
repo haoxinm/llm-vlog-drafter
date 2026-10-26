@@ -359,7 +359,7 @@ trip-vlog analyze --output C:\vlogs\lisbon --media D:\Trips\Lisbon --limit 3 --s
   (one process per segment, accurate seek, orientation corrected, longest side `llm.image_max_side`). More than `media.vision_max_frames_per_segment` (default 8) frames
   are thinned evenly, keeping the first and last. Frames live in `media_index/analysis/frames/<asset>/` under names derived from the content version and the sampling
   settings; per-segment contact sheets (labelled with segment ID, frame index and timestamp) in `media_index/analysis/sheets/`.
-  `media.fine_sampling_enabled` / `fine_sampling_fps` (denser resampling around the best part) are **not implemented yet** and only produce a warning.
+  `media.fine_sampling_enabled` turns on the optional boundary refinement below (off by default).
 - **What the model receives** (`media.vision_input`): `frames` (default; one image per sampled frame, each announced by a text line with segment ID, frame index and
   source time, better grounding) or `contact_sheet` (one grid image per segment, cheaper). Segments are batched up to `media.vision_batch_max_images` (default 16)
   images and the endpoint's `max_tokens`; a segment's frames are never split across requests. Photos are sent one image each, batched the same way.
@@ -369,6 +369,19 @@ trip-vlog analyze --output C:\vlogs\lisbon --media D:\Trips\Lisbon --limit 3 --s
 - **Validation and fallback**: unknown segment IDs are ignored, out-of-range or reversed `best_frames` reject that item (recorded in `logs/errors.jsonl`), the rest of the
   reply is kept. Missing or rejected items are re-asked once (fresh request, bypassing the response cache); what still fails keeps its deterministic baseline moment with
   `labeled: false` and `label_error`, and is retried by the next `analyze`. A fatal endpoint error (auth, connection, config) stops the stage; finished batches are kept.
+- **Fine sampling refinement** (`media.fine_sampling_enabled: true`, off by default; it costs one extra request per batch of moments): after labeling, each video moment with
+  `interest >= media.fine_sampling_min_score` (default 0.7; at most `fine_sampling_max_per_asset` = 3 per asset and `fine_sampling_max_moments` = 30 per run, best first)
+  is resampled at `media.fine_sampling_fps` (default 4.0, must be >= `vision_sampling_fps`) in a window of `media.fine_sampling_window_seconds` (default 1.0) either side of
+  its start and of its end. The windows are clipped to the moment's own segment and the asset and never overlap, so a refined moment never leaves its segment or reaches into
+  a neighbour. A second request (prompt `boundary_refine.v1` on top of `media_analyst.v1`, schema `schemas/boundary_refine_response.schema.json`, same `llm.vision` profile,
+  so `llm-check` already covers it) shows those frames, each announced with its time, and asks only for the first frame to keep in the start window and the last frame to
+  keep in the end window, as frame indices; `null` keeps the current boundary. The code converts indices to frame-rounded seconds, clamps them to the windows and the
+  asset and keeps the labeled range when a reply is invalid (out-of-range index, result shorter than 0.5 s, moment missing); such a reply is not cached and is asked again by
+  the next run. The refined range becomes the moment's `source_in/out_seconds` - what selection, planning and validation read, so their cache keys change with it -
+  and the labeled range, the windows, the frame artifacts (`media_index/analysis/fine/`, or `fine_sheets/` with `vision_input: contact_sheet`) and the indices stay in the
+  moment's `refinement` record. Refinements are cached per moment by labeled range, prompt/schema, model, endpoint params and the fine settings; turning the option off restores
+  the labeled ranges. `--dry-run` prints the settings but cannot count candidates before labeling. The summary in `manifest.json` has a `fine_sampling` block; moments that
+  could not be refined make the stage `partial`. Moments shorter than 1 s are not refined. Not verified with a real model yet (see DESIGN Phase 7c).
 - **Photos**: near-duplicates are found with a 64-bit dHash (Pillow only; `media.photo_duplicate_distance`, default 6 bits) and share a `duplicate_group` on their moments.
 - **Caching**: a label is cached per segment by asset content version, segment bounds, prompt id/version/text hash, schema hash, model, endpoint `api`/`params`, sampling
   settings (fps, frame cap, image size) and `vision_input`; the gateway's response cache sits underneath. Re-runs send nothing; changing only the target duration or

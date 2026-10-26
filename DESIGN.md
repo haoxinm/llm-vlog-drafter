@@ -242,6 +242,10 @@ media:
   vision_sampling_fps: 1.0       # frames per second sent to the vision model
   fine_sampling_fps: 4.0         # optional dense pass for boundary refinement
   fine_sampling_enabled: false
+  fine_sampling_min_score: 0.7   # Phase 7c: moments with interest >= this are refined
+  fine_sampling_window_seconds: 1.0
+  fine_sampling_max_per_asset: 3
+  fine_sampling_max_moments: 30
   segment_window_seconds: 6.0    # max length of a deterministic candidate segment
   transcribe_speech: true
   local_only: false              # every LLM endpoint used must be loopback (§22)
@@ -1419,8 +1423,8 @@ ships with tests like any other phase. Deliver:
 -   **Fine sampling refinement (§7.2 step 5):** when
     `fine_sampling_enabled`, resample at `fine_sampling_fps` around the
     best-frame boundaries of high-scoring moments and tighten them with
-    a second, smaller request (own prompt, schema and cache). Phase 3
-    ships without it; enabling it only adds a warning.
+    a second, smaller request (own prompt, schema and cache). *Status:
+    done (Phase 7c), see the note below; Phase 3 shipped without it.*
 -   **Captions and subtitles from transcripts (§13.4):** captions only
     from transcript text, never paraphrased, exported in a form the
     handoff can carry (e.g. an SRT alongside the timeline) and verified
@@ -1492,6 +1496,75 @@ through a transcript segment (the estimated word positions); (4) hand
 edit a plan on Windows with Notepad (BOM) and `reseal` it; (5) kill a
 `resume` during a FilmCraft build and confirm the next run builds the
 next version and `status` lists the failed one.
+
+**Phase 7c status (fine sampling refinement, §7.2 step 5).** Built and
+covered by unit tests, a stub vision transport with real ffmpeg frame
+extraction on the generated clips; nothing here was run against a real
+model.
+
+-   *Where:* `analysis/refine.py`, called from the `analyze` stage after
+    labeling (and after any cached labels are loaded). Off unless
+    `media.fine_sampling_enabled`; the former "not implemented" warning
+    is gone.
+-   *Which moments:* labeled video moments of at least 1 s with
+    `interest >= fine_sampling_min_score`, best first (ties by
+    confidence, then ID), at most `fine_sampling_max_per_asset` per
+    asset and `fine_sampling_max_moments` per run. The cached refinement
+    of a moment outside the selection is ignored, not deleted.
+-   *Windows:* `fine_sampling_window_seconds` either side of the
+    moment's start and of its end, in integer frames, clipped to the
+    moment's segment and the asset and split at the moment's midpoint so
+    the two never overlap. Decision: clipping to the segment (stricter
+    than "the asset") keeps a refined moment from reaching into a
+    neighbouring scene cut or overlapping the neighbouring moment.
+    Frames are sampled with the existing sampler at `fine_sampling_fps`
+    (capped per window by `vision_max_frames_per_segment` and half of
+    `vision_batch_max_images`) and extracted by the existing extractor
+    (same seek formula and `FRAMES_VERSION`) into
+    `media_index/analysis/fine/`; with `vision_input: contact_sheet` one
+    sheet per window goes to `fine_sheets/`. Original media is only read.
+-   *Request:* prompt `boundary_refine.v1` (front matter version) on top
+    of `media_analyst.v1`, schema `schemas/boundary_refine_response.schema.json`
+    (strict: `moment_id`, `start_frame_index`, `end_frame_index`, both
+    nullable). Like labeling, the model names frame indices, not
+    seconds; an index stands for the stretch halfway to its neighbours
+    (the `best_frames` rule). No file names or other media text are sent.
+    It uses the `llm.vision` profile through `make_gateway`, so
+    record/replay, the response cache (which never stores failed replies;
+    a schema-valid but unusable one is evicted), `media.local_only`,
+    `llm-check` and the 3-consecutive-400s breaker apply (the breaker
+    counts successes of the labeling requests of the same run too).
+-   *Clamping:* an index outside the frames shown, a non-integer, a
+    missing moment or a result shorter than 0.5 s makes that moment keep
+    its labeled range (not cached, asked again next run); the range is
+    always inside the windows and the asset.
+-   *Storage:* the refined range replaces `source_in/out_seconds` of the
+    moment (the table columns and `moments.jsonl`), so selection,
+    planning, validation and every cache key that fingerprints the
+    planning catalog use it unchanged; the labeled range, windows,
+    frame artifacts, indices, model and prompt are in the moment's
+    `refinement` record (`version`, `applied`, `original_*`,
+    `refined_*`). The record is cached in `analysis_cache`
+    (`vision_refine:<segment>`) under a key of the labeled range, prompt
+    and schema hashes, model, endpoint params, fine sampling settings
+    (fps, cap, image size, `FRAMES_VERSION`, sheet version), window span
+    and input mode; the selection settings are in the stage input hash
+    but not in the item key. Turning the option off rebuilds the moments
+    from the labels and prunes the rows.
+
+Runbook items for the first live run (not automated): (1) on a real
+trip with `fine_sampling_enabled`, compare refined and labeled ranges in
+the contact sheets / a preview: do the new cuts drop the blur, the
+camera swing and the dead frames, and is nothing good lost; (2) check
+the model really uses the null answer when the boundary is already
+good (the share of `applied: false`), and that start/end frame indices
+are not biased towards the first or last frame; (3) try `fine_sampling_fps`
+2 / 4 / 8 and the window 0.5 / 1 / 2 s for cost against quality; (4)
+check `contact_sheet` input against `frames` for index accuracy; (5)
+check the moment is not made too short for the planner (the 0.5 s
+floor) and that the extra requests fit the
+endpoint's image-count and rate limits; (6) with a local endpoint,
+confirm nothing leaves the machine (`media.local_only`).
 
 ## 21. Suggested repository structure
 

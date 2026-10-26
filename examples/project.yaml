@@ -38,8 +38,12 @@ media:
   fingerprint: "fast"            # fast | sha256
   proxy_policy: "on_demand"      # on_demand | always | never
   vision_sampling_fps: 1.0
-  fine_sampling_fps: 4.0
-  fine_sampling_enabled: false
+  fine_sampling_enabled: false       # true: tighten the cut points of high-scoring moments with a second, smaller request (one more request per batch)
+  fine_sampling_fps: 4.0             # frames per second inside the refinement windows (>= vision_sampling_fps)
+  fine_sampling_min_score: 0.7       # only moments whose `interest` is at least this are refined
+  fine_sampling_window_seconds: 1.0  # resampled span either side of each boundary (clipped to the segment)
+  fine_sampling_max_per_asset: 3
+  fine_sampling_max_moments: 30      # most moments refined per run
   vision_max_frames_per_segment: 8   # frames beyond this are thinned evenly
   vision_input: frames               # frames | contact_sheet
   vision_batch_max_images: 16
