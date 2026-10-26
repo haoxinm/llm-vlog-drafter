@@ -390,6 +390,10 @@ class SpeechCommandConfig(_Model):
         return self
 
 
+# 16 kHz mono 16-bit WAV is 32 000 bytes/s, so a hosted service's 25 MB upload limit is hit at about 820 s; 700 s leaves headroom.
+MAX_WAV_CHUNK_SECONDS = 700.0
+
+
 class SpeechConfig(_Model):
     """Optional speech transcription (DESIGN §7.3, §22). Off in effect until a backend is chosen: the default backend is `none`."""
 
@@ -410,6 +414,11 @@ class SpeechConfig(_Model):
             raise ValueError("speech.backend is 'command' but speech.command.executable is not set")
         if self.backend == "command" and not self.command.args:
             raise ValueError("speech.backend is 'command' but speech.command.args is empty (it must contain {input} and {output_dir})")
+        if (self.backend == "openai_transcriptions" and self.audio_format == "wav" and not self.endpoint.is_local
+                and self.chunk_seconds > MAX_WAV_CHUNK_SECONDS):
+            raise ValueError(f"speech.chunk_seconds {self.chunk_seconds:g} would make WAV chunks over the 25 MB upload limit of hosted "
+                             f"transcription services (16 kHz mono WAV is about 1.9 MB per minute); use at most {MAX_WAV_CHUNK_SECONDS:g}, "
+                             "or set speech.audio_format: flac")
         return self
 
     @property

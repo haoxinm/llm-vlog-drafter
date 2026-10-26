@@ -342,3 +342,18 @@ def test_reply_that_fails_label_validation_is_evicted_from_the_response_cache(tm
     assert not first.retry and retry.retry
     # retry requests bypass the cache and the unusable first reply was evicted, so nothing is left to be reused
     assert len(list(cache.glob("*.json"))) == 0
+
+
+def test_flat_photos_are_not_grouped_as_duplicates(tmp_path):
+    from PIL import Image
+
+    from trip_vlog.analysis import photos as ph
+    from trip_vlog.media.ids import asset_id_for
+
+    ctx, tr, _ = setup(tmp_path, photos=3)
+    for i, color in enumerate([(10, 10, 10), (200, 200, 200)]):          # two different blank pictures, p2 stays patterned
+        Image.new("RGB", (64, 48), color).save(ctx.paths.media_root / f"p{i}.jpg")
+    assert ph.dhash_or_flat(ctx.paths.media_root / "p0.jpg") is None and ph.dhash_or_flat(ctx.paths.media_root / "p2.jpg") is not None
+    st.analyze_stage(ctx)
+    groups = {m["asset_id"]: m["duplicate_group"] for m in moments(ctx).values() if m["media_type"] == "image"}
+    assert all(groups[asset_id_for(f"p{i}.jpg")] is None for i in range(3))

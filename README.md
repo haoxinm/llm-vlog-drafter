@@ -336,7 +336,7 @@ speech:
   min_speech_seconds: 1.0        # skip assets with less non-silent audio than this (the segmenter's silence detection)
   audio_format: wav              # wav | flac: the temporary 16 kHz mono file handed to the backend
   keep_audio: false              # true keeps media_index/audio/<asset>/... instead of deleting it after use
-  chunk_seconds: 600             # HTTP backend only: longer audio is uploaded in chunks of this length (25 MB limits, retries)
+  chunk_seconds: 600             # HTTP backend only: longer audio is uploaded in chunks of this length (25 MB limits, retries); with wav and a remote endpoint at most 700
   context_max_chars: 1200        # transcript text per segment shown to the vision model in `analyze`; 0 = never send transcripts there
   endpoint:                      # backend: openai_transcriptions
     base_url: https://api.openai.com
@@ -357,6 +357,9 @@ speech:
     output_format: srt           # srt | vtt | json
     timeout_seconds: 3600
 ```
+
+`chunk_seconds` bounds each upload: 16 kHz mono 16-bit WAV is about 1.9 MB per minute, so against a remote (non-loopback) endpoint with `audio_format: wav` a value above 700 s
+(hosted services reject uploads over 25 MB) is a config error; use `flac` for longer chunks, or a local server, which has no such limit.
 
 **Backends**
 

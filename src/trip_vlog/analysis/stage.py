@@ -257,15 +257,17 @@ def photo_groups(ctx: Any, photos: list[Item], distance: int) -> dict[str, str]:
         aid, cv = it.asset["asset_id"], it.asset["content_version"]
         rec = ctx.catalog.cache_get(aid, PHASH_ANALYZER, PHASH_KEY, cv)
         if rec is not None:
-            hashes[aid] = int(rec["dhash"], 16)
+            if rec["dhash"] is not None:
+                hashes[aid] = int(rec["dhash"], 16)
             continue
         try:
-            h = ph.dhash(it.src)
+            h = ph.dhash_or_flat(it.src)
         except Exception as e:  # noqa: BLE001 - undecodable pictures simply have no duplicate group
             ctx.logger.event("analyze", Status.SKIPPED, asset_id=aid, phase="dhash", message=f"{type(e).__name__}")
             continue
-        ctx.catalog.cache_put(aid, PHASH_ANALYZER, PHASH_KEY, cv, {"dhash": f"{h:016x}"})
-        hashes[aid] = h
+        ctx.catalog.cache_put(aid, PHASH_ANALYZER, PHASH_KEY, cv, {"dhash": None if h is None else f"{h:016x}"})
+        if h is not None:   # a flat picture has no duplicate group
+            hashes[aid] = h
     return ph.group_duplicates(hashes, distance)
 
 
