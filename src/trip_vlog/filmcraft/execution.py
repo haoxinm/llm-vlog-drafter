@@ -238,7 +238,9 @@ def run_build(adapter: "FilmCraftAdapter", spec: TimelineSpec, project_name: str
         if mark_abandoned(doc):
             save_journal(jpath, doc)
         latest = _newest_complete(doc, project_name)
-        if not force_new_version and _is_noop(adapter, latest, spec_hash, sig):
+        version_bound = any(p.fit_source_size for p in spec.placements) or any(p.gain_keys for p in spec.placements)
+        stale_build = version_bound and latest is not None and latest.get("filmcraft_version") != cmap.version
+        if not force_new_version and not stale_build and _is_noop(adapter, latest, spec_hash, sig):
             noop_run = latest
         elif (other := live_builds(doc)):
             o = other[0]
@@ -269,6 +271,8 @@ def run_build(adapter: "FilmCraftAdapter", spec: TimelineSpec, project_name: str
             cur = load_journal(jpath)          # reload: another process may have written its own runs since
             for i, r in enumerate(cur["runs"]):
                 if r.get("version") == version and r.get("project_name") == project_name:
+                    if r.get("abandoned"):     # marked abandoned by `--abandon-running` while it ran: that choice stands
+                        run.update(status="failed", abandoned=True)
                     cur["runs"][i] = run
                     break
             else:

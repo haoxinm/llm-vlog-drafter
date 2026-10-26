@@ -591,3 +591,53 @@ def test_a_failed_later_attempt_does_not_hide_the_newest_complete_build(fc, monk
     res = adapter.build_project(spec)
     assert res.noop and res.version == 1, "the verified v001 still matches; the failed v002 is not rebuilt over"
     assert [r["status"] for r in journal(ws)["runs"]] == ["complete", "failed"]
+
+
+def test_a_build_that_uses_fit_or_ducking_is_rebuilt_after_a_filmcraft_upgrade(fc):
+    adapter, media, ws = fc
+    spec = fcsupport.sample_spec(media)
+    i = next(n for n, p in enumerate(spec.placements) if p.media_kind == "video")
+    fitted = replace(spec, placements=tuple(replace(p, fit_source_size=(3840, 2160)) if n == i else p for n, p in enumerate(spec.placements)))
+    jp = ws / "filmcraft" / "execution_journal.json"
+    for s, rebuilt in ((spec, False), (fitted, True)):
+        first = adapter.build_project(s, force_new_version=True)
+        j = json.loads(jp.read_text(encoding="utf-8"))
+        j["runs"][-1]["filmcraft_version"] = "0.12.0-older"
+        jp.write_text(json.dumps(j), encoding="utf-8")
+        again = adapter.build_project(s)
+        assert again.noop is (not rebuilt) and (again.version != first.version) is rebuilt
+
+
+def test_a_build_marked_abandoned_meanwhile_keeps_that_record(fc, monkeypatch):
+    adapter, media, ws = fc
+    jp = ws / "filmcraft" / "execution_journal.json"
+    orig = adapter.import_media
+
+    def import_after_someone_abandoned_this_build(paths):
+        j = json.loads(jp.read_text(encoding="utf-8"))
+        j["runs"][-1].update(status="failed", abandoned=True)
+        jp.write_text(json.dumps(j), encoding="utf-8")
+        return orig(paths)
+
+    monkeypatch.setattr(adapter, "import_media", import_after_someone_abandoned_this_build)
+    adapter.build_project(fcsupport.sample_spec(media))
+    run = journal(ws)["runs"][-1]
+    assert run["abandoned"] and run["status"] == "failed"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX flock path")
+def test_a_lock_error_that_is_not_contention_is_reported_not_waited_out(tmp_path, monkeypatch):
+    import errno
+    import fcntl
+
+    from trip_vlog.filmcraft import journal_lock as jl
+
+    def no_locks(fd, op):
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(fcntl, "flock", no_locks)
+    t0 = time.monotonic()
+    with pytest.raises(FilmCraftError, match="without file locking"):
+        with jl.journal_lock(tmp_path / "execution_journal.json"):
+            pass
+    assert time.monotonic() - t0 < 1.0

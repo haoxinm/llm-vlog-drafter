@@ -10,6 +10,7 @@ same thread is allowed (it does not lock twice).
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import socket
@@ -90,6 +91,9 @@ _DIAG_OFFSET = 8
 _held = threading.local()            # paths this thread holds: nested use does not lock (and so cannot deadlock) a second time
 
 
+_BUSY = {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}   # held by someone else (Windows reports contention as EACCES)
+
+
 def _try_lock(fd: int) -> bool:
     if os.name == "nt":
         import msvcrt
@@ -97,15 +101,19 @@ def _try_lock(fd: int) -> bool:
         os.lseek(fd, 0, os.SEEK_SET)
         try:
             msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)       # type: ignore[attr-defined]
-        except OSError:
-            return False
+        except OSError as e:
+            if e.errno in _BUSY:
+                return False
+            raise FilmCraftError(f"cannot lock the FilmCraft journal ({e}); is the workspace on a file system without file locking?") from e
         return True
     import fcntl
 
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        return False
+    except OSError as e:
+        if e.errno in _BUSY:
+            return False
+        raise FilmCraftError(f"cannot lock the FilmCraft journal ({e}); is the workspace on a file system without file locking?") from e
     return True
 
 

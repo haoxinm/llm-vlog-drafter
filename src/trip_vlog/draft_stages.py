@@ -355,6 +355,20 @@ def _forget_revision_rules(ctx: Any) -> None:
     ctx.config.set_revision_overrides(None)
 
 
+def _installed_filmcraft_version(ctx: Any) -> str | None:
+    """The version of the FilmCraft CLI that would build now (``--version``, asked once per run), so an in-place upgrade changes the assemble key.
+    Falls back to the version the last build recorded when the CLI cannot be found or asked."""
+    if "filmcraft_installed_version" not in ctx.data:
+        from trip_vlog.filmcraft import discovery
+
+        try:
+            found = discovery.find_filmcraft_cli(ctx.config.filmcraft.executable)
+            ctx.data["filmcraft_installed_version"] = discovery.read_version(found.path)[0]
+        except Exception:  # noqa: BLE001 - only a cache key: the build itself reports a missing CLI
+            ctx.data["filmcraft_installed_version"] = (ctx.manifest.get("filmcraft") or {}).get("version")
+    return ctx.data["filmcraft_installed_version"]
+
+
 def _assemble_inputs(ctx: Any) -> Any:
     c = ctx.config.filmcraft
     d: dict[str, Any] = {"plan": plan_file_hash(_pp(ctx).edit_plan),
@@ -365,7 +379,7 @@ def _assemble_inputs(ctx: Any) -> Any:
         d["fit"] = True
     if c.fit_mixed_aspect or c.duck_music:
         # what FilmCraft does with clip.fitToFrame and Volume keyframes depends on its build
-        d["filmcraft_version"] = (ctx.manifest.get("filmcraft") or {}).get("version")
+        d["filmcraft_version"] = _installed_filmcraft_version(ctx)
     if c.duck_music:
         d["duck"] = [c.duck_mode, c.duck_db, c.duck_ramp_seconds, c.duck_merge_gap_seconds, ctx.config.qc.audio_active_ratio_min,
                      stable_hash({a: [(t.start, t.end, t.text, t.coarse) for t in ts] for a, ts in sorted(_qc_transcripts(ctx).items())})]

@@ -214,9 +214,21 @@ def test_assemble_cache_key_carries_the_filmcraft_version_only_with_framing_or_d
                     duck_music=False, duck_mode="speech", duck_db=-12, duck_ramp_seconds=0.3, duck_merge_gap_seconds=1.0)
         base.update(fc)
         return NS(config=NS(filmcraft=NS(**base), qc=NS(audio_active_ratio_min=0.5)), catalog=NS(list_assets=lambda: []),
-                  manifest={"filmcraft": {"version": version}})
+                  manifest={"filmcraft": {"version": version}}, data={})
 
     assert D._assemble_inputs(ctx("0.13.0")) == D._assemble_inputs(ctx("0.14.0"))           # off: the existing cache stays valid
     assert "filmcraft_version" not in D._assemble_inputs(ctx("0.13.0"))
     for on in ({"fit_mixed_aspect": True}, {"duck_music": True}):
         assert D._assemble_inputs(ctx("0.13.0", **on)) != D._assemble_inputs(ctx("0.14.0", **on))
+
+
+def test_assemble_cache_key_uses_the_installed_filmcraft_not_the_last_recorded_build(monkeypatch):
+    from types import SimpleNamespace as NS
+
+    from trip_vlog import draft_stages as D
+    from trip_vlog.filmcraft import discovery
+
+    monkeypatch.setattr(discovery, "find_filmcraft_cli", lambda configured=None, **k: NS(path="fc", source="config"))
+    monkeypatch.setattr(discovery, "read_version", lambda exe, timeout=20.0: ("0.14.0", "filmcraft-cli 0.14.0"))
+    ctx = NS(config=NS(filmcraft=NS(executable="fc")), manifest={"filmcraft": {"version": "0.13.0"}}, data={})
+    assert D._installed_filmcraft_version(ctx) == "0.14.0"
