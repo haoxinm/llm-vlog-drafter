@@ -31,7 +31,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from trip_vlog.filmcraft.adapter import FilmCraftAdapter
 
 JOURNAL_SCHEMA = 1
-_VERSION_RE = re.compile(r"_v(\d{3,})\.fcproj$")
+_VERSION_RE = re.compile(r"_v(\d{3,})\.(?:fcproj|timeline_spec\.json)$")   # the project and its spec copy: either one reserves the number
 
 
 @dataclass
@@ -113,6 +113,35 @@ def next_version(doc: dict[str, Any], fc_dir: Path, project_name: str) -> int:
     return max(seen, default=0) + 1
 
 
+def mark_abandoned(doc: dict[str, Any]) -> list[int]:
+    """A run still marked ``running`` when a new build starts was cut off (the process was killed, the machine lost power): mark it ``failed``
+    (``abandoned``) so it is never taken for the current project. Its files are not touched. Returns the versions marked. One trip-vlog
+    process per workspace is supported, so nothing else can be building."""
+    out: list[int] = []
+    for r in doc["runs"]:
+        if r.get("status") == "running":
+            r["status"] = "failed"
+            r["abandoned"] = True
+            r["finished_at"] = r.get("finished_at") or utc_now_iso()
+            r.setdefault("errors", []).append({"at": utc_now_iso(), "op": (r.get("completed_ops") or ["start"])[-1], "type": "Interrupted",
+                                               "message": "the build did not finish (the process stopped before it could record a result)"})
+            out.append(r["version"])
+    return out
+
+
+def failed_builds(doc: dict[str, Any], project_name: str) -> list[dict[str, Any]]:
+    """The builds of ``project_name`` that did not complete, oldest first, as small records for the manifest, ``status`` and the handoff report.
+    A run still marked ``running`` is listed as ``interrupted`` (it is only mutated by the next build). Nothing here deletes or renames a file."""
+    out = []
+    for r in _runs_for(doc, project_name):
+        if r.get("status") == "complete":
+            continue
+        err = (r.get("errors") or [{}])[-1]
+        out.append({"version": r["version"], "project": r.get("project_path"), "status": "interrupted" if (r.get("status") == "running" or r.get("abandoned")) else "failed",
+                    "failed_at_op": err.get("op"), "error": str(err.get("message") or "")[:300] or None, "at": r.get("finished_at") or r.get("started_at")})
+    return out
+
+
 def latest_complete_project(adapter: "FilmCraftAdapter") -> Path | None:
     doc = load_journal(adapter.journal_path)
     for r in reversed(_runs_for(doc, adapter.config.project_name)):
@@ -152,6 +181,8 @@ def run_build(adapter: "FilmCraftAdapter", spec: TimelineSpec, project_name: str
     fc_dir.mkdir(parents=True, exist_ok=True)
     jpath = adapter.journal_path
     doc = load_journal(jpath)
+    if mark_abandoned(doc):
+        save_journal(jpath, doc)
     spec_hash = spec.spec_hash()
     sig = media_signature(spec.asset_paths)
     runs = _runs_for(doc, project_name)

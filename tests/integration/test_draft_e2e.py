@@ -233,3 +233,35 @@ def test_interrupted_assemble_resumes_without_duplicate_clips(tmp_path, media, m
     finally:
         ad.close()
     assert rj(ws / "preview" / "qc_report.json")["status"] in ("pass", "warn")
+
+
+@needs_fc
+def test_failed_assembly_is_marked_listed_and_kept_out_of_resume_and_handoff(tmp_path, media, monkeypatch, capsys):
+    from trip_vlog import draft_stages as ds
+
+    ws = tmp_path / "ws"
+    before = hash_tree(media)
+    orig = FilmCraftAdapter.create_sequence
+    monkeypatch.setattr(FilmCraftAdapter, "create_sequence", lambda self, settings: (_ for _ in ()).throw(RuntimeError("simulated crash after import")))
+    res = draft(media, ws, **{"workflow.approval": "auto_approve", "filmcraft.executable": CLI})
+    assert res.exit_code == 1 and res.stage_status["assemble"] == "failed"
+    m = rj(ws / "manifest.json")
+    (fv,) = m["filmcraft"]["failed_versions"]
+    assert fv["version"] == 1 and fv["status"] == "failed" and fv["failed_at_op"] == "create_sequence" and "simulated crash" in fv["error"]
+    assert m["stages"]["assemble"]["summary"]["failed_version"] == 1
+    partial = ws / fv["project"]
+    assert partial.is_file(), "the partial project is kept for inspection"
+    assert not (ws / "resolve_handoff").exists() or not (ws / "resolve_handoff" / "handoff_report.md").exists()
+    assert cli.main(["status", "--output", str(ws)]) == 0
+    out = capsys.readouterr().out
+    assert "failed build v1" in out and "kept but not used" in out
+    monkeypatch.setattr(FilmCraftAdapter, "create_sequence", orig)
+    assert cli.main(["resume", "--output", str(ws)]) == 0
+    partial_bytes = partial.read_bytes()
+    m = rj(ws / "manifest.json")
+    assert m["filmcraft"]["project_version"] == 2 and [f["version"] for f in m["filmcraft"]["failed_versions"]] == [1]
+    assert partial.read_bytes() == partial_bytes and hash_tree(media) == before
+    ref = rj(ws / "resolve_handoff" / "project_reference.json")
+    assert ref["project_version"] == 2
+    assert "failed FilmCraft build(s) v1 (failed)" in (ws / "resolve_handoff" / "handoff_report.md").read_text(encoding="utf-8")
+    assert sorted(p.name for p in (ws / "filmcraft").glob("*.fcproj")) == ["Trip Vlog Draft_v001.fcproj", "Trip Vlog Draft_v002.fcproj"]

@@ -329,3 +329,48 @@ def test_mixed_case_and_unicode_paths_round_trip(tmp_path):
         assert res.verification.ok
     finally:
         adapter.close()
+
+
+# ---- failed-assembly bookkeeping (Phase 7): failed versions are marked, listed, never reused, never deleted --------------------
+
+def test_failed_build_is_listed_kept_on_disk_and_its_number_is_never_reused(fc, monkeypatch):
+    from trip_vlog.filmcraft.execution import failed_builds, next_version
+
+    adapter, media, ws = fc
+    spec = fcsupport.sample_spec(media)
+    monkeypatch.setenv("FAKE_FC_FAIL_ON", "timeline.place")
+    monkeypatch.setenv("FAKE_FC_FAIL_AFTER", "1")
+    with pytest.raises(CommandError):
+        adapter.build_project(spec)
+    partial = ws / "filmcraft" / "Trip Vlog Draft_v001.fcproj"
+    partial_bytes = partial.read_bytes()
+    doc = journal(ws)
+    (rec,) = failed_builds(doc, "Trip Vlog Draft")
+    assert rec["version"] == 1 and rec["status"] == "failed" and rec["failed_at_op"] == "apply_timeline" and rec["project"].endswith("_v001.fcproj")
+    monkeypatch.delenv("FAKE_FC_FAIL_ON")
+    ok = adapter.build_project(spec)
+    assert ok.version == 2 and not ok.noop
+    assert partial.read_bytes() == partial_bytes, "the failed project is neither deleted nor overwritten"
+    # even when the journal is lost, the files on disk keep the failed number reserved
+    (ws / "filmcraft" / "execution_journal.json").unlink()
+    assert next_version(load_journal(ws / "filmcraft" / "execution_journal.json"), ws / "filmcraft", "Trip Vlog Draft") == 3
+    # a failure before the project file exists still reserves its number through the journal and the spec copy
+    (ws / "filmcraft" / "Trip Vlog Draft_v003.timeline_spec.json").write_text("{}", encoding="utf-8")
+    assert next_version({"schema_version": 1, "runs": []}, ws / "filmcraft", "Trip Vlog Draft") == 4
+
+
+def test_a_build_that_was_cut_off_is_marked_failed_by_the_next_build(fc):
+    from trip_vlog.filmcraft.execution import failed_builds
+
+    adapter, media, ws = fc
+    spec = fcsupport.sample_spec(media)
+    adapter.build_project(spec)
+    j = journal(ws)
+    j["runs"][0].update(status="running", finished_at=None, project_sha256=None)
+    (ws / "filmcraft" / "execution_journal.json").write_text(json.dumps(j), encoding="utf-8")
+    assert [f["status"] for f in failed_builds(journal(ws), "Trip Vlog Draft")] == ["interrupted"]   # shown as such even before the next build
+    res = adapter.build_project(spec)
+    assert res.version == 2
+    runs = journal(ws)["runs"]
+    assert runs[0]["status"] == "failed" and runs[0]["abandoned"] and runs[0]["errors"][-1]["type"] == "Interrupted" and runs[1]["status"] == "complete"
+    assert (ws / "filmcraft" / "Trip Vlog Draft_v001.fcproj").is_file()

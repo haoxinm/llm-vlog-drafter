@@ -21,7 +21,7 @@ from pydantic import ValidationError
 from trip_vlog import __version__
 from trip_vlog.config import Config
 from trip_vlog.filmcraft.adapter import FilmCraftAdapter
-from trip_vlog.filmcraft.execution import latest_complete_project, load_journal, sha256_file
+from trip_vlog.filmcraft.execution import failed_builds, latest_complete_project, load_journal, sha256_file
 from trip_vlog.filmcraft.mappings import MediaMap
 from trip_vlog.filmcraft.plan_mapping import MappingError, MappingResult, MappingSettings, edit_plan_to_spec
 from trip_vlog.filmcraft.timeline_spec import TimelineSpec, downgrade_dissolves
@@ -209,6 +209,8 @@ def get_adapter(ctx: Any) -> FilmCraftAdapter:
 
 
 def latest_run(ctx: Any) -> dict[str, Any] | None:
+    """The newest build that COMPLETED (journal status ``complete``, project file present). A failed or interrupted build is never returned, so
+    `resume`, preview, QC, the critic, revisions and the handoff only ever work on a project that was verified after reopening."""
     jp = ctx.workspace.root / "filmcraft" / "execution_journal.json"
     if not jp.is_file():
         return None
@@ -218,6 +220,23 @@ def latest_run(ctx: Any) -> dict[str, Any] | None:
         return None
     r = sorted(runs, key=lambda r: r["version"])[-1]
     return r if (ctx.workspace.root / r["project_path"]).is_file() else None
+
+
+def failed_versions(ctx: Any) -> list[dict[str, Any]]:
+    """Builds of this project that failed or were interrupted (from the journal). Their `_vNNN.fcproj` files are kept for inspection and are not used."""
+    jp = ctx.workspace.root / "filmcraft" / "execution_journal.json"
+    return failed_builds(load_journal(jp), ctx.config.filmcraft.project_name) if jp.is_file() else []
+
+
+def record_failed_builds(ctx: Any) -> list[dict[str, Any]]:
+    """Copy the journal's failed builds into the manifest (`filmcraft.failed_versions`), which `status` shows. Merges into the existing `filmcraft` record."""
+    failed = failed_versions(ctx)
+    fc = dict(ctx.manifest.get("filmcraft") or {})
+    if failed or "failed_versions" in fc:
+        fc["failed_versions"] = failed
+        ctx.manifest.set(filmcraft=fc)
+        ctx.manifest.save()
+    return failed
 
 
 def _project_sha(ctx: Any) -> str | None:
@@ -333,7 +352,9 @@ def assemble_stage(ctx: Any) -> StageResult:
     try:
         build = ad.build_project(prep.spec, cfg.filmcraft.project_name)
     except Exception as e:  # noqa: BLE001 - FilmCraft, path policy, spec and verification errors all stop assembly
-        return StageResult(Status.FAILED, {"mapping_warnings": len(prep.mapping.warnings)}, f"{type(e).__name__}: {e}")
+        failed = record_failed_builds(ctx)    # the partial project stays on disk, marked failed in the journal and manifest, and is not used
+        return StageResult(Status.FAILED, {"mapping_warnings": len(prep.mapping.warnings), **({"failed_version": failed[-1]["version"], "failed_project": failed[-1]["project"]} if failed else {})},
+                           f"{type(e).__name__}: {e}")
     run = build.run
     ctx.manifest.set(filmcraft={
         "version": run.get("filmcraft_version"), "capability_snapshot": "filmcraft/capability_snapshot.json",
@@ -341,6 +362,7 @@ def assemble_stage(ctx: Any) -> StageResult:
         "project": run["project_path"], "project_version": build.version, "spec_hash": build.spec_hash,
         "journal": "filmcraft/execution_journal.json"})
     ctx.manifest.save()
+    record_failed_builds(ctx)
     n_clips = sum(len(s.clips) for s in prep.plan.scenes)
     summary = {"project": run["project_path"], "version": build.version, "noop": build.noop, "clips": n_clips,
                "placements": len(prep.spec.placements), "verified_after_reopen": bool(run.get("verified_after_reopen")),
@@ -508,6 +530,7 @@ def _handoff_inputs(ctx: Any) -> Any:
             "resolve_verification": _file_sha(out / "resolve_verification.json"),
             "resolve_finish_report": _file_sha(out / COMPAT_FINISH),
             "filmcraft_version": (ctx.manifest.get("filmcraft") or {}).get("version"),
+            "failed_builds": [f["version"] for f in failed_versions(ctx)],
             "assets": [(a["asset_id"], a["content_version"]) for a in ctx.catalog.list_assets()]}
 
 
@@ -540,6 +563,10 @@ def handoff_stage(ctx: Any) -> StageResult:
         from trip_vlog.revise_stages import handoff_notes
 
         notes += handoff_notes(ctx, prep.plan.plan_hash, run["version"])
+    failed = failed_versions(ctx)
+    if failed:
+        notes.append("failed FilmCraft build(s) " + ", ".join(f"v{f['version']} ({f['status']})" for f in failed) + " are listed in filmcraft/execution_journal.json; their "
+                     "partial _vNNN.fcproj files are kept for inspection, are not part of this handoff, and can be deleted by you when no longer wanted")
     if _qc_paths_critic(ctx).is_file():
         notes.append(f"critic report: {_rel(ctx, _qc_paths_critic(ctx))}")
     export = export_handoff(get_adapter(ctx), eff, cfg.filmcraft.interchange_formats, out, proj)

@@ -637,6 +637,9 @@ def _cmd_status(args: argparse.Namespace) -> int:
     fc = m.get("filmcraft")
     if fc:
         print(f"filmcraft : {fc.get('version')}  project {fc.get('project')} (v{fc.get('project_version')})  snapshot {fc.get('capability_snapshot')}")
+    for fv in (fc or {}).get("failed_versions") or []:
+        print(f"  failed build v{fv.get('version')}: {fv.get('status')} at {fv.get('failed_at_op')} - {fv.get('project')} is kept but not used"
+              + (f" ({fv['error'][:120]})" if fv.get("error") else ""))
     if m.get("planner"):
         print(f"planner   : {m['planner']}")
     cat = info.get("catalog")
