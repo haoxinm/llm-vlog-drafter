@@ -43,7 +43,7 @@ from trip_vlog.state import StageResult, StageRunner, atomic_write_json, atomic_
 if TYPE_CHECKING:  # pragma: no cover
     from trip_vlog.orchestrator import RunContext
 
-DRAFT_STAGES = ("scan", "probe", "catalog", "thumbnails", "segment", "plan", "approval", "assemble", "preview", "qc", "handoff")
+DRAFT_STAGES = ("scan", "probe", "catalog", "thumbnails", "segment", "plan", "approval", "assemble", "preview", "qc", "critic", "handoff")   # critic: only with qc.critic != off
 
 # Test hook: replace to drive a fake FilmCraft server (``lambda ctx: FilmCraftAdapter(..., argv_prefix=...)``).
 adapter_factory: Callable[["RunContext"], FilmCraftAdapter] | None = None
@@ -139,6 +139,11 @@ def approval_stage(ctx: Any) -> StageResult:
     path = _pp(ctx).edit_plan
     cur = plan_file_hash(path)
     m = ctx.manifest
+    held = approval_record(m)
+    if held and held.get("status") == "approved" and held.get("mode") == "critic_fix" and held.get("plan_hash") == cur:
+        # the plan is the product of a critic fix (qc.critic: apply): approved on the strength of its approved parent and the revision it records,
+        # bound to this plan's hash; any edit changes the hash and falls through to the normal rules below
+        return StageResult(Status.SUCCEEDED, {"mode": "critic_fix", "plan_hash": cur, "parent_plan_hash": held.get("parent_plan_hash"), "revision": held.get("revision")})
     if ctx.config.workflow.approval == "auto_approve":
         approve_current_plan(m, cur, "automatic")
         return StageResult(Status.SUCCEEDED, {"mode": "automatic", "plan_hash": cur})
@@ -480,9 +485,13 @@ def _handoff_dir(ctx: Any) -> Path:
     return Path(ctx.paths.outputs["interchange_dir"])
 
 
+def _qc_paths_critic(ctx: Any) -> Path:
+    return Path(ctx.paths.outputs["qc_dir"]) / "critic_report.md"
+
+
 def _handoff_inputs(ctx: Any) -> Any:
     out = _handoff_dir(ctx)
-    return {"project": _project_sha(ctx), "plan": plan_file_hash(_pp(ctx).edit_plan),
+    return {"project": _project_sha(ctx), **({"critic_report": c} if (c := _file_sha(_qc_paths_critic(ctx))) else {}), "plan": plan_file_hash(_pp(ctx).edit_plan),
             "formats": list(ctx.config.filmcraft.interchange_formats), "qc": _file_sha(_qc_paths(ctx)[0]),
             "resolve_verification": _file_sha(out / "resolve_verification.json"),
             "resolve_finish_report": _file_sha(out / COMPAT_FINISH),
@@ -504,6 +513,16 @@ def handoff_stage(ctx: Any) -> StageResult:
     proj = ctx.workspace.root / run["project_path"]
     eff = downgrade_dissolves(prep.spec, run.get("downgraded_dissolves") or [])
     notes: list[str] = []
+    cs = ctx.manifest.get("critic") or {}
+    if cs.get("rounds"):
+        from trip_vlog.critic_stages import lineage
+
+        applied = lineage(cs, prep.plan.plan_hash)
+        if applied:
+            notes.append(f"this is project version v{run['version']}: {len(applied)} critic round(s) changed the plan after the first draft (" + ", ".join(
+                a["revision"] for a in applied if a.get("revision")) + "); the earlier project versions are kept in filmcraft/ and the parent plans in plans/revisions/")
+    if _qc_paths_critic(ctx).is_file():
+        notes.append(f"critic report: {_rel(ctx, _qc_paths_critic(ctx))}")
     export = export_handoff(get_adapter(ctx), eff, cfg.filmcraft.interchange_formats, out, proj)
     if export.error:
         notes.append(f"interchange export failed: {export.error}")
@@ -575,6 +594,11 @@ def build_draft_runner(ctx: Any) -> StageRunner:
     runner.register("assemble", assemble_stage, deps=("approval",), inputs=_assemble_inputs, verify=_assemble_verify)
     runner.register("preview", preview_stage, deps=("assemble",), inputs=_preview_inputs, verify=lambda c: _preview_path(c).is_file())
     runner.register("qc", qc_stage, deps=("assemble",), inputs=_qc_inputs, verify=_qc_verify)
+    if ctx.config.qc.critic != "off":
+        # after qc, before handoff: a critic fix rebuilds the project, preview and QC, and the handoff then packages the latest version
+        from trip_vlog.critic_stages import critic_inputs, critic_stage, critic_verify
+
+        runner.register("critic", critic_stage, deps=("qc",), inputs=critic_inputs, verify=critic_verify)
     runner.register("handoff", handoff_stage, deps=("assemble",), inputs=_handoff_inputs,
                     verify=lambda c: (_handoff_dir(c) / "handoff_report.md").is_file() and (_handoff_dir(c) / COMPAT_JSON).is_file())
     return runner
