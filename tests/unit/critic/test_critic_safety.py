@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -171,7 +172,8 @@ def test_a_round_that_died_is_rolled_back_at_the_next_start(setup, monkeypatch):
     qc_before = (root / "preview" / "qc_report.json").read_bytes()
     real = cs._rollback
     monkeypatch.setattr(cs, "_rollback", lambda *a, **k: (_ for _ in ()).throw(OSError("killed while rolling back")))
-    assert cs.critic_stage(ctx).status == Status.PARTIAL        # the process "dies" before anything is put back (the stage reports it and leaves the marker)
+    with pytest.raises(KeyboardInterrupt):      # the process "dies" before anything is put back; the interrupt still comes through and the marker stays
+        cs.critic_stage(ctx)
     mk = ctx.manifest.get("critic")["applying"]
     assert mk["number"] == 1 and mk["parent_plan_hash"] == plan.plan_hash and mk["new_plan_hash"] != plan.plan_hash
     assert plan_files(ctx) != before and ctx.manifest.get("approval")["mode"] == "critic_fix"
@@ -334,7 +336,8 @@ def _crashed_round(setup, monkeypatch, **stub):
     stub_rebuild(monkeypatch, preview_raises=KeyboardInterrupt(), **stub)
     real = cs._rollback
     monkeypatch.setattr(cs, "_rollback", lambda *a, **k: (_ for _ in ()).throw(OSError("killed")))
-    assert cs.critic_stage(ctx).status == Status.PARTIAL
+    with pytest.raises(KeyboardInterrupt):      # a restore that fails never hides the interrupt
+        cs.critic_stage(ctx)
     monkeypatch.setattr(cs, "_rollback", real)
     assert ctx.manifest.get("critic")["applying"]
     return ctx, plan
@@ -478,3 +481,60 @@ def test_a_reformatted_plan_after_the_crash_is_the_persons_even_though_its_conte
     edited = pp.read_bytes()
     cs.recover_interrupted(ctx)
     assert pp.read_bytes() == edited and ctx.manifest.get("critic")["applying"] is None
+
+
+def test_a_restore_that_fails_during_an_interrupt_still_raises_the_interrupt_and_keeps_the_marker(setup, monkeypatch):
+    ctx, plan = _crashed_round(setup, monkeypatch)     # asserts the KeyboardInterrupt came through
+    assert ctx.manifest.get("critic")["applying"]["parent_plan_hash"] == plan.plan_hash
+
+
+def test_a_locked_file_during_recovery_does_not_stop_the_run_and_recovery_is_retried(setup, monkeypatch):
+    ctx, plan = _crashed_round(setup, monkeypatch)
+    real = cs._rollback
+    monkeypatch.setattr(cs, "_rollback", lambda *a, **k: (_ for _ in ()).throw(PermissionError("locked by a player")))
+    note = cs.recover_interrupted(ctx)
+    assert "retried" in note and ctx.manifest.get("critic")["applying"]
+    monkeypatch.setattr(cs, "_rollback", real)
+    assert "previous plan" in cs.recover_interrupted(ctx)
+    assert ctx.manifest.get("critic")["applying"] is None and ds.plan_file_hash(ds._pp(ctx).edit_plan) == plan.plan_hash
+
+
+def test_a_plan_left_half_written_by_an_earlier_restore_is_recovered_not_kept(setup, monkeypatch):
+    ctx, plan = _crashed_round(setup, monkeypatch)
+    ds._pp(ctx).edit_plan.write_bytes(b'{"schema_ver')
+    note = cs.recover_interrupted(ctx)
+    assert "previous plan" in note and ds.plan_file_hash(ds._pp(ctx).edit_plan) == plan.plan_hash
+
+
+def test_restoring_a_file_goes_through_a_temporary_copy(tmp_path, monkeypatch):
+    src, target = tmp_path / "parent.json", tmp_path / "live.json"
+    src.write_text("parent", encoding="utf-8")
+    target.write_text("new", encoding="utf-8")
+
+    def cut_off(a, b):
+        Path(b).write_text("par", encoding="utf-8")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cs.shutil, "copyfile", cut_off)
+    with pytest.raises(KeyboardInterrupt):
+        cs._replace_from(src, target)
+    assert target.read_text(encoding="utf-8") == "new" and sorted(p.name for p in tmp_path.iterdir()) == ["live.json", "parent.json"]
+
+
+def test_a_selection_plan_the_round_created_is_removed_when_the_plan_is_still_the_parent(setup, monkeypatch):
+    ctx, plan, _ = setup(transport=CriticTransport(proposals_once()))
+    pp = ds._pp(ctx)
+    d = ctx.workspace.root / "plans" / "revisions"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "critic_r01.selection_plan.json").write_bytes(b'{"made": "by the round"}')
+    pp.selection_plan.write_bytes(b'{"made": "by the round"}')
+    ctx.manifest.set(critic={"applying": {"number": 1, "tag": "critic_r01", "parent_plan_hash": plan.plan_hash, "new_plan_hash": "n",
+                                          "saved": {"edit_plan": "plans/revisions/critic_r01.parent_edit_plan.json", "selection_plan": None}}})
+    cs.recover_interrupted(ctx)
+    assert not pp.selection_plan.exists()
+
+
+def test_the_recovery_note_is_not_left_in_the_manifest(setup, monkeypatch):
+    ctx, plan = _crashed_round(setup, monkeypatch)
+    cs.recover_interrupted(ctx)
+    assert "recovered" not in (ctx.manifest.get("critic") or {})

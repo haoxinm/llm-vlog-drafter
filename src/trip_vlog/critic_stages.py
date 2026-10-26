@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -401,6 +402,16 @@ def _copy(src: Path, dst: Path) -> str | None:
     return str(dst)
 
 
+def _replace_from(src: Path, target: Path) -> None:
+    """Copy ``src`` over ``target`` through a temporary file in the same folder, so an interruption never leaves a half-written target."""
+    tmp = target.with_name(target.name + ".critic-restore.tmp")
+    try:
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, target)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def _revision_doc(ctx: Any, n: int, status: str, parent: EditPlan, res: ApplyResult, selected: list[cr.Finding], snapshot_rel: str | None,
                   authorization: str | None, extra: dict[str, Any] | None = None) -> dict[str, Any]:
     return {"schema_version": 1, "kind": "critic_fix", "revision": f"critic_r{n:02d}", "status": status, "generated_at": utc_now_iso(),
@@ -466,7 +477,8 @@ def _rollback(ctx: Any, saved: dict[str, Path | None], approval: Any, *, new_has
         cur: str | None = ds.plan_file_hash(targets["edit_plan"])
     except (OSError, ValueError):
         cur = None
-    if cur == new_hash and cur != parent_hash and (new_plan is None or not new_plan.is_file() or new_plan.read_bytes() == targets["edit_plan"].read_bytes()):
+    unreadable = cur is None    # missing or half-written (an earlier restore was cut off): nothing of the person's to keep, the parent goes back
+    if unreadable or cur == new_hash and cur != parent_hash and (new_plan is None or not new_plan.is_file() or new_plan.read_bytes() == targets["edit_plan"].read_bytes()):
         for key, target in targets.items():
             if key not in saved:
                 continue
@@ -474,15 +486,18 @@ def _rollback(ctx: Any, saved: dict[str, Path | None], approval: Any, *, new_has
             if src is None:
                 target.unlink(missing_ok=True)
             elif src.is_file():
-                shutil.copyfile(src, target)
+                _replace_from(src, target)
         held = ds.approval_record(ctx.manifest)
         if approval is not None and (held or {}).get("plan_hash") == new_hash:
             ctx.manifest.set(approval=approval)
         outcome = "full"
     elif cur == parent_hash:
         sel, src = targets["selection_plan"], saved.get("selection_plan")
-        if src is not None and src.is_file() and new_selection is not None and sel.is_file() and new_selection.is_file() and sel.read_bytes() == new_selection.read_bytes():
-            shutil.copyfile(src, sel)
+        if new_selection is not None and sel.is_file() and new_selection.is_file() and sel.read_bytes() == new_selection.read_bytes():
+            if src is None and "selection_plan" in saved:
+                sel.unlink(missing_ok=True)     # the round created it
+            elif src is not None and src.is_file():
+                _replace_from(src, sel)
         outcome = "parent"
     else:
         outcome = "kept"
@@ -504,10 +519,15 @@ def recover_interrupted(ctx: Any) -> str | None:
     root = ctx.workspace.root
     tag = str(mk.get("tag") or f"critic_r{int(mk.get('number') or 0):02d}")
     d = revisions_dir(ctx)
-    outcome = _rollback(ctx, {k: (root / v if v else None) for k, v in (mk.get("saved") or {}).items()}, mk.get("parent_approval"),
-                        new_hash=str(mk.get("new_plan_hash")), parent_hash=str(mk.get("parent_plan_hash")), new_selection=d / f"{tag}.selection_plan.json",
-                        new_plan=d / f"{tag}.edit_plan.json")
     head = f"critic round {tag} was interrupted before it finished"
+    try:
+        outcome = _rollback(ctx, {k: (root / v if v else None) for k, v in (mk.get("saved") or {}).items()}, mk.get("parent_approval"),
+                            new_hash=str(mk.get("new_plan_hash")), parent_hash=str(mk.get("parent_plan_hash")), new_selection=d / f"{tag}.selection_plan.json",
+                            new_plan=d / f"{tag}.edit_plan.json")
+    except OSError as e:    # e.g. a locked file on Windows: keep the marker so the next run tries again, and let this run go on
+        note = f"{head}; putting the previous plan back failed ({type(e).__name__}: {e}) and will be retried on the next run"
+        ctx.logger.event("critic", Status.PARTIAL, message=note)
+        return note
     note = {"full": f"{head}; the previous plan (hash {str(mk.get('parent_plan_hash'))[:12]}) was put back",
             "parent": f"{head}; the plan on disk is the previous plan, nothing else was put back",
             "kept": f"{head}; the edit plan on disk was changed since, so nothing was put back and your plan stays"}[outcome]
@@ -523,7 +543,8 @@ def recover_interrupted(ctx: Any) -> str | None:
         for name in _DERIVED_STAGES:
             if name in ctx.manifest.stages:
                 ctx.manifest.stages[name]["input_hash"] = None
-    _save_state(ctx, applying=None, recovered=note)
+    _save_state(ctx, applying=None)
+    ctx.data["critic_recovered"] = note     # shown in this run's critic report if the critic runs; the orchestrator echoes it either way
     ctx.logger.event("critic", Status.PARTIAL, message=note)
     return note
 
@@ -628,7 +649,10 @@ def _apply_round(ctx: Any, rv: Review, selected: list[cr.Finding], res: ApplyRes
         _write_revision(ctx, n, rdoc, res)
         _save_state(ctx, rounds=[*state_of(ctx).get("rounds", []), rec], pending=None, applying=None)
     except BaseException:   # Ctrl-C, SystemExit (also while the round is being recorded): the previous plan goes back, then it goes on
-        restore("the round was interrupted; the previous plan was put back", remember=False)
+        try:
+            restore("the round was interrupted; the previous plan was put back", remember=False)
+        except Exception as e:  # noqa: BLE001 - never hide the interrupt; the marker stays and the next run rolls back
+            ctx.logger.event("critic", Status.FAILED, message=f"putting the previous plan back failed ({type(e).__name__}: {e}); the next run retries")
         raise
     return rec
 
@@ -698,9 +722,7 @@ def critic_stage(ctx: Any) -> StageResult:
 def _critic_stage(ctx: Any) -> StageResult:
     cfg = ctx.config
     q = cfg.qc
-    recovered = recover_interrupted(ctx) or state_of(ctx).get("recovered")      # normally done before the runner starts
-    if recovered:
-        _save_state(ctx, recovered=None)
+    recovered = recover_interrupted(ctx) or ctx.data.pop("critic_recovered", None)      # normally done before the runner starts
     if effective_mode(ctx) == "off":
         return StageResult(Status.SKIPPED, {"skipped": True, "reason": "qc.critic is off"})
     requests = hits = applied_now = 0
