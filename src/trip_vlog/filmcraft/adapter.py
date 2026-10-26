@@ -78,6 +78,7 @@ class ApplyReport:
     warnings: list[str] = field(default_factory=list)
     downgraded_dissolves: list[str] = field(default_factory=list)
     effective_spec: TimelineSpec | None = None
+    framing: dict[int, float] = field(default_factory=dict)   # clip id -> scale (percent) FilmCraft chose for clip.fitToFrame
 
 
 class FilmCraftAdapter:
@@ -372,6 +373,7 @@ class FilmCraftAdapter:
                 if target is None:
                     raise CommandError("clip.audioGain", f"{p.clip_instance_id}: gain requested but FilmCraft created no audio clip")
                 self._cmd("clip.audioGain", {"clips": [target], "mode": "set", "db": float(p.audio_gain_db)})
+        self._apply_framing_and_ducking(order, report, tb)
         for p in order:
             if p.transition_in.type == "dissolve":
                 res = self._cmd("sequence.applyVideoTransition", {
@@ -396,6 +398,29 @@ class FilmCraftAdapter:
                 report.clip_map.markers.append(res["marker"])
         self.spec = spec
         return report
+
+    def _require_capability(self, name: str, why: str) -> None:
+        caps = self.discover_capabilities()
+        if not caps.has(name):
+            raise CapabilityError(f"{why} needs the FilmCraft command behind capability '{name}' ({caps.capabilities[name].id}), which this "
+                                  "FilmCraft build does not offer; turn the matching option off in the config", [name])
+
+    def _apply_framing_and_ducking(self, order: Sequence[Placement], report: ApplyReport, tb: Timebase) -> None:
+        fit = [p for p in order if p.fit_source_size is not None]
+        if fit:
+            self._require_capability("fit_to_frame", "scaling mixed-aspect clips to the frame (filmcraft.fit_mixed_aspect)")
+            res = self._cmd("clip.fitToFrame", {"clips": [report.clip_map[p.clip_instance_id].clip for p in fit]})
+            # FilmCraft answers with the scale it chose; it is verified again after save and reopen (verify_against_spec)
+            report.framing = {int(r["clip"]): float(r["scale"]) for r in (res.get("clips") if isinstance(res, dict) else None) or []
+                              if isinstance(r, dict) and "clip" in r and "scale" in r}
+        keyed = [p for p in order if p.gain_keys]
+        if keyed:
+            self._require_capability("clip_keyframe", "ducking music (filmcraft.duck_music)")
+        for p in keyed:
+            clip = report.clip_map[p.clip_instance_id].clip
+            for k in p.gain_keys:
+                self._cmd("effects.setParam", {"clip": clip, "effect": "volume", "param": "level", "value": float(k.db),
+                                               "time": tb.frames_to_ticks(k.frame), "keyframe": True})
 
     def _place(self, p: Placement, tb: Timebase, media_map: MediaMap, report: ApplyReport) -> ClipRef:
         params: dict[str, Any] = {
@@ -482,6 +507,57 @@ class FilmCraftAdapter:
             rep.checks.append(Check("no offline media in render", False, f"offline: {offline[:3]}"))
             rep.ok = False
         return rep
+
+    def read_back(self, project_path: Path | str | None = None) -> tuple[SequenceSnapshot, ProjectSnapshot]:
+        """The sequence and project as FilmCraft reports them from a freshly opened process (after save and reopen)."""
+        path = project_path or self.project_path
+        if path is None:
+            from trip_vlog.filmcraft.execution import latest_complete_project
+
+            path = latest_complete_project(self)
+        if path is None:
+            raise FilmCraftError("no built FilmCraft project to open; run build_project first")
+        self.close()
+        project = self.open_project(path)
+        return self.inspect_sequence(), project
+
+    def render_music_bed(self, output: Path | str, music_tracks: Sequence[str], *, project_path: Path | str | None = None,
+                         timeout: float | None = None) -> Path:
+        """Render the audio of the music track(s) alone to a WAV, to measure the ducking in what FilmCraft really renders.
+
+        The saved project is opened in a NEW server process, every other audio track is muted in that process only, and the
+        process is closed without saving: the project file is never written (the caller checks its hash), and the mute is gone with it.
+        """
+        self._require_capability("mute_track", "rendering the music bed alone")
+        out = self.policy.check_write(output, "music_bed")
+        if out.suffix.lower() != ".wav":
+            raise ParameterError(f"music bed path must end in .wav: {out.name}")
+        path = project_path or self.project_path
+        if path is None:
+            from trip_vlog.filmcraft.execution import latest_complete_project
+
+            path = latest_complete_project(self)
+        if path is None:
+            raise FilmCraftError("no built FilmCraft project to open; run build_project first")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        self.close()
+        try:
+            self.open_project(path)
+            snap = self.inspect_sequence()
+            keep = set(music_tracks)
+            for t in snap.tracks:
+                if t.kind == "audio" and t.name not in keep:
+                    self._cmd("mixer.setStrip", {"strip": t.name, "muted": True})
+            params: dict[str, Any] = {"path": str(out), "format": "wav", "wait": True}
+            if self.sequence_id is not None:
+                params["sequence"] = self.sequence_id
+            seconds = float(Fraction(snap.duration_frames) / snap.fps)
+            self._cmd("file.exportMedia", params, timeout if timeout is not None else max(300.0, 60.0 + 6.0 * seconds))
+        finally:
+            self.close()      # no save: the muted strips never reach the project file
+        if not out.is_file() or out.stat().st_size == 0:
+            raise CommandError("file.exportMedia", f"FilmCraft reported success but {out} was not written")
+        return out
 
     # ------------------------------------------------------------------ interchange
     def export_interchange(self, formats: Sequence[str] | None = None, out_dir: Path | str | None = None, *,

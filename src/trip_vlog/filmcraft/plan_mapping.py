@@ -25,9 +25,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
-from trip_vlog.filmcraft.timeline_spec import MarkerSpec, Placement, TimelineSpec, TitleSpec, TransitionIn, validate_spec
+from trip_vlog.filmcraft.timeline_spec import GainKey, MarkerSpec, Placement, TimelineSpec, TitleSpec, TransitionIn, validate_spec
 from trip_vlog.planning.catalog_view import PlanningCatalog
 from trip_vlog.planning.duration import frames_to_float, parse_fps
 from trip_vlog.planning.models import EditClip, EditPlan
@@ -52,6 +52,8 @@ class MappingSettings:
     sequence_name: str = "Main Draft"
     ambient_gain_db: float = AMBIENT_LOW_GAIN_DB
     supported_alignments: tuple[str, ...] = SUPPORTED_ALIGNMENTS
+    fit_mixed_aspect: bool = False      # clip.fitToFrame on every clip / still whose size differs from the sequence
+    duck_keys: Mapping[str, tuple[GainKey, ...]] | None = None   # music clip_instance_id -> Volume keyframes (qc.ducking.build_duck_plan)
 
 
 @dataclass(frozen=True)
@@ -100,6 +102,14 @@ def edit_plan_to_spec(plan: EditPlan, catalog: PlanningCatalog, media_root: Path
     for scene in plan.scenes:
         for c in scene.clips:
             asset = catalog.assets.get(c.asset_id)
+            fit_size = None
+            if st.fit_mixed_aspect and asset is not None and c.media_type in ("video", "image"):
+                w, h = (asset.display_width or asset.width), (asset.display_height or asset.height)
+                if not (w and h):
+                    warnings.append(MappingWarning("fit_size_unknown", c.clip_instance_id,
+                                                   "the source size is not known, so the clip was not scaled to the frame"))
+                elif (w, h) != (plan.sequence.width, plan.sequence.height):
+                    fit_size = (int(w), int(h))
             if asset is None:
                 errors.append(f"{c.clip_instance_id}: asset {c.asset_id} is not in the catalog")
                 continue
@@ -114,7 +124,7 @@ def edit_plan_to_spec(plan: EditPlan, catalog: PlanningCatalog, media_root: Path
                     continue
                 if c.media_type == "image":
                     placements.append(Placement(c.clip_instance_id, path, "image", track, c.timeline_start_frame, c.duration_frames,
-                                                0.0, None, False, None, tin))
+                                                0.0, None, False, None, tin, fit_source_size=fit_size))
                     continue
                 linked = track == "V1" and c.audio_policy != "muted" and asset.has_audio
                 if c.audio_policy != "muted" and not asset.has_audio:
@@ -127,7 +137,7 @@ def edit_plan_to_spec(plan: EditPlan, catalog: PlanningCatalog, media_root: Path
                 placements.append(Placement(
                     c.clip_instance_id, path, "video", track, c.timeline_start_frame, c.duration_frames,
                     _seconds(c.source_in_frame, c.source_in_seconds, fps), _seconds(c.source_out_frame, c.source_out_seconds, fps),
-                    linked, gain, tin))
+                    linked, gain, tin, fit_source_size=fit_size))
             else:  # audio
                 track = AUDIO_TRACKS.get(c.track_role)
                 if track is None:
@@ -138,7 +148,7 @@ def edit_plan_to_spec(plan: EditPlan, catalog: PlanningCatalog, media_root: Path
                 placements.append(Placement(
                     c.clip_instance_id, path, "audio", track, c.timeline_start_frame, c.duration_frames,
                     _seconds(c.source_in_frame, c.source_in_seconds, fps), _seconds(c.source_out_frame, c.source_out_seconds, fps),
-                    False, gain, TransitionIn()))
+                    False, gain, TransitionIn(), gain_keys=tuple((st.duck_keys or {}).get(c.clip_instance_id, ()))))
     if errors:
         raise MappingError(errors)
     if "A3" in tracks:

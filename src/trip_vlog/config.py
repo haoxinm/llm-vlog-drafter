@@ -494,6 +494,14 @@ class FilmCraftConfig(_Model):
     preview_scale: float = Field(1.0, gt=0, le=1)                  # 1.0 = full sequence size; <1 renders a smaller draft
     handle_policy: Literal["error", "cut"] = "error"               # dissolve without source handles: fail, or downgrade to a recorded cut
     ambient_low_gain_db: float = Field(-12.0, ge=-60, le=0)        # gain of clips whose audio_policy is "ambient_low"
+    # Phase 7b. Both off by default: they change what FilmCraft is asked to build.
+    fit_mixed_aspect: bool = False      # scale clips and stills whose size differs from the sequence to fit the frame (clip.fitToFrame): no crop, bars where the aspect differs
+    duck_music: bool = False            # lower the music under speech / natural sound (Volume keyframes on the music clip); needs plan audio.duck_music_under_speech
+    duck_mode: Literal["speech", "natural_sound"] = "speech"   # speech: transcript segments only; natural_sound: also clips with active natural sound
+    duck_db: float = Field(-12.0, ge=-48, le=-1)               # music level inside a duck window, relative to the music clip's own gain
+    duck_ramp_seconds: float = Field(0.3, ge=0.05, le=3)       # fade down in front of a window and back up behind it
+    duck_merge_gap_seconds: float = Field(1.0, ge=0, le=30)    # windows closer than this are joined
+    readback_interchange: Literal["auto", "off"] = "auto"      # FCP7 XML from the read-back timeline when FilmCraft's own export is missing or lossy (never replaces a good one)
 
     @field_validator("control_host")
     @classmethod

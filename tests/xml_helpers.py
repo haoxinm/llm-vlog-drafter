@@ -23,7 +23,7 @@ def _rate(tb: int, ntsc: bool) -> str:
 
 def clipitem(i: int, name: str, start: int, end: int, in_: int, out: int, *, path: str | None = None, file_id: str | None = None, tb: int = 30,
              ntsc: bool = False, text: str | None = None, gain: float | None = None, speed: bool = False, url_style: str = "localhost",
-             full_file: bool = True) -> str:
+             full_file: bool = True, scale: float | None = None, keys: tuple = ()) -> str:
     f = ""
     if file_id and path and full_file:
         f = f'<file id="{file_id}"><name>{escape(name)}</name><pathurl>{escape(to_url(path, url_style))}</pathurl></file>'
@@ -35,10 +35,14 @@ def clipitem(i: int, name: str, start: int, end: int, in_: int, out: int, *, pat
     if text is not None:
         flt += ("<filter><effect><name>Text</name><effectid>Text</effectid><parameter><parameterid>text</parameterid><name>Text</name>"
                 f"<value>{escape(text)}</value></parameter></effect></filter>")
-    if gain is not None:
-        lin = 10 ** (gain / 20)
+    if gain is not None or keys:
+        lin = 10 ** ((gain or 0.0) / 20)
+        kf = "".join(f"<keyframe><when>{w}</when><value>{10 ** (d / 20)}</value></keyframe>" for w, d in keys)
         flt += ("<filter><effect><name>Audio Levels</name><effectid>audiolevels</effectid><parameter><parameterid>level</parameterid>"
-                f"<value>{lin}</value></parameter></effect></filter>")
+                f"<value>{lin}</value>{kf}</parameter></effect></filter>")
+    if scale is not None:
+        flt += ("<filter><effect><name>Basic Motion</name><effectid>basic</effectid><parameter><parameterid>scale</parameterid>"
+                f"<value>{scale}</value></parameter></effect></filter>")
     if speed:
         flt += "<filter><effect><name>Time Remap</name><effectid>timeremap</effectid></effect></filter>"
     return (f'<clipitem id="clipitem-{i}"><name>{escape(name)}</name><enabled>TRUE</enabled><duration>{out - in_}</duration>{_rate(tb, ntsc)}'
@@ -74,7 +78,7 @@ def xml_for_spec(spec: Any, *, ntsc: bool | None = None, url_style: str = "local
     for n, e in enumerate(exp.clips, 1):
         items.append({"i": n, "kind": e.kind, "track": e.track, "name": e.text or (e.path or "x").replace("\\", "/").rsplit("/", 1)[-1], "start": e.start, "end": e.end,
                       "in_": e.source_in if e.source_in is not None else 0, "out": e.source_out if e.source_out is not None else e.end - e.start,
-                      "path": e.path, "text": e.text, "gain": e.gain_db if (e.kind == "audio" and e.gain_db) else None})
+                      "path": e.path, "text": e.text, "gain": e.gain_db if (e.kind == "audio" and e.gain_db) else None, "scale": e.scale, "keys": e.gain_keys})
     from trip_vlog.handoff.xml_roundtrip import centred_transition_span
 
     trans = [dict(zip(("track", "start", "end"), (t.track, *centred_transition_span(t.cut_frame, t.frames)))) for t in exp.transitions]
@@ -90,7 +94,7 @@ def xml_for_spec(spec: Any, *, ntsc: bool | None = None, url_style: str = "local
         fid = seen.setdefault(it["path"], f"file-{len(seen) + 1}") if it["path"] else None
         tracks[it["kind"]][it["track"] - 1].append(clipitem(it["i"], it["name"], it["start"], it["end"], it["in_"], it["out"], path=it["path"], file_id=fid,
                                                             tb=tb, ntsc=is_ntsc, text=it["text"], gain=it["gain"], speed=it.get("speed", False),
-                                                            url_style=url_style, full_file=fid is not None and it["path"] not in {x["path"] for x in doc["items"] if x["i"] < it["i"]}))
+                                                            url_style=url_style, scale=it.get("scale"), keys=tuple(it.get("keys") or ()), full_file=fid is not None and it["path"] not in {x["path"] for x in doc["items"] if x["i"] < it["i"]}))
     for t in doc["transitions"]:
         tracks["video"][t["track"] - 1].append(transitionitem(t["start"], t["end"], tb=tb, ntsc=is_ntsc))
     return xmeml(duration=doc["duration"], tb=tb, ntsc=is_ntsc, width=doc["width"], height=doc["height"], video=tracks["video"], audio=tracks["audio"],

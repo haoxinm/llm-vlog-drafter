@@ -49,6 +49,25 @@ class TransitionIn:
 
 
 @dataclass(frozen=True)
+class GainKey:
+    """One keyframe of a clip's Volume level (``volume.level``, dB, added to the clip gain) at a sequence frame."""
+    frame: int
+    db: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"frame": self.frame, "db": self.db}
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> "GainKey":
+        return cls(frame=int(d["frame"]), db=float(d["db"]))
+
+
+def fit_scale_percent(seq_w: int, seq_h: int, src_w: int, src_h: int) -> float:
+    """Scale (percent) that fits a ``src_w`` x ``src_h`` picture inside the sequence frame without cropping (FilmCraft ``clip.fitToFrame``)."""
+    return min(seq_w / src_w, seq_h / src_h) * 100.0
+
+
+@dataclass(frozen=True)
 class Placement:
     clip_instance_id: str
     source_path: str  # absolute path of the original asset
@@ -62,6 +81,8 @@ class Placement:
     audio_gain_db: float | None = None
     transition_in: TransitionIn = field(default_factory=TransitionIn)
     linked_audio_track: str | None = None  # default: the A track with the same index as the video track
+    fit_source_size: tuple[int, int] | None = None  # video/image: display size of the source; set = scale it to fit the frame (clip.fitToFrame)
+    gain_keys: tuple[GainKey, ...] = ()  # audio: Volume level keyframes (ducking), sequence frames, strictly increasing
 
     @property
     def end_frame(self) -> int:
@@ -86,7 +107,7 @@ class Placement:
         return None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d = {
             "clip_instance_id": self.clip_instance_id, "source_path": self.source_path,
             "media_kind": self.media_kind, "track": self.track,
             "timeline_start_frame": self.timeline_start_frame, "duration_frames": self.duration_frames,
@@ -94,6 +115,12 @@ class Placement:
             "include_linked_audio": self.include_linked_audio, "audio_gain_db": self.audio_gain_db,
             "transition_in": self.transition_in.to_dict(), "linked_audio_track": self.linked_audio_track,
         }
+        # only written when used, so the hash of a spec without framing or ducking is the one it always had
+        if self.fit_source_size is not None:
+            d["fit_source_size"] = list(self.fit_source_size)
+        if self.gain_keys:
+            d["gain_keys"] = [k.to_dict() for k in self.gain_keys]
+        return d
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "Placement":
@@ -104,6 +131,8 @@ class Placement:
             source_out_seconds=d.get("source_out_seconds"), include_linked_audio=bool(d.get("include_linked_audio", True)),
             audio_gain_db=d.get("audio_gain_db"), transition_in=TransitionIn.from_dict(d.get("transition_in")),
             linked_audio_track=d.get("linked_audio_track"),
+            fit_source_size=tuple(d["fit_source_size"]) if d.get("fit_source_size") else None,
+            gain_keys=tuple(GainKey.from_dict(k) for k in d.get("gain_keys", ())),
         )
 
 
@@ -332,6 +361,27 @@ def validate_spec(spec: TimelineSpec) -> list[str]:
         at = p.audio_track
         if at is not None and at not in seen_tracks:
             add(f"{who}: audio goes to {at}, which is not in the spec's tracks")
+
+        # framing and ducking
+        if p.fit_source_size is not None:
+            fs = p.fit_source_size
+            if p.media_kind not in ("video", "image"):
+                add(f"{who}: fit_source_size only applies to video and still placements")
+            elif not (len(fs) == 2 and all(_is_int(v) and 1 <= v <= 65536 for v in fs)):
+                add(f"{who}: fit_source_size must be (width, height) in whole pixels, got {fs!r}")
+        if p.gain_keys:
+            if p.media_kind != "audio":
+                add(f"{who}: gain_keys only apply to a stand-alone audio placement")
+            else:
+                last = -1
+                for k in p.gain_keys:
+                    if not _is_int(k.frame) or not (p.timeline_start_frame <= k.frame < p.end_frame):
+                        add(f"{who}: gain key at frame {k.frame!r} lies outside the clip [{p.timeline_start_frame}, {p.end_frame})")
+                    elif k.frame <= last:
+                        add(f"{who}: gain keys must be strictly increasing in frame (frame {k.frame})")
+                    if not _is_num(k.db) or not (-96 <= k.db <= 15):
+                        add(f"{who}: gain key level must be a finite number in [-96, 15] dB, got {k.db!r}")
+                    last = k.frame if _is_int(k.frame) else last
 
         # transition
         ti = p.transition_in

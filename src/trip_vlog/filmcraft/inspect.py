@@ -10,13 +10,14 @@ every clip the spec does not account for (that is how duplicated clips are detec
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from fractions import Fraction
 from typing import Any, Mapping, Sequence
 
 from trip_vlog.filmcraft.mappings import ClipMap, ClipRef, MediaMap, canon_path
 from trip_vlog.filmcraft.timebase import TICKS_PER_SECOND, Timebase
-from trip_vlog.filmcraft.timeline_spec import TimelineSpec
+from trip_vlog.filmcraft.timeline_spec import TimelineSpec, fit_scale_percent
 
 
 class SnapshotParseError(ValueError):
@@ -41,6 +42,8 @@ class ClipSnapshot:
     speed: float
     link: int | None
     enabled: bool
+    scale: float | None = None  # video: Motion scale in percent as read back (None when the payload has no motion effect)
+    volume_keyframes: int = 0   # audio: number of keyframes on the Volume level (values are not part of the read-back)
 
     @property
     def source_in_seconds(self) -> Fraction:
@@ -168,6 +171,31 @@ def _need(d: Mapping[str, Any], key: str, what: str) -> Any:
     return d[key]
 
 
+_FLOAT_VALUE = re.compile(r"^Float\((-?[0-9.eE+-]+)\)$")
+
+
+def _effect_param(clip: Mapping[str, Any], effect: str, param: str) -> Mapping[str, Any] | None:
+    for e in clip.get("effects") or []:
+        if isinstance(e, Mapping) and e.get("effect") == effect:
+            p = (e.get("params") or {}).get(param)
+            return p if isinstance(p, Mapping) else None
+    return None
+
+
+def _motion_scale(clip: Mapping[str, Any]) -> float | None:
+    p = _effect_param(clip, "motion", "scale")
+    m = _FLOAT_VALUE.match(str(p.get("value"))) if p else None
+    return float(m[1]) if m else None
+
+
+def _volume_keyframes(clip: Mapping[str, Any]) -> int:
+    p = _effect_param(clip, "volume", "level")
+    try:
+        return int(p.get("keyframes", 0)) if p else 0
+    except (TypeError, ValueError):
+        return 0
+
+
 def parse_sequence(payload: Any) -> SequenceSnapshot:
     if not isinstance(payload, Mapping):
         raise SnapshotParseError(f"sequence_inspect returned {type(payload).__name__}, not an object: {str(payload)[:200]}")
@@ -187,7 +215,9 @@ def parse_sequence(payload: Any) -> SequenceSnapshot:
                     start_ticks=int(_need(c, "start", "clip")), duration_ticks=int(c.get("duration", 0)),
                     source_in_ticks=int(c.get("sourceIn", 0)), source_out_ticks=int(c.get("sourceOut", 0)),
                     gain_db=float(c.get("gainDb") or 0.0), speed=float(c.get("speed", 1.0)), link=c.get("link"),
-                    enabled=bool(c.get("enabled", True))))
+                    enabled=bool(c.get("enabled", True)),
+                    scale=_motion_scale(c) if kind == "video" else None,
+                    volume_keyframes=_volume_keyframes(c) if kind == "audio" else 0))
             clips.sort(key=lambda c: (c.start_ticks, c.clip_id))
             trs = tuple(TransitionSnapshot(
                 transition_id=tr.get("id"), track=name, effect=str(tr.get("effect", "")),
@@ -229,6 +259,20 @@ def parse_project(payload: Any, media: Sequence[MediaStatus] = ()) -> ProjectSna
 # ----------------------------------------------------------------------------
 # verification
 # ----------------------------------------------------------------------------
+
+FIT_SCALE_TOLERANCE = 0.5     # percent points
+
+
+def _check_framing(add: Any, spec: TimelineSpec, p: Any, c: ClipSnapshot) -> int:
+    """A placement with ``fit_source_size`` must read back with the Motion scale that fits the source in the frame."""
+    if p.fit_source_size is None:
+        return 0
+    want = fit_scale_percent(spec.width, spec.height, *p.fit_source_size)
+    if c.scale is None or abs(c.scale - want) > FIT_SCALE_TOLERANCE:
+        add("framing", p.clip_instance_id, round(want, 2), c.scale,
+            f"{p.clip_instance_id}: scale {c.scale} read back, {round(want, 2)} expected to fit {p.fit_source_size[0]}x{p.fit_source_size[1]} "
+            f"in {spec.width}x{spec.height}")
+    return 1
 
 
 @dataclass(frozen=True)
@@ -343,7 +387,7 @@ def verify_against_spec(
     from trip_vlog.filmcraft.timeline_spec import Placement  # noqa: F401  (type context)
     expected_order: dict[str, list[str]] = {}
     actual_primary: dict[str, ClipSnapshot] = {}
-    n_clips = 0
+    n_clips = n_fit = n_duck = 0
     for p in sorted(spec.placements, key=lambda p: (p.track, p.timeline_start_frame)):
         who = p.clip_instance_id
         n_clips += 1
@@ -359,6 +403,12 @@ def verify_against_spec(
         sout = Fraction(str(p.source_out_seconds)) if (p.media_kind != "image" and p.source_out_seconds is not None) else None
         gain = (p.audio_gain_db if p.audio_gain_db is not None else 0.0) if p.media_kind == "audio" else None
         check_clip(who, p.timeline_start_frame, p.duration_frames, c, sin, sout, gain)
+        n_fit += _check_framing(add, spec, p, c)
+        if p.media_kind == "audio" and (p.gain_keys or c.volume_keyframes):
+            n_duck += 1
+            if c.volume_keyframes != len(p.gain_keys):
+                add("ducking", who, len(p.gain_keys), c.volume_keyframes,
+                    f"{who}: {len(p.gain_keys)} volume keyframe(s) expected, {c.volume_keyframes} read back")
         audio_ref: ClipSnapshot | None = None
         if p.media_kind == "video" and p.include_linked_audio:
             at = p.audio_track or ""
@@ -386,6 +436,10 @@ def verify_against_spec(
         else:
             rep.skipped.append("media online/path (no media.status data)") if "media online/path (no media.status data)" not in rep.skipped else None
     rep.checked["clips"] = n_clips
+    if n_fit:
+        rep.checked["framing"] = n_fit
+    if n_duck:
+        rep.checked["ducking"] = n_duck
 
     # order within each track
     for track, ids in expected_order.items():

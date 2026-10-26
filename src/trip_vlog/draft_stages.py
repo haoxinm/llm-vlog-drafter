@@ -23,7 +23,7 @@ from trip_vlog.config import Config
 from trip_vlog.filmcraft.adapter import FilmCraftAdapter
 from trip_vlog.filmcraft.execution import failed_builds, latest_complete_project, load_journal, sha256_file
 from trip_vlog.filmcraft.mappings import MediaMap
-from trip_vlog.filmcraft.plan_mapping import MappingError, MappingResult, MappingSettings, edit_plan_to_spec
+from trip_vlog.filmcraft.plan_mapping import MappingError, MappingResult, MappingSettings, MappingWarning, edit_plan_to_spec
 from trip_vlog.filmcraft.timeline_spec import TimelineSpec, downgrade_dissolves
 from trip_vlog.handoff.compatibility import (REPORT_JSON as COMPAT_JSON, REPORT_MD as COMPAT_MD, CompatInputs, build_compatibility_report,
                                              load_finish_report, render_compatibility_markdown, summary_of)
@@ -37,7 +37,8 @@ from trip_vlog.planning.catalog_view import PlanningCatalog
 from trip_vlog.planning.models import EditPlan, edit_plan_hash, to_json_dict
 from trip_vlog.planning.pipeline import PlanPaths, plan_baseline_stage, plan_inputs, plan_paths
 from trip_vlog.planning.validate import ValidationReport, ValidationSettings, validate_edit_plan
-from trip_vlog.qc.checks import TranscriptSpan
+from trip_vlog.qc.checks import TranscriptSpan, clip_audio_features
+from trip_vlog.qc.ducking import DuckPlan, DuckSettings, build_duck_plan
 from trip_vlog.qc.report import QcInputs, run_qc
 from trip_vlog.state import StageResult, StageRunner, atomic_write_json, atomic_write_text, stable_hash
 
@@ -65,6 +66,7 @@ class Prepared:
     mapping: MappingResult
     validation: ValidationReport
     plan_hash: str
+    duck: DuckPlan | None = None
 
     @property
     def spec(self) -> TimelineSpec:
@@ -184,14 +186,40 @@ def _prepare(ctx: Any) -> Prepared:
     plan, report = validate_plan_file(ctx)
     view = PlanningCatalog.from_catalog(ctx.catalog)
     cfg = ctx.config
+    fc = cfg.filmcraft
+    fit, duck_cfg = fc.fit_mixed_aspect, DuckSettings.from_config(cfg)
+    gate: list[MappingWarning] = []
+    if fit or duck_cfg.enabled:
+        # a feature this FilmCraft cannot do is reported and left out (the current behaviour), not attempted
+        caps = _discovered_capabilities(ctx)
+        if caps is not None and fit and not caps.has("fit_to_frame"):
+            fit = False
+            gate.append(MappingWarning("fit_unsupported", None, "filmcraft.fit_mixed_aspect is on, but this FilmCraft has no clip.fitToFrame: clips keep their "
+                                       "native size in the frame (portrait clips are cropped); scale them in Resolve or update FilmCraft"))
+        if caps is not None and duck_cfg.enabled and not caps.has("clip_keyframe"):
+            duck_cfg = DuckSettings(False)
+            gate.append(MappingWarning("ducking_unsupported", None, "filmcraft.duck_music is on, but this FilmCraft cannot set Volume keyframes "
+                                       "(effects.setParam): the music is not ducked; lower it by hand in Resolve under speech"))
+    duck = build_duck_plan(plan, clip_audio_features(plan, view), _qc_transcripts(ctx), duck_cfg)
     try:
         mapping = edit_plan_to_spec(plan, view, ctx.paths.media_root,
-                                    MappingSettings(sequence_name=cfg.filmcraft.sequence_name, ambient_gain_db=cfg.filmcraft.ambient_low_gain_db))
+                                    MappingSettings(sequence_name=fc.sequence_name, ambient_gain_db=fc.ambient_low_gain_db,
+                                                    fit_mixed_aspect=fit, duck_keys=duck.keys or None))
     except MappingError as e:
         raise PlanRejected(f"edit plan cannot be mapped to a FilmCraft timeline: {e}", report) from None
-    prep = Prepared(plan, mapping, report, key)
+    mapping.warnings.extend(gate)
+    prep = Prepared(plan, mapping, report, key, duck)
     ctx.data["prepared"] = (key, prep)
     return prep
+
+
+def _discovered_capabilities(ctx: Any) -> Any:
+    """The adapter's capability map (starts a throw-away FilmCraft session once per run), or None when FilmCraft cannot be asked: the build
+    then reports the real problem."""
+    try:
+        return get_adapter(ctx).discover_capabilities()
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def get_adapter(ctx: Any) -> FilmCraftAdapter:
@@ -329,9 +357,16 @@ def _forget_revision_rules(ctx: Any) -> None:
 
 def _assemble_inputs(ctx: Any) -> Any:
     c = ctx.config.filmcraft
-    return {"plan": plan_file_hash(_pp(ctx).edit_plan),
-            "fc": [c.project_name, c.sequence_name, c.handle_policy, c.ambient_low_gain_db, c.executable],
-            "assets": [(a["asset_id"], a["content_version"]) for a in ctx.catalog.list_assets()]}
+    d: dict[str, Any] = {"plan": plan_file_hash(_pp(ctx).edit_plan),
+                         "fc": [c.project_name, c.sequence_name, c.handle_policy, c.ambient_low_gain_db, c.executable],
+                         "assets": [(a["asset_id"], a["content_version"]) for a in ctx.catalog.list_assets()]}
+    # keys only appear when the feature is on, so a workspace that does not use it keeps its cache
+    if c.fit_mixed_aspect:
+        d["fit"] = True
+    if c.duck_music:
+        d["duck"] = [c.duck_mode, c.duck_db, c.duck_ramp_seconds, c.duck_merge_gap_seconds, ctx.config.qc.audio_active_ratio_min,
+                     stable_hash({a: [(t.start, t.end, t.text, t.coarse) for t in ts] for a, ts in sorted(_qc_transcripts(ctx).items())})]
+    return d
 
 
 def _assemble_verify(ctx: Any) -> bool:
@@ -449,6 +484,8 @@ def _qc_inputs(ctx: Any) -> Any:
             "qc": ctx.config.qc.model_dump(), "tol": [ctx.config.project.duration_tolerance_pct, ctx.config.project.duration_tolerance_seconds],
             **({"target": ctx.config.effective_target_seconds} if ctx.config.revision_overrides.get("target_duration_seconds") else {}),
             "ambient_db": ctx.config.filmcraft.ambient_low_gain_db, "ffmpeg": ctx.ffmpeg is not None,
+            **({"framing": True, "preview_scale": ctx.config.filmcraft.preview_scale} if ctx.config.filmcraft.fit_mixed_aspect else {}),
+            **({"duck": _assemble_inputs(ctx).get("duck")} if ctx.config.filmcraft.duck_music else {}),
             "evidence": stable_hash({"audio": sorted(audio, key=lambda x: x[0]),
                                      "transcripts": {a: [(t.start, t.end, t.text, t.coarse) for t in ts] for a, ts in _qc_transcripts(ctx).items()}}),
             "outline": _qc_outline_scene_ids(ctx)}
@@ -463,6 +500,28 @@ def _qc_verify(ctx: Any) -> bool:
     except (OSError, ValueError):
         return False
     return not idx or _qc_index_path(ctx).is_file()
+
+
+def _render_music_bed(ctx: Any, ad: FilmCraftAdapter, prep: Prepared, proj_path: Path, reopen_error: str | None) -> tuple[Path | None, str | None, dict[str, str]]:
+    """The music tracks alone, rendered by FilmCraft from the saved project in a throw-away session, to measure the ducking. The project
+    file is checked to be byte-identical afterwards."""
+    if not ctx.config.filmcraft.duck_music or prep.duck is None or not prep.duck.keys:
+        return None, None, {}
+    music = [p for p in prep.spec.placements if p.clip_instance_id in prep.duck.keys]
+    sources = {p.clip_instance_id: p.source_path for p in music}
+    if ctx.ffmpeg is None:
+        return None, "ffmpeg not found", sources
+    if reopen_error:
+        return None, f"the project could not be reopened ({reopen_error})", sources
+    bed = ctx.workspace.root / "preview" / "music_bed.wav"
+    before = sha256_file(proj_path)
+    try:
+        ad.render_music_bed(bed, sorted({p.track for p in music}), project_path=proj_path)
+    except Exception as e:  # noqa: BLE001
+        return None, f"{type(e).__name__}: {e}", sources
+    if sha256_file(proj_path) != before:
+        return None, "the project file changed while the music bed was rendered (this must not happen); the measurement was discarded", sources
+    return bed, None, sources
 
 
 def qc_stage(ctx: Any) -> StageResult:
@@ -487,13 +546,17 @@ def qc_stage(ctx: Any) -> StageResult:
     except Exception as e:  # noqa: BLE001
         err = f"{type(e).__name__}: {e}"
         seq = None
+    bed, bed_error, sources = _render_music_bed(ctx, ad, prep, proj_path, err)
     report_path, sheet = _qc_paths(ctx)
     doc = run_qc(QcInputs(
         plan=prep.plan, catalog=PlanningCatalog.from_catalog(ctx.catalog), source_paths=prep.spec.asset_paths, sequence=seq,
         project=project, reopen_error=err, mismatches=mism, preview=_preview_path(ctx), report_path=report_path, contact_sheet=sheet,
         ffmpeg=ctx.ffmpeg, ffprobe=str(ctx.ffprobe) if ctx.ffprobe else None, config=ctx.config,
         transcripts=_qc_transcripts(ctx), outline_scene_ids=_qc_outline_scene_ids(ctx), index_path=_qc_index_path(ctx),
-        workspace_root=ctx.workspace.root))
+        workspace_root=ctx.workspace.root, spec=eff if seq is not None else prep.spec, duck=prep.duck, music_bed=bed, music_bed_error=bed_error,
+        music_sources=sources))
+    if bed is not None:
+        bed.unlink(missing_ok=True)       # a temporary measuring file of ours (the whole sequence's music as WAV); nothing of the user's
     cs = doc["contact_sheet"]
     summary = {"status": doc["status"], **doc["counts"], "report": _rel(ctx, report_path),
                "contact_sheet": _rel(ctx, sheet) if cs["path"] else None, "preview_sheets": len(cs.get("sheets") or []),
@@ -560,7 +623,8 @@ def _write_captions(ctx: Any, prep: Prepared, out: Path, notes: list[str]) -> di
 def _handoff_inputs(ctx: Any) -> Any:
     out = _handoff_dir(ctx)
     return {"project": _project_sha(ctx), **({"critic_report": c} if (c := _file_sha(_qc_paths_critic(ctx))) else {}), "plan": plan_file_hash(_pp(ctx).edit_plan),
-            "formats": list(ctx.config.filmcraft.interchange_formats), "qc": _file_sha(_qc_paths(ctx)[0]),
+            "formats": list(ctx.config.filmcraft.interchange_formats),
+            "qc": _file_sha(_qc_paths(ctx)[0]),
             "resolve_verification": _file_sha(out / "resolve_verification.json"),
             "resolve_finish_report": _file_sha(out / COMPAT_FINISH),
             "filmcraft_version": (ctx.manifest.get("filmcraft") or {}).get("version"),
