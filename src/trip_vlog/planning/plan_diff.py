@@ -24,12 +24,18 @@ Operations (``OPERATIONS``)
   set_transition  clip_instance_id + transition_type (cut|dissolve) [+ transition_seconds for a dissolve]; refused when the resolver cannot honour it
   set_clip_audio  clip_instance_id + audio: mute (muted) | keep (natural_sound) | lower (ambient_low, the configured ambient gain)
   shorten_scene   scene_id + shorten_by_seconds; the scene's primary clips are scaled down together, none below its minimum
+
+Operations only natural-language revisions use (``REVISION_OPERATIONS``; the critic's closed set stays ``OPERATIONS``)
+  add_moment      scene_id + moment_id (+ to_position, duration_seconds); one of the scene's candidate moments, not used yet; a cut into it
+  remove_scene    scene_id; never the last scene, never a scene a title is anchored to
+  move_scene      scene_id + to_position (1-based among the scenes); titles follow their scene
 """
 
 from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
@@ -47,6 +53,8 @@ from trip_vlog.planning.selection import MAX_STILL_SECONDS, MIN_CLIP_SECONDS, fi
 from trip_vlog.planning.validate import ValidationReport, ValidationSettings, validate_edit_plan, validate_selection_plan
 
 OPERATIONS = ("trim_clip", "swap_moment", "remove_clip", "move_clip", "set_transition", "set_clip_audio", "shorten_scene")
+REVISION_ONLY_OPERATIONS = ("add_moment", "remove_scene", "move_scene")
+REVISION_OPERATIONS = OPERATIONS + REVISION_ONLY_OPERATIONS     # what `trip-vlog revise` may use; the critic's schema lists OPERATIONS only
 ANCHORS = ("start", "center", "end", "best")
 AUDIO_MODES = {"mute": "muted", "keep": "natural_sound", "lower": "ambient_low"}
 MIN_DISSOLVE_SECONDS = 0.1
@@ -63,6 +71,9 @@ _REQUIRED: dict[str, tuple[Any, ...]] = {
     "set_transition": ("clip_instance_id", "transition_type"),
     "set_clip_audio": ("clip_instance_id", "audio"),
     "shorten_scene": ("scene_id", "shorten_by_seconds"),
+    "add_moment": ("scene_id", "moment_id"),
+    "remove_scene": ("scene_id",),
+    "move_scene": ("scene_id", "to_position"),
 }
 _FIELDS: dict[str, tuple[str, ...]] = {
     "trim_clip": ("clip_instance_id", "duration_seconds", "anchor"),
@@ -72,6 +83,9 @@ _FIELDS: dict[str, tuple[str, ...]] = {
     "set_transition": ("clip_instance_id", "transition_type", "transition_seconds"),
     "set_clip_audio": ("clip_instance_id", "audio"),
     "shorten_scene": ("scene_id", "shorten_by_seconds"),
+    "add_moment": ("scene_id", "moment_id", "to_position", "duration_seconds"),
+    "remove_scene": ("scene_id",),
+    "move_scene": ("scene_id", "to_position"),
 }
 
 
@@ -110,12 +124,13 @@ class PlanOp:
     reason: str = ""
 
     @classmethod
-    def from_dict(cls, d: Mapping[str, Any]) -> "PlanOp":
+    def from_dict(cls, d: Mapping[str, Any], allowed: Sequence[str] = OPERATIONS) -> "PlanOp":
         """Build and check an operation from a record. Accepts the flat shape with null for 'not used' (the critic's reply). Parameters
-        that do not belong to the operation are dropped; missing or out-of-set ones raise `OpError`."""
+        that do not belong to the operation are dropped; missing or out-of-set ones raise `OpError`. ``allowed``: the operation names the
+        caller accepts (the critic: ``OPERATIONS``; revisions: ``REVISION_OPERATIONS``)."""
         name = d.get("op", d.get("operation"))
-        if name not in OPERATIONS:
-            raise OpError(f"unknown operation {name!r} (allowed: {', '.join(OPERATIONS)})")
+        if name not in allowed:
+            raise OpError(f"unknown operation {name!r} (allowed: {', '.join(allowed)})")
         vals: dict[str, Any] = {k: d.get(k) for k in _FIELDS[name]}
         for need in _REQUIRED[name]:
             alts = need if isinstance(need, tuple) else (need,)
@@ -137,10 +152,12 @@ class PlanOp:
                 raise OpError("trim_clip: duration_seconds must be more than 0")
             if vals["anchor"] is not None and vals["anchor"] not in ANCHORS:
                 raise OpError(f"trim_clip: anchor must be one of {', '.join(ANCHORS)}")
-        if name == "move_clip":
+        if name in ("move_clip", "move_scene") or (name == "add_moment" and vals["to_position"] is not None):
             p = vals["to_position"]
             if isinstance(p, bool) or not isinstance(p, int) or p < 1:
-                raise OpError("move_clip: to_position must be an integer from 1")
+                raise OpError(f"{name}: to_position must be an integer from 1")
+        if name == "add_moment" and vals["duration_seconds"] is not None and vals["duration_seconds"] <= 0:
+            raise OpError("add_moment: duration_seconds must be more than 0")
         if name == "set_transition":
             if vals["transition_type"] not in ("cut", "dissolve"):
                 raise OpError("set_transition: transition_type must be cut or dissolve")
@@ -187,6 +204,13 @@ class PlanOp:
                     else f"dissolve of {self.transition_seconds:g} s into {self.clip_instance_id}")
         if n == "set_clip_audio":
             return f"{ {'mute': 'mute', 'keep': 'keep the sound of', 'lower': 'lower the sound of'}[self.audio or 'keep'] } {self.clip_instance_id}"
+        if n == "add_moment":
+            return (f"add moment {self.moment_id} to scene {self.scene_id}" + (f" at position {self.to_position}" if self.to_position else "")
+                    + (f" for {self.duration_seconds:g} s" if self.duration_seconds else ""))
+        if n == "remove_scene":
+            return f"remove scene {self.scene_id}"
+        if n == "move_scene":
+            return f"move scene {self.scene_id} to position {self.to_position}"
         return f"shorten scene {self.scene_id} by {self.shorten_by_seconds:g} s"
 
 
@@ -418,7 +442,80 @@ def _apply_shorten(sel: SelectionPlan, op: PlanOp, ctx: PlanContext) -> list[str
     return [f"scene {sc.scene_id}: {sum(cur):.2f} s -> {sum(c.target_duration_seconds for c in prim):.2f} s"]
 
 
-_APPLY = {"trim_clip": _apply_trim, "swap_moment": _apply_swap, "remove_clip": _apply_remove, "move_clip": _apply_move,
+def _scene(sel: SelectionPlan, scene_id: str | None) -> SelectionScene:
+    sc = next((s for s in sel.scenes if s.scene_id == scene_id), None)
+    if sc is None:
+        raise OpRefused("unknown_scene", f"there is no scene {scene_id!r} in the plan")
+    return sc
+
+
+def _next_clip_id(sel: SelectionPlan) -> str:
+    used = {c.clip_instance_id for s in sel.scenes for c in s.clips}
+    nums = [int(m[1]) for x in used if (m := re.fullmatch(r"clip_(\d+)", x))]
+    n = max(nums + [0]) + 1
+    while f"clip_{n:03d}" in used:
+        n += 1
+    return f"clip_{n:03d}"
+
+
+def _apply_add_moment(sel: SelectionPlan, op: PlanOp, ctx: PlanContext) -> list[str]:
+    sc = _scene(sel, op.scene_id)
+    if ctx.scene_candidates is None:
+        raise OpRefused("add_unavailable", "moments can only be added from the candidates of an approved story outline, and this plan has none")
+    if op.moment_id not in set(ctx.scene_candidates.get(sc.scene_id, ())):
+        raise OpRefused("moment_not_candidate", f"{op.moment_id} is not one of the candidate moments of scene {sc.scene_id}")
+    if op.moment_id not in ctx.catalog.moments:
+        raise OpRefused("unknown_moment", f"{op.moment_id} is not a moment in the catalog")
+    if any(x.moment_id == op.moment_id for s in sel.scenes for x in s.clips):
+        raise OpRefused("moment_in_use", f"{op.moment_id} is already used by another clip")
+    lo, hi = _limits(ctx, op.moment_id)
+    one = float(1 / ctx.fps)
+    prim = [c.target_duration_seconds for c in sc.clips if c.track_role == "primary_video"]
+    want = op.duration_seconds if op.duration_seconds is not None else (sorted(prim)[len(prim) // 2] if prim else 3.0)
+    if op.duration_seconds is not None and want > hi + one:
+        raise OpRefused("duration_exceeds_moment", f"{op.moment_id}: {want:g} s is longer than the {hi:.2f} s that moment offers")
+    new = min(max(_snap(want, ctx.fps), lo), hi)
+    if new < lo - 1e-9 or new <= 0:
+        raise OpRefused("duration_too_short", f"{op.moment_id} offers only {hi:.2f} s, less than the minimum clip length of {lo:g} s")
+    pos = op.to_position if op.to_position is not None else len(sc.clips) + 1
+    if not (1 <= pos <= len(sc.clips) + 1):
+        raise OpRefused("position_out_of_range", f"scene {sc.scene_id} has {len(sc.clips)} clip(s); position {pos} does not exist")
+    m = ctx.catalog.moments[op.moment_id]
+    a = ctx.catalog.assets.get(m.asset_id)
+    still = _is_still(ctx, op.moment_id)
+    cid = _next_clip_id(sel)
+    sc.clips.insert(pos - 1, SelectionClip(
+        clip_instance_id=cid, moment_id=op.moment_id, target_duration_seconds=round(new, 6), anchor="center", track_role="primary_video",
+        audio_policy="natural_sound" if (not still and a is not None and a.has_audio) else "muted",
+        transition_in=SelectionTransition(type="cut", duration_seconds=0.0),
+        rationale=(op.reason or "Added by a revision request")[:MAX_REASON_CHARS], intentional_repeat_reason=None))
+    return [f"{cid} added to scene {sc.scene_id} at position {pos} ({op.moment_id}, {new:g} s)"]
+
+
+def _apply_remove_scene(sel: SelectionPlan, op: PlanOp, ctx: PlanContext) -> list[str]:
+    sc = _scene(sel, op.scene_id)
+    if len(sel.scenes) <= 1:
+        raise OpRefused("last_scene", f"{sc.scene_id} is the only scene of the film")
+    ids = {c.clip_instance_id for c in sc.clips}
+    anchored = [t.title_id for t in sel.titles if t.scene_id == sc.scene_id or t.start.clip_instance_id in ids]
+    if anchored:
+        raise OpRefused("title_anchored", f"title {', '.join(anchored)} belongs to scene {sc.scene_id}; the scene is not removed from under a title")
+    sel.scenes.remove(sc)
+    return [f"scene {sc.scene_id} removed ({len(sc.clips)} clip(s), {sum(c.target_duration_seconds for c in sc.clips if c.track_role == 'primary_video'):.2f} s)"]
+
+
+def _apply_move_scene(sel: SelectionPlan, op: PlanOp, ctx: PlanContext) -> list[str]:
+    sc = _scene(sel, op.scene_id)
+    n, i = len(sel.scenes), sel.scenes.index(sc)
+    if not (1 <= int(op.to_position or 0) <= n):
+        raise OpRefused("position_out_of_range", f"the film has {n} scene(s); position {op.to_position} does not exist")
+    if op.to_position - 1 == i:
+        raise OpRefused("no_change", f"scene {sc.scene_id} is already at position {op.to_position}")
+    sel.scenes.insert(op.to_position - 1, sel.scenes.pop(i))
+    return [f"scene {sc.scene_id}: position {i + 1} -> {op.to_position}"]
+
+
+_APPLY = {"add_moment": _apply_add_moment, "remove_scene": _apply_remove_scene, "move_scene": _apply_move_scene, "trim_clip": _apply_trim, "swap_moment": _apply_swap, "remove_clip": _apply_remove, "move_clip": _apply_move,
           "set_transition": _apply_transition, "set_clip_audio": _apply_audio, "shorten_scene": _apply_shorten}
 
 
@@ -580,6 +677,7 @@ class PlanDiff:
     total_before_seconds: float
     total_after_seconds: float
     title_changes: list[str] = field(default_factory=list)
+    scene_order: list[str] = field(default_factory=list)      # one line when scenes were reordered (revisions only)
 
     @property
     def total_delta_seconds(self) -> float:
@@ -592,15 +690,17 @@ class PlanDiff:
     def to_dict(self) -> dict[str, Any]:
         return {"old_plan_hash": self.old_plan_hash, "new_plan_hash": self.new_plan_hash, "total_before_seconds": self.total_before_seconds,
                 "total_after_seconds": self.total_after_seconds, "total_delta_seconds": self.total_delta_seconds,
-                "scenes": [s.to_dict() for s in self.scenes], "title_changes": list(self.title_changes)}
+                "scenes": [s.to_dict() for s in self.scenes], "title_changes": list(self.title_changes),
+                **({"scene_order": list(self.scene_order)} if self.scene_order else {})}
 
     def lines(self) -> list[str]:
-        if not self.scenes and not self.title_changes:
+        if not self.scenes and not self.title_changes and not self.scene_order:
             return ["No change."]
         out = [f"Total: {self.total_before_seconds:.2f} s -> {self.total_after_seconds:.2f} s ({_signed(self.total_delta_seconds)} s)"]
         for s in self.scenes:
             out.append(f"Scene {s.scene_id}: {s.before_seconds:.2f} s -> {s.after_seconds:.2f} s ({_signed(s.delta_seconds)} s)")
             out += [f"  - {c.text}" for c in s.changes]
+        out += [f"Scene order: {t}" for t in self.scene_order]
         out += [f"Title: {t}" for t in self.title_changes]
         return out
 
@@ -652,13 +752,22 @@ def diff_plans(old: EditPlan, new: EditPlan) -> PlanDiff:
         before = _sec(o.duration_frames, fps) if o is not None else 0.0
         if changes or abs(before - _sec(s.duration_frames, fps)) > 1e-9:
             scenes.append(SceneDiff(s.scene_id, s.title, before, _sec(s.duration_frames, fps), changes))
+    new_ids = {s.scene_id for s in new.scenes}
+    for o in old.scenes:
+        if o.scene_id not in new_ids:      # a scene a revision removed: its clips are gone with it
+            scenes.append(SceneDiff(o.scene_id, o.title, _sec(o.duration_frames, fps), 0.0, [ClipChange(
+                o.clips[0].clip_instance_id if o.clips else o.scene_id, "scene_removed",
+                f"scene {o.scene_id} removed ({len(o.clips)} clip(s): {', '.join(c.clip_instance_id for c in o.clips)})")]))
+    common_old = [s.scene_id for s in old.scenes if s.scene_id in new_ids]
+    common_new = [s.scene_id for s in new.scenes if s.scene_id in {x.scene_id for x in old.scenes}]
+    order = [f"{', '.join(common_old)} -> {', '.join(common_new)}"] if common_old != common_new else []
     old_t = {t.title_id: t for t in old.titles}
     tchanges = []
     for t in new.titles:
         ot = old_t.get(t.title_id)
         if ot is not None and (ot.start_frame, ot.duration_frames) != (t.start_frame, t.duration_frames):
             tchanges.append(f"{t.title_id} ({t.text!r}) moves from {_sec(ot.start_frame, fps):.2f} s to {_sec(t.start_frame, fps):.2f} s")
-    return PlanDiff(old.plan_hash, new.plan_hash, scenes, _sec(old.total_duration_frames, fps), _sec(new.total_duration_frames, fps), tchanges)
+    return PlanDiff(old.plan_hash, new.plan_hash, scenes, _sec(old.total_duration_frames, fps), _sec(new.total_duration_frames, fps), tchanges, order)
 
 
 def _secs(v: float | None) -> str:
@@ -679,6 +788,6 @@ def render_ops_markdown(applied: Sequence[AppliedOp], refused: Sequence[RefusedO
     return out
 
 
-__all__ = ["OPERATIONS", "ANCHORS", "AUDIO_MODES", "ApplyResult", "AppliedOp", "ClipChange", "OpError", "OpRefused", "PlanBaseError", "PlanContext", "PlanDiff",
+__all__ = ["OPERATIONS", "REVISION_OPERATIONS", "REVISION_ONLY_OPERATIONS", "ANCHORS", "AUDIO_MODES", "ApplyResult", "AppliedOp", "ClipChange", "OpError", "OpRefused", "PlanBaseError", "PlanContext", "PlanDiff",
            "PlanOp", "RefusedOp", "SceneDiff", "apply_ops", "check_roundtrip", "diff_plans", "layout_signature", "load_selection_file",
            "render_ops_markdown", "selection_from_edit"]
