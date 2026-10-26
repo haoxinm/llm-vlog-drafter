@@ -431,7 +431,7 @@ def _handoff_inputs(ctx: Any) -> Any:
             "formats": list(ctx.config.filmcraft.interchange_formats), "qc": _file_sha(_qc_paths(ctx)[0]),
             "resolve_verification": _file_sha(out / "resolve_verification.json"),
             "resolve_finish_report": _file_sha(out / COMPAT_FINISH),
-            "capabilities": _file_sha(ctx.workspace.root / "filmcraft" / "capability_snapshot.json"),
+            "filmcraft_version": (ctx.manifest.get("filmcraft") or {}).get("version"),
             "assets": [(a["asset_id"], a["content_version"]) for a in ctx.catalog.list_assets()]}
 
 
