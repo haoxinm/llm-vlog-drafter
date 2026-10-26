@@ -540,3 +540,18 @@ def test_array_limits_are_not_in_the_reply_schemas_and_are_handled_in_code(tmp_p
         return d
     ctx2, tr2 = setup(tmp_path / "b", planner_config(), PlannerTransport(respond_outline=many_scenes))
     assert plan_runner(ctx2).run()["outline"] == S.FAILED and "too_many_scenes" in all_text(tr2.outline_calls[1:])
+
+
+def test_unusable_model_reply_marks_the_earlier_plan_stale(tmp_path, monkeypatch):
+    from trip_vlog.llm.types import LLMSchemaError
+    from trip_vlog.planning import selection as sl_mod
+    ctx, tr = setup(tmp_path)
+    plan_runner(ctx).run()
+    plans = ctx.workspace.root / "plans"
+
+    def unusable(*a, **k):
+        raise LLMSchemaError("reply does not match the response schema", errors=["x"], attempts=3)
+    monkeypatch.setattr(sl_mod, "generate_selection", unusable)
+    st = reapproved_replan(ctx, tr, lambda doc: doc["scenes"][0].update(tone="calm"))
+    assert st["plan"] == S.FAILED
+    assert not (plans / "edit_plan.json").exists() and (plans / "edit_plan.stale.json").is_file()

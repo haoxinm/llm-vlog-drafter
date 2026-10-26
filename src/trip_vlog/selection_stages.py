@@ -18,7 +18,7 @@ from typing import Any
 
 from trip_vlog import outline_stages
 from trip_vlog.llm.factory import resolve_mode, resolve_model
-from trip_vlog.llm.types import LLMError
+from trip_vlog.llm.types import LLMError, LLMRefusalError, LLMSchemaError, LLMTruncatedError
 from trip_vlog.logging_utils import Status, utc_now_iso
 from trip_vlog.planning import outline as ol
 from trip_vlog.planning import selection as sl
@@ -94,7 +94,10 @@ def plan_llm_stage(ctx: Any) -> StageResult:
         res.summary["planning_failure"] = True      # the plan was refused: an earlier plan no longer matches (see draft_stages.plan_stage)
         return res
     except LLMError as e:
-        return _fail_report(ctx, pp, base, f"{type(e).__name__}: {e}", [], None)
+        res = _fail_report(ctx, pp, base, f"{type(e).__name__}: {e}", [], None)
+        if isinstance(e, (LLMSchemaError, LLMRefusalError, LLMTruncatedError)):
+            res.summary["planning_failure"] = True  # the model answered but its reply is unusable: also a refused plan
+        return res
     usage = {"requests": res.requests, "input_tokens": res.usage.input_tokens, "output_tokens": res.usage.output_tokens}
     _write_all(ctx.workspace, cfg, dict(ctx.paths.outputs), res.selection, res.edit, res.report, sctx.view,
                oc=sctx.oc, outline=sctx.outline, usage=usage)
