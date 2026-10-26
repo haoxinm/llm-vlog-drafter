@@ -26,7 +26,7 @@ from trip_vlog.planning.duration import frames_to_float, seconds_to_frames
 from trip_vlog.planning.models import (TITLE_MAX_CHARS, TITLE_MAX_LINES, TITLE_MAX_SECONDS, TITLE_MIN_SECONDS, EditScene, EditTitle,
                                        SelectionPlan, SelectionScene, SelectionTitle, TitleStart)
 
-_CONTROL = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")   # newline (\x0a) is allowed: two-line titles
+_CONTROL = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")   # newline (\x0a) is not matched here: `text_problems` reports a second line on its own
 FOLDER_FLAG = "from folder name"
 
 

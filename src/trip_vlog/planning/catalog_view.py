@@ -101,13 +101,26 @@ class PlanningCatalog:
         return sorted((m for m in self.moments.values() if m.asset_id == asset_id),
                       key=lambda m: (m.source_in_seconds if m.source_in_seconds is not None else -1.0, m.moment_id))
 
-    def fingerprint(self) -> list[Any]:
-        """JSON-able description of the planning-relevant catalog content (for stage input hashes)."""
-        return [sorted((a.asset_id, a.content_version, a.present, a.probe_ok, a.capture_time) for a in self.assets.values()),
-                sorted((m.moment_id, m.source_in_seconds, m.source_out_seconds, m.content_version) for m in self.moments.values())]
+    def fingerprint(self, moment_ids: Iterable[str] | None = None) -> list[Any]:
+        """JSON-able description of everything the resolver and the validators read from the catalog (for stage input hashes):
+        a changed range, best sub-range, length, frame rate, audio or version re-plans, even when the text a model sees is the same.
+        With ``moment_ids``: only those moments and their assets."""
+        moments = self.moments.values() if moment_ids is None else [self.moments[i] for i in set(moment_ids) if i in self.moments]
+        asset_ids = {m.asset_id for m in moments} if moment_ids is not None else None
+        assets = [a for a in self.assets.values() if asset_ids is None or a.asset_id in asset_ids]
+        return [sorted((a.asset_id, a.relative_path, a.media_type, a.duration_seconds, str(a.fps) if a.fps is not None else None,
+                        a.display_width or a.width, a.display_height or a.height, a.audio_streams, a.content_version, a.present, a.probe_ok,
+                        a.capture_time) for a in assets),
+                sorted((m.moment_id, m.asset_id, m.source_in_seconds, m.source_out_seconds, m.best_in_seconds, m.best_out_seconds, m.content_version)
+                       for m in moments)]
 
 
 # ---- references (must_include / must_exclude) ----------------------------------------------------------
+
+def required_label(n: int) -> str:
+    """How a request or a finding sent to a model names the n-th must_include reference (1-based; 0 = unknown): never the reference."""
+    return f"required item {n}" if n > 0 else "a required item"
+
 
 def _norm_ref(ref: str) -> str:
     r = nfc(ref.strip()).replace("\\", "/")

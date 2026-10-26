@@ -133,7 +133,7 @@ def test_mapping_to_title_spec_is_frame_exact():
 
 def test_baseline_opening_title_on_and_off():
     off = with_default_titles(base(), TitleSettings(project_title="My Trip"))
-    assert off.titles == [] and off.schema_version == "1.0" or off.titles == []
+    assert off.titles == [] and off.schema_version == base().schema_version == "1.0"      # nothing enabled: the plan is returned as it was
     on = with_default_titles(base(), TitleSettings(opening_title=True, closing_title="Bye", project_title="My Trip", title_seconds=2.5))
     assert [(t.role, t.text, t.duration_seconds) for t in on.titles] == [("opening_title", "My Trip", 2.5), ("closing", "Bye", 2.5)]
     assert with_default_titles(on, TitleSettings(opening_title=True, closing_title="Bye", project_title="My Trip")).titles == on.titles   # idempotent

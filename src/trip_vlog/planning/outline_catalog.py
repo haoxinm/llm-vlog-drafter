@@ -19,7 +19,7 @@ from typing import Any, Iterable, Sequence
 
 from trip_vlog.analysis.labels import EDITORIAL_TAGS
 from trip_vlog.llm.untrusted import untrusted_block
-from trip_vlog.planning.catalog_view import PlanningCatalog, capture_sort_key, ref_matches, ref_targets
+from trip_vlog.planning.catalog_view import PlanningCatalog, capture_sort_key, ref_matches, ref_targets, required_label
 from trip_vlog.state import stable_hash
 
 QUALITY_KEYS = ("sharpness", "stability", "exposure")
@@ -131,6 +131,11 @@ class OutlineCatalog:
     @property
     def offered(self) -> frozenset[str]:
         return frozenset(m.moment_id for m in self.moments)
+
+    def ref_label(self, ref: str) -> str:
+        """What a request says instead of a must_include reference ("required item 2"): references are paths, folders or globs
+        taken from the user's own layout and stay on this machine. Numbered in the order of ``editorial.must_include``."""
+        return required_label(list(self.must_include).index(ref) + 1 if ref in self.must_include else 0)
 
     def by_id(self, moment_id: str) -> OutlineMoment | None:
         return self.eligible.get(moment_id)

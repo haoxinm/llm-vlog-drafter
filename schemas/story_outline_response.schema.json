@@ -9,7 +9,6 @@
       "properties": {
         "justification": {
           "description": "Why this is a real, compelling moment, else null.",
-          "maxLength": 500,
           "type": [
             "string",
             "null"
@@ -37,15 +36,12 @@
     "missing_coverage": {
       "description": "Coverage the story needs (or the user asked for) that the catalog lacks.",
       "items": {
-        "maxLength": 500,
         "type": "string"
       },
-      "maxItems": 100,
       "type": "array"
     },
     "premise": {
-      "description": "A short narrative premise grounded in the catalog.",
-      "maxLength": 1500,
+      "description": "A short narrative premise grounded in the catalog (a few sentences).",
       "type": "string"
     },
     "scenes": {
@@ -64,15 +60,13 @@
           },
           "chronology_note": {
             "description": "Why the scene is out of chronological order, or null when it is in order.",
-            "maxLength": 500,
             "type": [
               "string",
               "null"
             ]
           },
           "purpose": {
-            "description": "What this scene does for the story, in one or two sentences.",
-            "maxLength": 500,
+            "description": "What this scene does for the story, in one or two sentences (up to 500 characters).",
             "type": "string"
           },
           "role": {
@@ -92,19 +86,15 @@
             "type": "string"
           },
           "target_duration_seconds": {
-            "description": "Time budget for the scene on the timeline, in seconds.",
-            "exclusiveMinimum": 0,
-            "maximum": 7200,
+            "description": "Time budget for the scene on the timeline, in seconds (more than 0).",
             "type": "number"
           },
           "title": {
-            "description": "Short working title.",
-            "maxLength": 200,
+            "description": "Short working title, at most 60 characters (it can become an on-screen title).",
             "type": "string"
           },
           "tone": {
             "description": "Emotional tone, a few words.",
-            "maxLength": 200,
             "type": "string"
           }
         },
@@ -135,10 +125,8 @@
     "uncertainties": {
       "description": "Things the user should confirm before the outline is approved.",
       "items": {
-        "maxLength": 500,
         "type": "string"
       },
-      "maxItems": 100,
       "type": "array"
     }
   },

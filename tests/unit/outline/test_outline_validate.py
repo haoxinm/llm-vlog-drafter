@@ -67,7 +67,8 @@ def test_schema_and_models_agree():
     ol.StoryOutline.model_validate(doc)
     bad = copy.deepcopy(d)
     bad["scenes"][0]["target_duration_seconds"] = 0
-    assert validation_errors(bad, ol.response_schema())                                              # exclusiveMinimum 0
+    assert validation_errors(bad, ol.response_schema()) == []     # the response schema has no numeric limits
+    assert validation_errors(document_from_response(bad), ol.outline_schema())                       # the document schema does: exclusiveMinimum 0
     with pytest.raises(Exception):
         ol.StoryOutline.model_validate(document_from_response(bad))
     del bad["scenes"][0]["chronology_note"]
@@ -217,7 +218,9 @@ def test_must_include_covered_or_reported(tmp_path):
     s = OutlineSettings.from_config(cfg)
     flat = [i for rel in ("day1/arrival.mp4", "day1/market.mp4") for i in ids[rel]]
     rep = validate_outline(document_from_response(default_draft(flat, 60)), oc, s, repair=True)
-    assert codes(rep.errors) == ["must_include_missing"] and "day2/hike.mp4" in rep.errors[0].message and ids["day2/hike.mp4"][0] in rep.errors[0].message
+    assert codes(rep.errors) == ["must_include_missing"] and ids["day2/hike.mp4"][0] in rep.errors[0].message
+    assert "day2/hike.mp4" not in rep.errors[0].message and "required item 1" in rep.errors[0].message        # the model never sees the reference
+    assert any(w.code == "must_include_ref" and "day2/hike.mp4" in w.message for w in rep.warnings)          # the local report does
     flat += ids["day2/hike.mp4"]
     rep = validate_outline(document_from_response(default_draft(flat, 60)), oc, s, repair=True)
     assert rep.ok and codes(rep.warnings) == ["must_include_unavailable"]

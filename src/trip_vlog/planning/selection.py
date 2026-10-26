@@ -32,9 +32,9 @@ from trip_vlog.llm.types import LLMRequest, TextPart, Usage
 from trip_vlog.llm.untrusted import PREAMBLE, untrusted_block
 from trip_vlog.planning.catalog_view import PlanningCatalog
 from trip_vlog.planning.duration import frames_to_float, parse_fps, seconds_to_frames
-from trip_vlog.planning.models import (SCHEMA_VERSION, TITLE_MAX_SECONDS, TITLE_MIN_SECONDS, EditPlan, SelectionClip, SelectionPlan,
+from trip_vlog.planning.models import (SCHEMA_VERSION, TITLE_MAX_CHARS, TITLE_MAX_SECONDS, TITLE_MIN_SECONDS, EditPlan, SelectionClip, SelectionPlan,
                                        SelectionScene, SelectionTitle, SelectionTransition, TitleStart)
-from trip_vlog.planning.outline import StoryOutline, findings_text
+from trip_vlog.planning.outline import StoryOutline, findings_text, reask_parts
 from trip_vlog.planning.outline_catalog import OutlineCatalog, OutlineMoment
 from trip_vlog.planning.resolve_plan import PlanResolutionError, PlanSettings, resolve_selection_plan
 from trip_vlog.planning.titles import TitleSettings, classify_text, default_titles, normalize_text, text_problems, title_id_for
@@ -51,6 +51,11 @@ MAX_CLIPS_PER_SCENE = 500
 MAX_SCENES = 200
 MAX_TITLES_SCHEMA = 50
 DISSOLVE_MIN_SECONDS = 0.1       # a dissolve shortened below this becomes a cut
+MAX_TRANSITION_SECONDS = 5.0     # limits of the selection plan that the response schema leaves out (see response_schema)
+MAX_TITLE_OFFSET_SECONDS = 600.0
+MAX_RATIONALE = 400
+MAX_TITLE_RATIONALE = 300
+MAX_UNCERTAINTY = 500
 
 
 class SelectionError(RuntimeError):
@@ -77,32 +82,32 @@ def prompt_info() -> dict[str, Any]:
 # ---- response schema (strict-mode friendly: every property required, nullable instead of optional) --------------------
 
 def response_schema() -> dict[str, Any]:
+    """Cosmetic limits (text length, number ranges) are not part of this schema: providers ignore them and the gateway would fail the
+    whole stage over one long sentence. They are said in the descriptions; `build_work` / `check_work` shorten and clamp what comes back."""
     clip = {
         "moment_id": {"type": "string", "description": "A candidate moment of this scene, copied exactly from its 'id' field."},
-        "target_duration_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 3600,
-                                    "description": "How long the clip plays, in seconds; never more than the moment's 'use' value."},
+        "target_duration_seconds": {"type": "number", "description": "How long the clip plays, in seconds; more than 0 and never more than the moment's 'use' value."},
         "anchor": {"type": "string", "enum": ["start", "center", "end", "best"], "description": "Where inside the moment the clip is taken."},
         "track_role": {"type": "string", "enum": ["primary_video", "overlay"], "description": "primary_video for the story; overlay is rarely needed."},
         "audio_policy": {"type": "string", "enum": ["natural_sound", "ambient_low", "muted"], "description": "What happens to the clip's own sound."},
         "transition_in": {"type": "object", "properties": {
             "type": {"type": "string", "enum": ["cut", "dissolve"]},
-            "duration_seconds": {"type": "number", "minimum": 0, "maximum": 5, "description": "0 for a cut; 0.3 to 1.0 for a dissolve."}},
+            "duration_seconds": {"type": "number", "description": "0 for a cut; 0.3 to 1.0 for a dissolve (never more than 5)."}},
             "required": ["type", "duration_seconds"], "additionalProperties": False, "description": "How the clip begins."},
-        "rationale": {"type": "string", "maxLength": 400, "description": "One short sentence on why the clip is there."},
-        "intentional_repeat_reason": {"type": ["string", "null"], "maxLength": 400,
-                                      "description": "Only when a moment is deliberately used again; otherwise null."},
+        "rationale": {"type": "string", "description": f"One short sentence on why the clip is there (at most {MAX_RATIONALE} characters)."},
+        "intentional_repeat_reason": {"type": ["string", "null"], "description": "Only when a moment is deliberately used again; otherwise null."},
     }
     start = {
         "relative_to": {"type": "string", "enum": ["scene_start", "clip_start"], "description": "Start at the scene's first frame or at one of its clips."},
-        "clip_number": {"type": ["integer", "null"], "minimum": 1, "description": "For clip_start: the clip's position in the scene, counted from 1; else null."},
-        "offset_seconds": {"type": "number", "minimum": 0, "maximum": 600, "description": "Seconds after that point."},
+        "clip_number": {"type": ["integer", "null"], "description": "For clip_start: the clip's position in the scene's clip list, counted from 1; else null."},
+        "offset_seconds": {"type": "number", "description": f"Seconds after that point (0 to {MAX_TITLE_OFFSET_SECONDS:g})."},
     }
     title = {
         "scene_id": {"type": "string", "description": "The scene the title belongs to."},
-        "text": {"type": "string", "maxLength": 200, "description": "Exactly the outline's title of that scene (at most 60 characters)."},
+        "text": {"type": "string", "description": f"Exactly the outline's title of that scene (at most {TITLE_MAX_CHARS} characters, one line)."},
         "start": {"type": "object", "properties": start, "required": list(start), "additionalProperties": False},
-        "duration_seconds": {"type": "number", "minimum": 0.5, "maximum": 30, "description": f"{TITLE_MIN_SECONDS:g} to {TITLE_MAX_SECONDS:g} seconds."},
-        "rationale": {"type": "string", "maxLength": 300},
+        "duration_seconds": {"type": "number", "description": f"{TITLE_MIN_SECONDS:g} to {TITLE_MAX_SECONDS:g} seconds."},
+        "rationale": {"type": "string", "description": f"At most {MAX_TITLE_RATIONALE} characters."},
     }
     scene = {
         "scene_id": {"type": "string", "description": "The outline's scene_id, exactly."},
@@ -114,8 +119,8 @@ def response_schema() -> dict[str, Any]:
                    "items": {"type": "object", "properties": scene, "required": list(scene), "additionalProperties": False}},
         "titles": {"type": "array", "maxItems": MAX_TITLES_SCHEMA, "description": "Scene titles, only when enabled; otherwise empty.",
                    "items": {"type": "object", "properties": title, "required": list(title), "additionalProperties": False}},
-        "uncertainties": {"type": "array", "maxItems": 100, "items": {"type": "string", "maxLength": 500},
-                          "description": "Things the user should check in the result."},
+        "uncertainties": {"type": "array", "items": {"type": "string"},
+                          "description": f"Things the user should check in the result (up to 100, each at most {MAX_UNCERTAINTY} characters)."},
     }
     return {"$schema": "https://json-schema.org/draft/2020-12/schema", "$id": f"https://trip-vlog.local/schemas/timeline_planner_response:{RESPONSE_SCHEMA_VERSION}",
             "title": "timeline_planner_response", "description": "Timeline planner reply: clips per outline scene (moment, duration, anchor, sound, "
@@ -205,12 +210,14 @@ def constraints_text(ctx: SelectionContext) -> str:
     e = ctx.config.editorial
     oc = ctx.oc
     lines = ["- Use only the candidate moments listed under each scene, and only the scene's own."]
+    # References are paths, folders or globs from the user's own layout: the request says "required item N" and names the moments
+    # it resolves to; the references themselves appear only in local reports.
     for ref, ids in oc.must_include.items():
         if ids:
             shown = ", ".join(ids[:8]) + (f" (+{len(ids) - 8} more)" if len(ids) > 8 else "")
-            lines.append(f"- must include {_q(ref)}: use at least one of these moments: {shown}")
+            lines.append(f"- {oc.ref_label(ref)}: use at least one of these moments: {shown}")
     if e.must_exclude:
-        lines.append("- must exclude (already removed from the candidates): " + ", ".join(_q(r) for r in e.must_exclude))
+        lines.append(f"- {len(e.must_exclude)} exclusion rule(s) were applied; the excluded moments are already removed from the candidates")
     lines.append(f"- at most {e.max_similar_shots_per_scene} visually similar shots (same dup value, same place) in one scene")
     if e.avoid_excessive_transitions:
         lines.append("- keep transitions rare: hard cuts by default")
@@ -238,7 +245,7 @@ def _record(m: OutlineMoment, ctx: SelectionContext) -> str:
 
 
 def scene_candidates(ctx: SelectionContext, si: int) -> list[OutlineMoment]:
-    return [m for mid in ctx.outline.scenes[si].candidate_moment_ids if (m := ctx.oc.eligible.get(mid)) is not None]
+    return [m for mid in ctx.outline.scenes[si].candidate_moment_ids if (m := ctx.oc.eligible.get(mid.strip())) is not None]
 
 
 def candidate_digest(ctx: SelectionContext) -> str:
@@ -328,8 +335,9 @@ def fit_total(durations: list[float], mins: list[float], maxs: list[float], targ
             room = (maxs[i] - out[i]) if drift > 0 else (out[i] - lo[i])
             step = min(abs(drift), max(0.0, room))
             if step >= 0.01:
-                out[i] = round(out[i] + math.copysign(step, drift), 2)
-                drift = round(drift - math.copysign(step, drift), 2)
+                new = min(max(round(out[i] + math.copysign(step, drift), 2), lo[i]), maxs[i])   # rounding must not pass a bound
+                drift = round(drift - (new - out[i]), 2)
+                out[i] = new
             if abs(drift) < 0.01:
                 break
     return out
@@ -338,7 +346,20 @@ def fit_total(durations: list[float], mins: list[float], maxs: list[float], targ
 # ---- the working copy of a reply --------------------------------------------------------------------------------------
 
 def _label(sc: dict[str, Any]) -> str:
-    return f"scene {sc['scene_id']} ({sc['title']!r})"
+    """Findings go back to the model: the label carries the scene id only, no text taken from the outline or the media."""
+    return f"scene {sc['scene_id']}"
+
+
+def _shorten(value: Any, limit: int, path: str, report: ValidationReport) -> Any:
+    """Free text longer than the plan allows is cut (a recorded repair, not a reason to fail the stage; the response schema has no length limits)."""
+    if value is None or isinstance(value, str) and len(value) <= limit:
+        return value
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rstrip()
+    report.repaired("text_shortened", f"{path} had {len(text)} characters, the limit is {limit}; shortened", len(text), len(cut), path)
+    return cut
 
 
 def build_work(parsed: Any, ctx: SelectionContext, report: ValidationReport) -> dict[str, Any]:
@@ -363,23 +384,28 @@ def build_work(parsed: Any, ctx: SelectionContext, report: ValidationReport) -> 
     for si, osc in enumerate(o.scenes):
         rs = got.get(osc.scene_id)
         if rs is None:
-            report.error("scene_missing", f"scene {osc.scene_id} ({osc.title!r}) of the outline has no clips in the reply", "scenes")
+            report.error("scene_missing", f"scene {osc.scene_id} of the outline has no clips in the reply", "scenes")
             continue
         clips = []
         for n, c in enumerate(rs.get("clips") or [], 1):
             d = copy.deepcopy(c)
             d["moment_id"] = str(d.get("moment_id", "")).strip()
-            d["_n"] = n
+            d["_n"] = n          # the position in the model's own list: titles refer to it (clips may be dropped later)
+            for key, limit in (("rationale", MAX_RATIONALE), ("intentional_repeat_reason", MAX_RATIONALE)):
+                d[key] = _shorten(d.get(key), limit, f"scenes[{si}].clips[{n - 1}].{key}", report)
             clips.append(d)
         scenes.append({"scene_id": osc.scene_id, "title": osc.title, "purpose": osc.purpose, "budget": ctx.budgets[si],
-                       "candidates": list(osc.candidate_moment_ids), "clips": clips})
+                       "candidates": [m.strip() for m in osc.candidate_moment_ids], "clips": clips,
+                       "n_original": len(rs.get("clips") or [])})
     titles = []
     for i, t in enumerate(parsed.get("titles") or []):
         d = copy.deepcopy(t)
         d["scene_id"] = str(d.get("scene_id", "")).strip()
         d["_i"] = i
+        d["rationale"] = _shorten(d.get("rationale"), MAX_TITLE_RATIONALE, f"titles[{i}].rationale", report)
         titles.append(d)
-    return {"scenes": scenes, "titles": titles, "uncertainties": [str(u) for u in (parsed.get("uncertainties") or [])], "notes": []}
+    uncertainties = [_shorten(u, MAX_UNCERTAINTY, f"uncertainties[{i}]", report) for i, u in enumerate(parsed.get("uncertainties") or [])]
+    return {"scenes": scenes, "titles": titles, "uncertainties": [u for u in uncertainties if u is not None], "notes": []}
 
 
 def _primaries(work: dict[str, Any]) -> list[dict[str, Any]]:
@@ -497,6 +523,10 @@ def check_work(work: dict[str, Any], ctx: SelectionContext, report: ValidationRe
             if t["type"] == "cut" and t["duration_seconds"]:
                 report.repaired("cut_duration", f"{_label(sc)}: a cut cannot have a duration ({t['duration_seconds']:g} s); set to 0", t["duration_seconds"], 0.0, path)
                 t["duration_seconds"] = 0.0
+            if t["type"] == "dissolve" and t["duration_seconds"] > MAX_TRANSITION_SECONDS:
+                if problem("transition_too_long", f"{_label(sc)}: a {t['duration_seconds']:g} s dissolve; the longest is {MAX_TRANSITION_SECONDS:g} s", path,
+                           f"shortened to {MAX_TRANSITION_SECONDS:g} s", t["duration_seconds"], MAX_TRANSITION_SECONDS):
+                    t["duration_seconds"] = MAX_TRANSITION_SECONDS
             if t["type"] == "dissolve" and c["track_role"] == "primary_video":
                 limit = None if prev is None else min(float(prev["target_duration_seconds"]), float(c["target_duration_seconds"]))
                 if t["duration_seconds"] <= 0:
@@ -558,6 +588,14 @@ def _check_titles(work: dict[str, Any], ctx: SelectionContext, report: Validatio
         why: tuple[str, str] | None = None
         t["text"] = str(t.get("text", ""))
         norm = normalize_text(t["text"])
+        osc0 = outline_scenes.get(t["scene_id"])
+        unusable = text_problems(normalize_text(osc0.title)) if osc0 is not None else []
+        if unusable:
+            # the outline's own title cannot be an on-screen title (e.g. longer than 60 characters; the outline allows 200): that is not
+            # the planner's mistake and asking again cannot help, so the title is skipped, in either mode, and the reason recorded
+            report.repaired("title_scene_title_unusable", f"title for scene {t['scene_id']} skipped: the outline's scene title is not usable as an "
+                            f"on-screen title ({'; '.join(unusable)})", t["text"], None, path)
+            continue
         if sc is None:
             why = ("title_scene_unknown", f"title {t['text']!r}: unknown scene_id {t['scene_id']!r}")
         elif text_problems(norm):
@@ -567,7 +605,7 @@ def _check_titles(work: dict[str, Any], ctx: SelectionContext, report: Validatio
             found = classify_text(norm, "scene_title", osc, ts, set())
             if found is None:
                 why = ("title_text_not_allowed",
-                       f"title {t['text']!r} is not the outline's title of scene {osc.scene_id} ({osc.title!r}); titles carry only the outline's scene "
+                       f"title {t['text']!r} is not the outline's title of scene {osc.scene_id}; titles carry only the outline's scene "
                        "titles, never invented places, dates or facts")
             elif norm != normalize_text(osc.title):
                 report.repaired("title_text_exact", f"title {t['text']!r} was written as {osc.title!r} (the outline's wording)", t["text"], osc.title, path)
@@ -577,8 +615,20 @@ def _check_titles(work: dict[str, Any], ctx: SelectionContext, report: Validatio
             st = t.get("start") or {}
             if st.get("relative_to") == "clip_start":
                 n = st.get("clip_number")
-                if not isinstance(n, int) or not (1 <= n <= len(sc["clips"])):
-                    why = ("title_clip_unknown", f"title {t['text']!r}: clip_number {n!r} is not a clip of scene {sc['scene_id']} ({len(sc['clips'])} clips)")
+                if isinstance(n, bool) or not isinstance(n, int) or not (1 <= n <= sc["n_original"]):
+                    why = ("title_clip_unknown", f"title {t['text']!r}: clip_number {n!r} is not a clip of scene {sc['scene_id']} ({sc['n_original']} clips)")
+                elif not any(c["_n"] == n for c in sc["clips"]):
+                    # the number counts the model's own list; that clip was removed above, and the title must not slide onto the next one
+                    why = ("title_clip_removed", f"title {t['text']!r}: clip {n} of scene {sc['scene_id']} was removed")
+            off = float(st.get("offset_seconds") or 0.0)
+            if why is None and not (0.0 <= off <= MAX_TITLE_OFFSET_SECONDS):
+                new_off = min(max(off, 0.0), MAX_TITLE_OFFSET_SECONDS)
+                msg = f"title {t['text']!r}: offset {off:g} s is outside 0-{MAX_TITLE_OFFSET_SECONDS:g} s"
+                if repair:
+                    report.repaired("title_offset", f"{msg}; set to {new_off:g} s", off, new_off, path)
+                    t["start"] = {**st, "offset_seconds": new_off}
+                else:
+                    report.error("title_offset", msg, path)
             d = float(t["duration_seconds"])
             if why is None and not (TITLE_MIN_SECONDS - 1e-9 <= d <= TITLE_MAX_SECONDS + 1e-9):
                 new = min(max(d, TITLE_MIN_SECONDS), TITLE_MAX_SECONDS)
@@ -633,7 +683,7 @@ def build_selection(work: dict[str, Any], ctx: SelectionContext) -> SelectionPla
     for t in work["titles"]:
         sc = next(s for s in work["scenes"] if s["scene_id"] == t["scene_id"])
         st = t["start"]
-        clip_id = sc["clips"][st["clip_number"] - 1]["id"] if st["relative_to"] == "clip_start" else None
+        clip_id = next(c["id"] for c in sc["clips"] if c["_n"] == st["clip_number"]) if st["relative_to"] == "clip_start" else None
         scene_titles.append(SelectionTitle(
             title_id="x", text=t["text"], role="scene_title", scene_id=t["scene_id"], text_source="outline_scene_title",
             start=TitleStart(relative_to=st["relative_to"], clip_instance_id=clip_id, offset_seconds=float(st.get("offset_seconds") or 0.0)),
@@ -778,9 +828,9 @@ def generate_selection(gateway: Gateway, ctx: SelectionContext) -> SelectionResu
         if out.ok:
             assert out.selection is not None and out.edit is not None
             return SelectionResult(out.selection, out.edit, rep, model, usage, requests, hits, history)
-        extra = ("Your previous reply was:\n" + json.dumps(resp.parsed, ensure_ascii=False, indent=1),
-                 "It has these problems that cannot be fixed automatically:\n" + findings_text(rep) +
-                 "\nReply again with the complete corrected JSON object. Keep everything that was fine.")
+        extra = reask_parts(resp.parsed, rep)
     assert out is not None
+    # the stage failed: forget every reply of this chain, so `resume` asks again instead of replaying the same unusable answers
+    gateway.discard([h["fingerprint"] for h in history])
     raise SelectionError("the planner's clip selection failed validation" + (" after a corrected reply was requested" if retries else "") + ":\n"
                          + findings_text(out.report), out.report, history)

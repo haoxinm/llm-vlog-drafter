@@ -24,7 +24,8 @@ from typing import Any, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from trip_vlog.planning.models import ID_PATTERN
+from trip_vlog.llm.untrusted import untrusted_block
+from trip_vlog.planning.models import ID_PATTERN, TITLE_MAX_CHARS
 from trip_vlog.planning.outline_catalog import OutlineCatalog
 from trip_vlog.planning.validate import ValidationReport, ValidationSettings, _schema_errors
 from trip_vlog.state import stable_hash
@@ -35,6 +36,15 @@ ROLES = ("opening_hook", "arrival_context", "establishing_place", "activity_acti
 STORY_MODES = ("chronological", "mostly_chronological", "thematic")
 MAX_SCENES = 60
 MAX_CANDIDATES = 200
+MAX_TITLE = 200            # scene title, outline document
+MAX_PURPOSE = 500
+MAX_TONE = 200
+MAX_NOTE = 500             # chronology_note, hook justification, missing_coverage / uncertainties items
+MAX_PREMISE = 1500
+MAX_LIST = 100
+MAX_SCENE_SECONDS = 7200
+MIN_SCENE_SECONDS = 0.5    # a reply's budget of zero or less is raised to this
+SCENE_TITLE_CHARS = TITLE_MAX_CHARS    # a scene title may become an on-screen title (selection.scene_titles)
 Role = Literal["opening_hook", "arrival_context", "establishing_place", "activity_action", "personal_reaction", "culture_food",
                "scenic_breathing_room", "transition", "reflection_ending", "other"]
 StoryMode = Literal["chronological", "mostly_chronological", "thematic"]
@@ -47,28 +57,28 @@ class _Model(BaseModel):
 class OutlineScene(_Model):
     scene_id: str = Field(pattern=ID_PATTERN)
     role: Role
-    title: str = Field(max_length=200)
-    purpose: str = Field(max_length=500)
-    tone: str = Field(max_length=200)
-    target_duration_seconds: float = Field(gt=0, le=7200)
+    title: str = Field(max_length=MAX_TITLE)
+    purpose: str = Field(max_length=MAX_PURPOSE)
+    tone: str = Field(max_length=MAX_TONE)
+    target_duration_seconds: float = Field(gt=0, le=MAX_SCENE_SECONDS)
     candidate_moment_ids: list[str] = Field(min_length=1, max_length=MAX_CANDIDATES)
-    chronology_note: str | None = Field(max_length=500)
+    chronology_note: str | None = Field(max_length=MAX_NOTE)
 
 
 class OutlineHook(_Model):
     used: bool
     moment_id: str | None
-    justification: str | None = Field(max_length=500)
+    justification: str | None = Field(max_length=MAX_NOTE)
 
 
 class StoryOutline(_Model):
     schema_version: Literal["1"]
-    premise: str = Field(max_length=1500)
+    premise: str = Field(max_length=MAX_PREMISE)
     story_mode_used: StoryMode
     scenes: list[OutlineScene] = Field(min_length=1, max_length=MAX_SCENES)
     hook: OutlineHook
-    missing_coverage: list[str] = Field(max_length=100)
-    uncertainties: list[str] = Field(max_length=100)
+    missing_coverage: list[str] = Field(max_length=MAX_LIST)
+    uncertainties: list[str] = Field(max_length=MAX_LIST)
 
     def total_seconds(self) -> float:
         return round(sum(s.target_duration_seconds for s in self.scenes), 3)
@@ -91,7 +101,21 @@ def outline_text(outline: StoryOutline) -> str:
 
 
 def read_outline_doc(path: Path) -> Any:
-    return json.loads(Path(path).read_text(encoding="utf-8"))
+    """Parse a hand-editable JSON file. ``utf-8-sig``: Notepad and some editors on Windows add a byte order mark."""
+    return json.loads(Path(path).read_text(encoding="utf-8-sig"))
+
+
+def _strip_ids(doc: Any) -> Any:
+    """A copy of an outline document whose moment ids carry no blanks (a hand edit can leave some). Anything else is returned as it is."""
+    if not isinstance(doc, dict):
+        return doc
+    d = copy.deepcopy(doc)
+    for sc in d.get("scenes") if isinstance(d.get("scenes"), list) else []:
+        if isinstance(sc, dict) and isinstance(sc.get("candidate_moment_ids"), list):
+            sc["candidate_moment_ids"] = [m.strip() if isinstance(m, str) else m for m in sc["candidate_moment_ids"]]
+    if isinstance(d.get("hook"), dict) and isinstance(d["hook"].get("moment_id"), str):
+        d["hook"]["moment_id"] = d["hook"]["moment_id"].strip()
+    return d
 
 
 def outline_file_hash(path: Path) -> str:
@@ -104,27 +128,36 @@ def outline_file_hash(path: Path) -> str:
         except OSError:
             return "invalid-missing"
     try:
-        return outline_hash(StoryOutline.model_validate(doc))
+        return outline_hash(StoryOutline.model_validate(_strip_ids(doc)))
     except ValidationError:
         return "invalid-" + stable_hash(doc)[:48]
 
 
 # ---- JSON schemas (hand-built, OpenAI strict compatible: every property required, nullable instead of optional) --------
 
+def _lim(on: bool, **kw: Any) -> dict[str, Any]:
+    return kw if on else {}
+
+
 def _scene_properties(with_id: bool) -> dict[str, Any]:
+    # Cosmetic limits (text length, number range) are part of the outline *document* schema, which the user's edits are checked
+    # against. They are left out of the model's response schema: providers ignore them and the gateway would otherwise fail the
+    # whole stage over one long sentence. Code shortens or clamps the reply instead (`_tidy_limits`); the limits are said in words.
     props: dict[str, Any] = {}
     if with_id:
         props["scene_id"] = {"type": "string", "pattern": ID_PATTERN, "description": "Stable scene id assigned by code (scene_01, scene_02, ...)."}
     props.update({
         "role": {"type": "string", "enum": list(ROLES), "description": "Editorial role of the scene."},
-        "title": {"type": "string", "maxLength": 200, "description": "Short working title."},
-        "purpose": {"type": "string", "maxLength": 500, "description": "What this scene does for the story, in one or two sentences."},
-        "tone": {"type": "string", "maxLength": 200, "description": "Emotional tone, a few words."},
-        "target_duration_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 7200,
-                                    "description": "Time budget for the scene on the timeline, in seconds."},
+        "title": {"type": "string", **_lim(with_id, maxLength=MAX_TITLE),
+                  "description": f"Short working title, at most {SCENE_TITLE_CHARS} characters (it can become an on-screen title)."},
+        "purpose": {"type": "string", **_lim(with_id, maxLength=MAX_PURPOSE),
+                    "description": "What this scene does for the story, in one or two sentences (up to 500 characters)."},
+        "tone": {"type": "string", **_lim(with_id, maxLength=MAX_TONE), "description": "Emotional tone, a few words."},
+        "target_duration_seconds": {"type": "number", **_lim(with_id, exclusiveMinimum=0, maximum=MAX_SCENE_SECONDS),
+                                    "description": "Time budget for the scene on the timeline, in seconds (more than 0)."},
         "candidate_moment_ids": {"type": "array", "minItems": 1, "maxItems": MAX_CANDIDATES, "items": {"type": "string"},
                                  "description": "IDs copied exactly from the catalog, in the order they would be used."},
-        "chronology_note": {"type": ["string", "null"], "maxLength": 500,
+        "chronology_note": {"type": ["string", "null"], **_lim(with_id, maxLength=MAX_NOTE),
                             "description": "Why the scene is out of chronological order, or null when it is in order."},
     })
     return props
@@ -136,7 +169,8 @@ def _body_properties(with_id: bool) -> dict[str, Any]:
     if with_id:
         props["schema_version"] = {"type": "string", "enum": [OUTLINE_VERSION]}
     props.update({
-        "premise": {"type": "string", "maxLength": 1500, "description": "A short narrative premise grounded in the catalog."},
+        "premise": {"type": "string", **_lim(with_id, maxLength=MAX_PREMISE),
+                    "description": "A short narrative premise grounded in the catalog (a few sentences)."},
         "story_mode_used": {"type": "string", "enum": list(STORY_MODES), "description": "How the scenes are ordered."},
         "scenes": {"type": "array", "minItems": 1, "maxItems": MAX_SCENES,
                    "items": {"type": "object", "properties": scene, "required": list(scene), "additionalProperties": False},
@@ -144,11 +178,12 @@ def _body_properties(with_id: bool) -> dict[str, Any]:
         "hook": {"type": "object", "properties": {
             "used": {"type": "boolean", "description": "True when the first scene is a short nonlinear opening hook."},
             "moment_id": {"type": ["string", "null"], "description": "The hook moment (also listed in the first scene), else null."},
-            "justification": {"type": ["string", "null"], "maxLength": 500, "description": "Why this is a real, compelling moment, else null."}},
+            "justification": {"type": ["string", "null"], **_lim(with_id, maxLength=MAX_NOTE),
+                              "description": "Why this is a real, compelling moment, else null."}},
             "required": ["used", "moment_id", "justification"], "additionalProperties": False},
-        "missing_coverage": {"type": "array", "maxItems": 100, "items": {"type": "string", "maxLength": 500},
+        "missing_coverage": {"type": "array", **_lim(with_id, maxItems=MAX_LIST), "items": {"type": "string", **_lim(with_id, maxLength=MAX_NOTE)},
                              "description": "Coverage the story needs (or the user asked for) that the catalog lacks."},
-        "uncertainties": {"type": "array", "maxItems": 100, "items": {"type": "string", "maxLength": 500},
+        "uncertainties": {"type": "array", **_lim(with_id, maxItems=MAX_LIST), "items": {"type": "string", **_lim(with_id, maxLength=MAX_NOTE)},
                           "description": "Things the user should confirm before the outline is approved."},
     })
     return props
@@ -220,7 +255,48 @@ class OutlineSettings:
 # ---- validation + repair ---------------------------------------------------------------------------------------------
 
 def _label(d: dict[str, Any], si: int) -> str:
-    return f"scene {si + 1} ({d['scenes'][si].get('title', '')!r})"
+    """Findings go back to the model, so a label carries no text taken from the reply or the media: the scene's position only."""
+    return f"scene {si + 1}"
+
+
+def _cut(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit].rstrip()
+
+
+def _tidy_limits(d: dict[str, Any], report: ValidationReport) -> None:
+    """Model replies only: shorten texts and clamp budgets to the limits of the outline document (the response schema does not
+    carry them, see `_scene_properties`). Every change is a recorded repair. A value of the wrong type is left to the schema check."""
+    def text(obj: Any, key: str, limit: int, path: str) -> None:
+        v = obj.get(key) if isinstance(obj, dict) else None
+        if isinstance(v, str) and len(v) > limit:
+            obj[key] = _cut(v, limit)
+            report.repaired("text_shortened", f"{path} had {len(v)} characters, the limit is {limit}; shortened", len(v), len(obj[key]), path)
+
+    text(d, "premise", MAX_PREMISE, "premise")
+    for si, sc in enumerate(d.get("scenes") if isinstance(d.get("scenes"), list) else []):
+        if not isinstance(sc, dict):
+            continue
+        for key, limit in (("title", MAX_TITLE), ("purpose", MAX_PURPOSE), ("tone", MAX_TONE), ("chronology_note", MAX_NOTE)):
+            text(sc, key, limit, f"scenes[{si}].{key}")
+        v = sc.get("target_duration_seconds")
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and not (0 < v <= MAX_SCENE_SECONDS):
+            new = float(MIN_SCENE_SECONDS if v <= 0 else MAX_SCENE_SECONDS)
+            sc["target_duration_seconds"] = new
+            report.repaired("scene_budget_clamped", f"scenes[{si}].target_duration_seconds is {v:g} s, allowed is more than 0 up to {MAX_SCENE_SECONDS} s; set to {new:g}",
+                            v, new, f"scenes[{si}].target_duration_seconds")
+    if isinstance(d.get("hook"), dict):
+        text(d["hook"], "justification", MAX_NOTE, "hook.justification")
+    for key in ("missing_coverage", "uncertainties"):
+        items = d.get(key)
+        if not isinstance(items, list):
+            continue
+        for i, item in enumerate(items):
+            if isinstance(item, str) and len(item) > MAX_NOTE:
+                items[i] = _cut(item, MAX_NOTE)
+                report.repaired("text_shortened", f"{key}[{i}] had {len(item)} characters, the limit is {MAX_NOTE}; shortened", len(item), len(items[i]), f"{key}[{i}]")
+        if len(items) > MAX_LIST:
+            report.repaired("list_shortened", f"{key} had {len(items)} entries, the limit is {MAX_LIST}; the rest was dropped", len(items), MAX_LIST, key)
+            del items[MAX_LIST:]
 
 
 def _scene_epoch(oc: OutlineCatalog, ids: list[str]) -> float | None:
@@ -237,17 +313,21 @@ def validate_outline(doc: Mapping[str, Any], oc: OutlineCatalog, s: OutlineSetti
     there are no errors. ``repair=False`` never changes anything: the offered set is every eligible moment, not only the
     ones that fit in the prompt, because the user may legitimately pick any of them."""
     report = ValidationReport()
+    d = copy.deepcopy(dict(doc))
+    if repair:
+        _tidy_limits(d, report)
     try:
-        StoryOutline.model_validate(doc)
+        StoryOutline.model_validate(d)
     except ValidationError as e:
         _schema_errors(report, e)
         return report
-    d = copy.deepcopy(dict(doc))
     scenes: list[dict[str, Any]] = d["scenes"]
     usable = oc.offered if repair else frozenset(oc.eligible)
     hook = d["hook"]
     hook_scene = next((i for i, sc in enumerate(scenes) if sc["role"] == "opening_hook"), None)
-    hook_mid = hook["moment_id"].strip() if hook["used"] and hook_scene == 0 and hook["moment_id"] else None
+    if isinstance(hook["moment_id"], str):
+        hook["moment_id"] = hook["moment_id"].strip()      # a hand-edited id may carry blanks; the plan keeps the clean id
+    hook_mid = hook["moment_id"] if hook["used"] and hook_scene == 0 and hook["moment_id"] else None
 
     # scene ids
     seen_ids: set[str] = set()
@@ -283,8 +363,8 @@ def validate_outline(doc: Mapping[str, Any], oc: OutlineCatalog, s: OutlineSetti
                 report.repaired(problem[0], problem[1] + "; removed", mid, None, path)
             else:
                 report.error(problem[0], problem[1], path)
-        if repair:
-            sc["candidate_moment_ids"] = kept
+        # ids without the blanks a hand edit may have left; an outline the user edited keeps every entry (problems are errors)
+        sc["candidate_moment_ids"] = kept if repair else [raw.strip() for raw in sc["candidate_moment_ids"]]
         if not kept:
             report.error("empty_scene", f"{_label(d, si)} has no usable candidate moments left", f"scenes[{si}].candidate_moment_ids")
 
@@ -299,9 +379,9 @@ def validate_outline(doc: Mapping[str, Any], oc: OutlineCatalog, s: OutlineSetti
             report.error("hook_not_allowed", "hook.used is true but editorial.allow_nonlinear_hook is false", "hook.used")
         elif not hooks:
             report.error("hook_scene_missing", "hook.used is true but no scene has the role opening_hook", "hook")
-        elif hook["moment_id"] is None or hook["moment_id"].strip() not in oc.eligible:
+        elif hook["moment_id"] is None or hook["moment_id"] not in oc.eligible:
             report.error("hook_unknown_moment", f"hook.moment_id {hook['moment_id']!r} is not a usable catalog moment", "hook.moment_id")
-        elif hooks[0] == 0 and hook["moment_id"].strip() not in scenes[0]["candidate_moment_ids"]:
+        elif hooks[0] == 0 and hook["moment_id"] not in scenes[0]["candidate_moment_ids"]:
             report.error("hook_moment_not_in_scene", f"hook.moment_id {hook['moment_id']} is not listed in the opening_hook scene", "hook.moment_id")
         if hooks and s.allow_nonlinear_hook and scenes[hooks[0]]["target_duration_seconds"] > s.opening_hook_seconds + 1e-9:
             old = scenes[hooks[0]]["target_duration_seconds"]
@@ -335,14 +415,17 @@ def validate_outline(doc: Mapping[str, Any], oc: OutlineCatalog, s: OutlineSetti
     # required coverage (must_include) and unavailable references
     used = {m for sc in scenes for m in sc["candidate_moment_ids"]}
     for ref, ids in oc.must_include.items():
+        label = oc.ref_label(ref)
         if not ids:
-            note = f"must_include {ref!r} matches no available moment"
+            note = f"must_include {ref!r} matches no available moment"     # local only: the outline file is for the user (never sent as such)
             report.warn("must_include_unavailable", note)
             if repair and note not in d["missing_coverage"]:
                 d["missing_coverage"].append(note)
         elif not used & set(ids):
             shown = ", ".join(ids[:5]) + (f", ... ({len(ids)} in all)" if len(ids) > 5 else "")
-            report.error("must_include_missing", f"must_include {ref!r} is not covered by any scene; it resolves to: {shown}", "scenes")
+            # the message goes to the model: the label and the moments only. The reference itself (a path, folder or glob) stays local.
+            report.error("must_include_missing", f"{label} is not covered by any scene; it resolves to: {shown}", "scenes")
+            report.warn("must_include_ref", f"{label} is the must_include reference {ref!r}")
 
     # chronology and story mode
     if d["story_mode_used"] != s.story_mode:
@@ -402,6 +485,15 @@ def findings_text(report: ValidationReport, limit: int = 30) -> str:
     """The errors, one per line, as sent back to the model for its one corrected reply."""
     lines = [f"- [{i.code}] {i.message}" + (f" (at {i.path})" if i.path else "") for i in report.errors[:limit]]
     return "\n".join(lines)
+
+
+def reask_parts(parsed: Any, report: ValidationReport) -> tuple[str, str]:
+    """The two extra request parts of the one corrected reply: the previous reply and the findings about it. Both can quote text
+    that came from the media (a title, a rationale), so both are inert data blocks, never instructions."""
+    previous = json.dumps(parsed, ensure_ascii=False, indent=1)
+    return ("Your previous reply was:\n" + untrusted_block("previous_reply", previous, max_chars=max(4000, 2 * len(previous))),
+            "It has these problems that cannot be fixed automatically:\n" + untrusted_block("findings", findings_text(report), max_chars=20000) +
+            "\nReply again with the complete corrected JSON object. Keep everything that was fine.")
 
 
 def now_iso() -> str:
