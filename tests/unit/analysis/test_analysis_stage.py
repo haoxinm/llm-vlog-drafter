@@ -140,9 +140,9 @@ def test_changed_content_version_relabels_that_asset_only(tmp_path):
     aid, segs = add_video(ctx.catalog, "a.mp4", 14.0, cv="fast:changed")
     fake_frames(ctx.workspace.root, segs, aid, "fast:changed", fr.SamplingSettings.from_config(ctx.config, 16))
     res = st.analyze_stage(ctx)
-    # the catalog label of the changed asset is invalid; identical frames are then answered by the gateway's response cache
-    assert res.summary["already_labeled"] == 2 and res.summary["labeled"] == 3 and len(tr.calls) == n
-    assert res.summary["response_cache_hits"] == 1
+    # the catalog label of the changed asset is invalid; its frames are named by content version, so the old answer is not reused
+    assert res.summary["already_labeled"] == 2 and res.summary["labeled"] == 3 and len(tr.calls) == n + 1
+    assert res.summary["response_cache_hits"] == 0
 
 
 def test_referential_validation_partial_retry_and_fallback(tmp_path):

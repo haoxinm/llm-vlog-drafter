@@ -208,16 +208,22 @@ def build_request(settings: VisionSettings, kind: str, batch: Sequence[Item], ro
         if kind == "photo":
             parts.append(ImagePart(_long(it.src)))
         elif it.sheet_mode:
-            parts.append(ImagePart(root / str(it.sheet)))
+            parts.append(ImagePart(root / str(it.sheet), identity=_identity(settings, it, "sheet", [fr.SHEET_TILE_W, *(f["frame"] for f in it.frames)])))
         else:
             for f in it.frames:
                 parts.append(TextPart(f"Segment {it.sid} | frame {f['index']} | t={f['timestamp_seconds']:.2f}s"))
-                parts.append(ImagePart(root / f["artifact"]))
+                parts.append(ImagePart(root / f["artifact"], identity=_identity(settings, it, "frame", f["frame"])))
     if note:
         parts.append(TextPart(note))
     t = settings.segment_prompt if kind == "video" else settings.photo_prompt
     max_tokens = min(TOKENS_PER_ITEM * len(batch) + TOKENS_BASE, settings.max_tokens_cap)
     return LLMRequest(t.id, str(t.version), settings.system(kind), tuple(parts), settings.schema(kind), max_tokens)
+
+
+def _identity(settings: VisionSettings, it: Item, what: str, ref: Any) -> str:
+    """Stable name of an ffmpeg-derived image for the request fingerprint: source content version, which frame (or the sheet),
+    the sampling settings (which include the downscale/quality) -- never the machine-dependent JPEG bytes."""
+    return stable_hash({"what": what, "cv": it.asset["content_version"], "ref": ref, "sampling": settings.sampling.key()})
 
 
 def _long(p: Path) -> Path:

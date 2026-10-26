@@ -66,7 +66,7 @@ def test_extract_skips_when_frames_exist_and_reports_missing_ffmpeg(tmp_path):
 # ---------------------------------------------------------------- batching and requests
 def _item(i, n, kind="video", sheet=False, singleton=False):
     seg = {"segment_id": f"seg_{i:016x}", "start_seconds": 0.0, "end_seconds": 4.0}
-    asset = {"asset_id": "a", "relative_path": "Day 2/Secret Trip/IMG_0001.MOV", "display_width": 1920, "display_height": 1080, "width": 1920, "height": 1080}
+    asset = {"asset_id": "a", "content_version": "cv1", "relative_path": "Day 2/Secret Trip/IMG_0001.MOV", "display_width": 1920, "display_height": 1080, "width": 1920, "height": 1080}
     frames = [{"index": k, "timestamp_seconds": k + 0.5, "artifact": f"f{i}_{k}.jpg", "frame": k} for k in range(n)]
     return Item(kind, asset, seg, {}, __import__("pathlib").Path("/m/IMG_0001.MOV"), "k", frames=frames, sheet_mode=sheet, singleton=singleton)
 
