@@ -93,3 +93,82 @@ def test_cli_dry_run_and_status(media_dir, workspace, fake, capsys):
     status = capsys.readouterr().out
     assert "analyze" in status and "succeeded" in status
     assert cli.main(["analyze", "--media", str(media_dir), "--output", str(workspace), "--config", str(cfg), "--sampling-fps", "0"]) == 2
+
+
+# ---------------------------------------------------------------- fine sampling (Phase 7c): real ffmpeg, stub vision transport
+FINE = {"media.fine_sampling_enabled": True, "media.fine_sampling_fps": 4.0, "media.fine_sampling_window_seconds": 1.0}
+
+
+@pytest.fixture
+def fine_fake():
+    tr = LabelingTransport()
+    tr.respond = lambda call, default: [{**e, "interest": 0.9} for e in default]
+    tr.refine = lambda call, default: [{**d, "start_frame_index": 1, "end_frame_index": 1} for d in default]
+    st.gateway_factory = lambda c: gateway_for(c.config, c.workspace.root, tr)
+    yield tr
+    st.gateway_factory = None
+
+
+def _video_moments(workspace):
+    with Catalog(workspace / "media_index" / "catalog.sqlite") as cat:
+        segs = {r["segment_id"]: json.loads(r["data_json"]) for r in cat.list_segments()}
+        datas = [json.loads(r["data_json"]) for r in cat.list_moments()]
+        return [(d, segs.get(d["segment_id"])) for d in datas if d["media_type"] == "video" and d["source"] == "llm"]
+
+
+def test_fine_sampling_end_to_end_with_real_frames(media_dir, workspace, fine_fake):
+    before = hash_tree(media_dir)
+    res = analyze(media_dir, workspace, overrides=FINE)
+    assert res.exit_code == 0 and res.stage_status["analyze"] == "succeeded"
+    s = rj(workspace / "manifest.json")["stages"]["analyze"]["summary"]["fine_sampling"]
+    assert s["candidates"] == 2 and s["refined"] == 2 and s["requests"] == len(fine_fake.refine_calls) >= 1
+    assert "warnings" not in rj(workspace / "manifest.json")["stages"]["analyze"]["summary"]
+    moments = _video_moments(workspace)
+    assert len(moments) == 2
+    for m, seg in moments:
+        r = m["refinement"]
+        assert r["applied"] and r["original_in_seconds"] == seg["start_seconds"] and r["original_out_seconds"] == seg["end_seconds"]
+        assert seg["start_seconds"] < m["source_in_seconds"] < m["source_out_seconds"] < seg["end_seconds"]
+        assert (m["source_in_seconds"], m["source_out_seconds"]) == (r["refined_in_seconds"], r["refined_out_seconds"])
+        for side, win in r["windows"].items():
+            ts = [f["timestamp_seconds"] for f in win["frames"]]
+            assert len(ts) == 4 and ts == sorted(ts) and win["start_seconds"] <= ts[0] and ts[-1] < win["end_seconds"]    # 1 s at 4 fps
+            assert abs(ts[1] - ts[0] - 0.25) < 0.02                                                                          # fine_sampling_fps
+            for f in win["frames"]:
+                with Image.open(workspace / f["artifact"]) as im:
+                    assert max(im.size) <= 1568
+    # every fine frame the model was shown is announced with its time, and nothing was written beside the originals
+    call = fine_fake.refine_calls[0]
+    assert all(t for w in call.frames.values() for fs in w.values() for _, t in fs) and "moment_" in call.texts[0]
+    assert hash_tree(media_dir) == before
+    # resumable: nothing is re-extracted, re-requested or re-labeled; the stage is skipped as a whole
+    n_ref, n_lab = len(fine_fake.refine_calls), len(fine_fake.calls)
+    frames = {p: p.stat().st_mtime_ns for p in (workspace / "media_index" / "analysis" / "fine").rglob("*.jpg")}
+    assert frames
+    assert analyze(media_dir, workspace, overrides=FINE).stage_status["analyze"] == "skipped"
+    assert (len(fine_fake.refine_calls), len(fine_fake.calls)) == (n_ref, n_lab)
+    # a different window re-asks only the refinement (labels are untouched) and replaces the fine frames
+    res = analyze(media_dir, workspace, overrides={**FINE, "media.fine_sampling_window_seconds": 0.5})
+    assert res.stage_status["analyze"] == "succeeded" and len(fine_fake.refine_calls) > n_ref and len(fine_fake.calls) == n_lab
+    # switching it off restores the labeled ranges and drops the record
+    analyze(media_dir, workspace, overrides={"media.fine_sampling_enabled": False})
+    for m, seg in _video_moments(workspace):
+        assert "refinement" not in m and seg["start_seconds"] <= m["source_in_seconds"] < m["source_out_seconds"] <= seg["end_seconds"]
+
+
+def test_fine_sampling_contact_sheet_input_and_downstream_plan(media_dir, workspace, fine_fake):
+    over = {**FINE, "media.vision_input": "contact_sheet"}
+    assert analyze(media_dir, workspace, overrides=over).exit_code == 0
+    assert list((workspace / "media_index" / "analysis" / "fine_sheets").rglob("*.jpg"))
+    call = fine_fake.refine_calls[0]
+    assert call.images == 2 * len(call.mids)                                   # one sheet per window
+    from trip_vlog.orchestrator import run_draft
+
+    res = run_draft(media_dir, workspace, None, {"project.target_duration_seconds": 8, **over}, echo=lambda *_: None)
+    assert res.stage_status["plan"] in ("succeeded", "skipped")
+    with Catalog(workspace / "media_index" / "catalog.sqlite") as cat:
+        from trip_vlog.planning.catalog_view import PlanningCatalog
+
+        view = PlanningCatalog.from_catalog(cat)
+    refined = [m for m in view.moments.values() if m.source_in_seconds is not None]
+    assert refined and all(m.length_seconds > 0 for m in refined)
