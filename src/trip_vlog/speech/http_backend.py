@@ -133,6 +133,11 @@ class OpenAITranscriptions:
                 pass
         return min(0.5 * 2**attempt, MAX_BACKOFF)
 
+    def _key_advice(self) -> str:
+        if self.ep.api_key_env:
+            return f"check the key in ${self.ep.api_key_env}"
+        return "no API key is configured (speech.endpoint.api_key_env is null); set it if the server requires one"
+
     def _clean(self, text: object) -> str:
         return sanitize(text, redactions=[(s, "***") for s in self._secrets])
 
@@ -145,7 +150,7 @@ class OpenAITranscriptions:
         if status in (400, 413, 415, 422):
             return SpeechBadRequestError(f"the transcription endpoint rejected the request ({status}): {msg}", status_code=status)
         if status in (401, 403):
-            return SpeechAuthError(f"authentication/permission failed ({status}) at the transcription endpoint: check ${self.ep.api_key_env}: {msg}", status_code=status)
+            return SpeechAuthError(f"authentication/permission failed ({status}) at the transcription endpoint: {self._key_advice()}: {msg}", status_code=status)
         if status == 404:
             return SpeechNotFoundError(f"not found (404) at {self.url}: check speech.endpoint.base_url/path and the model name: {msg}", status_code=status)
         if status == 429:

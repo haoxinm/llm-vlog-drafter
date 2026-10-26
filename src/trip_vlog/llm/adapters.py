@@ -78,10 +78,17 @@ def error_message(data: Any, raw: bytes) -> str:
     return raw[:300].decode("utf-8", "replace").strip()
 
 
+OPENAI_HOST = "api.openai.com"
+
+
 class Adapter:
     api: str
     default_path: str
     default_token_field: str
+
+    def token_field(self, ep: EndpointConfig) -> str:
+        """Body field that carries the output-token limit: the profile's `max_tokens_field`, else the adapter's default."""
+        return ep.max_tokens_field or self.default_token_field
 
     def headers(self, api_key: str | None) -> dict[str, str]:
         h = {"content-type": "application/json", "accept": "application/json"}
@@ -134,7 +141,7 @@ class AnthropicMessages(Adapter):
             model=req.model,
             messages=[{"role": m.role, "content": [self._block(p) for p in m.parts]} for m in req.messages],
         )
-        body[ep.max_tokens_field or self.default_token_field] = max_tokens
+        body[self.token_field(ep)] = max_tokens
         if system:
             body["system"] = system
         if output_config:
@@ -166,6 +173,12 @@ class OpenAIChat(Adapter):
     default_path = "/v1/chat/completions"
     default_token_field = "max_tokens"
 
+    def token_field(self, ep: EndpointConfig) -> str:
+        # OpenAI's own reasoning-family models reject `max_tokens`; other OpenAI-compatible servers still expect it.
+        if not ep.max_tokens_field and ep.host.lower() == OPENAI_HOST:
+            return "max_completion_tokens"
+        return super().token_field(ep)
+
     @staticmethod
     def _content(m: ProviderMessage) -> Any:
         if all(isinstance(p, TextPart) for p in m.parts) and len(m.parts) == 1:
@@ -185,7 +198,7 @@ class OpenAIChat(Adapter):
             messages.append({"role": "system", "content": system})
         messages += [{"role": m.role, "content": self._content(m)} for m in req.messages]
         body.update(model=req.model, messages=messages)
-        body[ep.max_tokens_field or self.default_token_field] = max_tokens
+        body[self.token_field(ep)] = max_tokens
         if native:
             body["response_format"] = {"type": "json_schema", "json_schema": {
                 "name": _schema_name(req), "schema": sanitize_schema_for_provider(req.schema), "strict": True}}
@@ -237,7 +250,7 @@ class OpenAIResponses(Adapter):
     def build(self, req, ep, *, system, native, max_tokens):
         body: dict[str, Any] = dict(ep.params)
         body.update(model=req.model, input=[{"role": m.role, "content": self._content(m)} for m in req.messages])
-        body[ep.max_tokens_field or self.default_token_field] = max_tokens
+        body[self.token_field(ep)] = max_tokens
         if system:
             body["instructions"] = system
         if native:
@@ -281,6 +294,23 @@ class OpenAIResponses(Adapter):
         usage = Usage(_int(u, "input_tokens"), _int(u, "output_tokens"), _int(u.get("input_tokens_details"), "cached_tokens"), 0)
         return ProviderResponse(text="".join(texts), stop_reason=stop, model=str(d.get("model") or ""), usage=usage,
                                 request_id=self._request_id(d, headers), stop_detail=detail)
+
+
+def fingerprint_extra(ep: EndpointConfig) -> dict[str, Any]:
+    """The endpoint settings that shape the model's output, for request fingerprints and analysis cache keys (the single
+    definition used by the live provider, the replay provider and the vision settings). Never URLs, headers, timeouts or keys."""
+    return {"api": ep.api, "params": ep.params, "structured_output": ep.structured_output,
+            "max_tokens_cap": ep.max_tokens, "max_tokens_field": ADAPTERS[ep.api].token_field(ep)}
+
+
+def bad_request_hint(msg: str, ep: EndpointConfig) -> str:
+    """Extra advice for a 400 whose server message complains about the token-limit field."""
+    low = msg.lower()
+    if "max_tokens" in low or "max_completion_tokens" in low or "max_output_tokens" in low:
+        used = ADAPTERS[ep.api].token_field(ep)
+        return (f" (hint: this request sent the token limit as `{used}`; if the server wants another name, set "
+                f"llm.endpoints.<name>.max_tokens_field, e.g. max_completion_tokens or max_tokens)")
+    return ""
 
 
 ADAPTERS: dict[str, Adapter] = {a.api: a for a in (AnthropicMessages(), OpenAIChat(), OpenAIResponses())}

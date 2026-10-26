@@ -25,7 +25,8 @@ def test_record_then_replay_round_trip(img, tmp_path):
     assert f.stem == recorded.fingerprint
     doc = json.loads(f.read_text(encoding="utf-8"))
     assert doc["request"]["template_id"] == "media_analyst" and doc["request"]["template_version"] == "1"
-    assert doc["request"]["provider"] == {"api": "anthropic_messages", "params": {}}
+    assert doc["request"]["provider"] == {"api": "anthropic_messages", "params": {}, "structured_output": "native",
+                                          "max_tokens_cap": 4096, "max_tokens_field": "max_tokens"}
     assert doc["response"]["model"] == "test-model-dated" and doc["response"]["usage"]["input_tokens"] == 11
     assert doc["response"]["parsed"] == {"label": "beach", "score": 7}
     assert "data" not in json.dumps(doc["request"]["parts"]) and "https://" not in f.read_text()  # hashes only, no URLs

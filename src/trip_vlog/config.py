@@ -136,7 +136,11 @@ class MediaConfig(_Model):
 
 
 API_KINDS = ("anthropic_messages", "openai_chat", "openai_responses")
-RESERVED_PARAMS = frozenset({"model", "messages", "input", "system", "instructions"})
+# Request-body fields the adapters set themselves; `params` may not override them (checked for every api, so a profile
+# stays valid if `api` is switched). `text`/`output_config` may be given (e.g. verbosity, effort) but not with a `format`.
+RESERVED_PARAMS = frozenset({"model", "messages", "input", "system", "instructions", "stream", "response_format",
+                             "max_tokens", "max_completion_tokens", "max_output_tokens"})
+RESERVED_PARAM_SUBKEYS = {"text": "format", "output_config": "format"}
 _API_DEFAULTS = {  # api -> (base_url, api_key_env)
     "anthropic_messages": ("https://api.anthropic.com", "ANTHROPIC_API_KEY"),
     "openai_chat": ("https://api.openai.com", "OPENAI_API_KEY"),
@@ -216,10 +220,20 @@ class EndpointConfig(_Model):
         bad = sorted(RESERVED_PARAMS & set(v))
         if bad:
             raise ValueError(f"params must not set reserved request fields: {', '.join(bad)}")
+        for key, sub in RESERVED_PARAM_SUBKEYS.items():
+            if isinstance(v.get(key), dict) and sub in v[key]:
+                raise ValueError(f"params must not set reserved request field {key}.{sub} (set structured_output instead)")
+        for k, val in v.items():
+            try:
+                json.dumps(val)
+            except (TypeError, ValueError):
+                raise ValueError(f"params.{k} is not JSON-serializable ({type(val).__name__}); write dates and other special values as quoted strings") from None
         return v
 
     @model_validator(mode="after")
     def _finish(self) -> "EndpointConfig":
+        if self.max_tokens_field and self.max_tokens_field in self.params:
+            raise ValueError(f"params must not set reserved request fields: {self.max_tokens_field} (it is the max_tokens_field)")
         default_url, default_key = _API_DEFAULTS[self.api]
         if "base_url" not in self.model_fields_set or self.base_url is None:
             self.__dict__["base_url"] = default_url
@@ -543,9 +557,34 @@ def _format_errors(err: ValidationError) -> str:
     return "invalid configuration:\n" + "\n".join(lines)
 
 
+def _unserializable_path(value: Any, path: str = "<root>") -> str:
+    """Dotted path of the first value that cannot be written as JSON (for the error above)."""
+    if isinstance(value, dict):
+        for k, v in value.items():
+            found = _unserializable_path(v, f"{path}.{k}" if path != "<root>" else str(k))
+            if found:
+                return found
+        return ""
+    if isinstance(value, (list, tuple)):
+        for i, v in enumerate(value):
+            found = _unserializable_path(v, f"{path}[{i}]")
+            if found:
+                return found
+        return ""
+    try:
+        json.dumps(value)
+    except (TypeError, ValueError):
+        return f"{path} ({type(value).__name__})"
+    return ""
+
+
 def apply_overrides(raw: dict[str, Any], overrides: Mapping[str, Any] | None) -> dict[str, Any]:
     """Apply dotted-key overrides ('media.fingerprint': 'sha256'). None values are ignored."""
-    out = json.loads(json.dumps(raw))  # deep copy of plain data
+    try:
+        out = json.loads(json.dumps(raw))  # deep copy of plain data
+    except (TypeError, ValueError):
+        raise ConfigError(f"configuration value at {_unserializable_path(raw)} is not plain data (YAML reads an unquoted "
+                          "2026-01-02 or 12:30 as a date/time; put such values in quotes)") from None
     for key, value in (overrides or {}).items():
         if value is None:
             continue

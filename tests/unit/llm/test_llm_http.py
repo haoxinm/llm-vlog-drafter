@@ -107,8 +107,8 @@ def test_openai_chat_exact_request(img):
     assert r.url == "https://api.openai.com/v1/chat/completions"
     assert r.headers["authorization"] == "Bearer sk-openai-test-key-2" and "x-api-key" not in r.headers
     body = t.last_body
-    assert set(body) == {"model", "messages", "max_tokens", "response_format", "reasoning_effort"}
-    assert body["max_tokens"] == 300 and body["reasoning_effort"] == "low"
+    assert set(body) == {"model", "messages", "max_completion_tokens", "response_format", "reasoning_effort"}
+    assert body["max_completion_tokens"] == 300 and body["reasoning_effort"] == "low"
     assert body["response_format"] == {"type": "json_schema", "json_schema": {
         "name": "media_analyst", "schema": sanitize_schema_for_provider(SCHEMA), "strict": True}}
     sys_msg, user = body["messages"]
@@ -243,11 +243,55 @@ def test_retry_on_429_and_503_honours_retry_after(img):
     assert resp.attempts == 1  # attempts counts model calls, not transport retries
 
 
-def test_retry_after_is_capped_and_http_date_ignored(img):
+def test_retry_after_within_the_cap_is_honoured_and_http_date_ignored(img):
     sleeps = []
-    t = FakeTransport(http_json({}, 429, {"Retry-After": "9999"}), http_json({}, 429, {"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}), chat_reply())
+    t = FakeTransport(http_json({}, 429, {"Retry-After": "60"}), http_json({}, 429, {"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}), chat_reply())
     gw(endpoint_config("openai_chat"), t, sleep=sleeps.append).complete(make_request([img]))
     assert sleeps == [60.0, 1.0]
+
+
+def test_retry_after_beyond_the_cap_stops_retrying_and_reports_the_server_value(img):
+    sleeps = []
+    t = FakeTransport(http_json({"error": {"message": "quota"}}, 429, {"Retry-After": "3600"}), chat_reply())
+    with pytest.raises(LLMRateLimitError, match=r"3600s \(Retry-After\).*quota"):
+        gw(endpoint_config("openai_chat"), t, sleep=sleeps.append).complete(make_request([img]))
+    assert sleeps == [] and len(t.requests) == 1
+
+
+def test_auth_error_without_api_key_env_does_not_print_none(img):
+    t = FakeTransport(http_json({"error": {"message": "no"}}, 401))
+    with pytest.raises(LLMAuthError) as ei:
+        gw(endpoint_config("openai_chat", local=True, api_key_env=None), t).complete(make_request([img]))
+    assert "None" not in str(ei.value) and "no API key is configured" in str(ei.value)
+
+
+def test_openai_token_field_defaults_by_host_and_400_hint(img):
+    t = FakeTransport(chat_reply())
+    gw(endpoint_config("openai_chat", local=True), t).complete(make_request([img], max_tokens=50))
+    assert "max_tokens" in t.last_body and "max_completion_tokens" not in t.last_body   # other OpenAI-compatible servers
+    t = FakeTransport(chat_reply())
+    gw(endpoint_config("openai_chat", max_tokens_field="max_tokens"), t).complete(make_request([img], max_tokens=50))
+    assert "max_tokens" in t.last_body                                                 # explicit setting wins on api.openai.com
+    t = FakeTransport(http_json({"error": {"message": "Unsupported parameter: 'max_tokens' is not supported with this model."}}, 400))
+    with pytest.raises(LLMBadRequestError, match="max_tokens_field") as ei:
+        gw(endpoint_config("openai_chat", local=True), t).complete(make_request([img]))
+    assert "`max_tokens`" in str(ei.value)
+    t = FakeTransport(http_json({"error": {"message": "bad schema"}}, 400))
+    with pytest.raises(LLMBadRequestError) as ei:
+        gw(endpoint_config("openai_chat"), t).complete(make_request([img]))
+    assert "max_tokens_field" not in str(ei.value)
+
+
+def test_fingerprint_extra_covers_output_shaping_settings():
+    from trip_vlog.llm.adapters import fingerprint_extra
+
+    def fx(api="openai_chat", **ep):
+        return fingerprint_extra(endpoint_config(api, **ep).llm.endpoints["main"])
+
+    base = fx()
+    assert base["structured_output"] == "native" and base["max_tokens_cap"] == 4096 and base["max_tokens_field"] == "max_completion_tokens"
+    assert fx(structured_output="json_prompt") != base and fx(max_tokens=100) != base and fx(max_tokens_field="max_tokens") != base
+    assert provider_for(endpoint_config("openai_chat"), FakeTransport()).fingerprint_extra == base
 
 
 def test_retries_exhausted_maps_to_typed_error(img):

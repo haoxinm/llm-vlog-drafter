@@ -13,7 +13,7 @@ import time
 from typing import Any, Callable, Mapping
 
 from trip_vlog.config import EndpointConfig
-from trip_vlog.llm.adapters import ADAPTERS, error_message
+from trip_vlog.llm.adapters import ADAPTERS, bad_request_hint, error_message, fingerprint_extra
 from trip_vlog.llm.transport import HttpRequest, Transport, TransportConnectionError, TransportTimeout, UrllibTransport
 from trip_vlog.llm.types import (
     LLMAuthError,
@@ -77,7 +77,7 @@ class HttpProvider:
         self.model = model
         self.name = f"http:{endpoint.api}"
         self.is_local = endpoint.is_local
-        self.fingerprint_extra = {"api": endpoint.api, "params": endpoint.params}  # no URLs/headers/keys/timeouts
+        self.fingerprint_extra = fingerprint_extra(endpoint)  # no URLs/headers/keys/timeouts
         self.adapter = ADAPTERS[endpoint.api]
         self._transport = transport or UrllibTransport()
         self._sleep = sleep
@@ -122,6 +122,8 @@ class HttpProvider:
                 self._sleep(self._backoff(attempt, None))
                 continue
             if resp.status in RETRYABLE_STATUS and not last:
+                if self._too_long(resp.headers):
+                    break  # the server wants a longer pause than we are willing to wait: retrying now would only fail again
                 self._sleep(self._backoff(attempt, resp.headers.get("retry-after")))
                 continue
             break
@@ -144,6 +146,19 @@ class HttpProvider:
 
     # -- helpers --------------------------------------------------------
     @staticmethod
+    def _retry_after(headers: Mapping[str, str]) -> float | None:
+        """Seconds from a numeric Retry-After header (the HTTP-date form is ignored)."""
+        try:
+            v = float(headers.get("retry-after") or "")
+        except ValueError:
+            return None
+        return v if v == v and v >= 0 else None
+
+    def _too_long(self, headers: Mapping[str, str]) -> bool:
+        ra = self._retry_after(headers)
+        return ra is not None and ra > MAX_RETRY_AFTER
+
+    @staticmethod
     def _backoff(attempt: int, retry_after: str | None) -> float:
         if retry_after:
             try:
@@ -151,6 +166,11 @@ class HttpProvider:
             except ValueError:
                 pass  # HTTP-date form: fall back to exponential backoff
         return min(0.5 * 2**attempt, MAX_BACKOFF)
+
+    def _key_advice(self) -> str:
+        if self.ep.api_key_env:
+            return f"check the key in ${self.ep.api_key_env}"
+        return "no API key is configured for this endpoint (api_key_env is null); set api_key_env if the server requires one"
 
     def _clean(self, text: object) -> str:
         return sanitize(text, redactions=[(s, "***") for s in self._secrets])
@@ -160,13 +180,20 @@ class HttpProvider:
         rid = headers.get("request-id") or headers.get("x-request-id")
         kw = dict(status_code=status, request_id=rid)
         if status in (400, 422):
-            return LLMBadRequestError(f"endpoint {self.endpoint!r} rejected the request ({status}): {msg}", **kw)
+            return LLMBadRequestError(f"endpoint {self.endpoint!r} rejected the request ({status}): {msg}{bad_request_hint(msg, self.ep)}", **kw)
         if status == 401:
-            return LLMAuthError(f"authentication failed (401) at endpoint {self.endpoint!r}: check the key in ${self.ep.api_key_env}", **kw)
+            return LLMAuthError(f"authentication failed (401) at endpoint {self.endpoint!r}: " + self._key_advice(), **kw)
         if status == 403:
             return LLMPermissionError(f"permission denied (403) at endpoint {self.endpoint!r}: {msg}", **kw)
         if status == 404:
             return LLMNotFoundError(f"not found (404) at {self.url}: check base_url/path and the model id: {msg}", **kw)
+        ra = self._retry_after(headers)
+        if ra is not None and ra > MAX_RETRY_AFTER:
+            wait = (f"the server asked to wait {ra:g}s (Retry-After), longer than the {MAX_RETRY_AFTER:g}s this tool waits, so it did not retry; "
+                    "try again later")
+            if status == 429:
+                return LLMRateLimitError(f"rate limited (429) at endpoint {self.endpoint!r}; {wait}: {msg}", **kw)
+            return LLMProviderError(f"endpoint {self.endpoint!r} returned HTTP {status}; {wait}: {msg}", **kw)
         if status == 429:
             return LLMRateLimitError(f"rate limited (429) at endpoint {self.endpoint!r}; still failing after {self.ep.max_retries} retries: {msg}", **kw)
         return LLMProviderError(f"endpoint {self.endpoint!r} returned HTTP {status}: {msg}", **kw)

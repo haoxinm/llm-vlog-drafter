@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Callable, Literal, Mapping
 
 from trip_vlog.config import Config, EndpointConfig
+from trip_vlog.llm.adapters import fingerprint_extra
 from trip_vlog.llm.gateway import Gateway
 from trip_vlog.llm.http_provider import HttpProvider
 from trip_vlog.llm.replay import LLM_MODES, ReplayProvider
@@ -78,7 +79,7 @@ def make_gateway(
                   image_cache_dir=cache_dir / "images", logger=logger)
     if resolved == "replay":
         provider = ReplayProvider(ResponseStore(fixture_dir), model=model or "", endpoint=profile,
-                                  fingerprint_extra={"api": ep.api, "params": ep.params})
+                                  fingerprint_extra=fingerprint_extra(ep))
         return Gateway(provider, **common)  # type: ignore[arg-type]
     if not model:
         raise LLMConfigError(

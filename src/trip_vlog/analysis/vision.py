@@ -23,6 +23,7 @@ from trip_vlog.analysis.labels import (
     validate_label,
 )
 from trip_vlog.config import Config
+from trip_vlog.llm.adapters import fingerprint_extra
 from trip_vlog.llm.factory import resolve_model
 from trip_vlog.llm.gateway import Gateway
 from trip_vlog.llm.types import (
@@ -83,7 +84,7 @@ class VisionSettings:
         return cls(
             sampling=fr.SamplingSettings.from_config(config, m.vision_batch_max_images), input_mode=m.vision_input,
             batch_max_images=m.vision_batch_max_images, max_items_per_request=max_items, send_filenames=m.vision_send_filenames,
-            model=resolve_model(ep, env) or "", provider_extra={"api": ep.api, "params": ep.params}, endpoint=name, is_local=ep.is_local,
+            model=resolve_model(ep, env) or "", provider_extra=fingerprint_extra(ep), endpoint=name, is_local=ep.is_local,
             supports_images=ep.supports_images, max_tokens_cap=ep.max_tokens, image_max_side=config.llm.image_max_side,
             image_quality=config.llm.image_quality, duplicate_distance=m.photo_duplicate_distance,
             analyst=load_template("media_analyst", 1), segment_prompt=load_template("segment_labels", 1),
