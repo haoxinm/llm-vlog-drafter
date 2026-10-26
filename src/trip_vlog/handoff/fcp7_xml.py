@@ -30,7 +30,7 @@ class XmlClip:
     index: int                # position among the items of that track
     item_id: str | None
     name: str
-    start: int | None         # record frames of the sequence; None when the file says -1 (derived by a transition)
+    start: int | None         # record frames of the sequence; None when the file says -1 and no transition defines it
     end: int | None
     source_in: int | None     # frames at ``rate``
     source_out: int | None
@@ -41,6 +41,8 @@ class XmlClip:
     gain_db: float | None = None
     has_speed: bool = False
     enabled: bool = True
+    start_derived: bool = False   # the file says -1 and ``start`` is the cut of the transition in front of the item
+    end_derived: bool = False     # likewise for ``end`` and the transition behind it
 
     @property
     def track_name(self) -> str:
@@ -74,6 +76,11 @@ class XmlTransition:
     @property
     def centre(self) -> float | None:
         return None if self.start is None or self.end is None else (self.start + self.end) / 2
+
+    @property
+    def cut_frame(self) -> int | None:
+        """The cut a centred transition sits on (an odd length puts the extra frame before the cut, as FilmCraft writes it)."""
+        return None if self.start is None or self.end is None else self.start + (self.end - self.start + 1) // 2
 
 
 @dataclass(frozen=True)
@@ -117,7 +124,7 @@ def _int(elem: ET.Element | None, tag: str) -> int | None:
 
 def _frame(elem: ET.Element, tag: str) -> int | None:
     v = _int(elem, tag)
-    return None if v is None or v < 0 else v    # xmeml writes -1 for "not specified / covered by a transition"
+    return None if v is None or v < 0 else v    # xmeml writes -1 for "not specified / defined by the neighbouring transition"
 
 
 def parse_rate(elem: ET.Element | None, default: Fraction | None = None) -> Fraction:
@@ -181,6 +188,28 @@ def _filters(item: ET.Element) -> tuple[str | None, float | None, bool]:
     return text, gain, speed
 
 
+def _resolve_unspecified(tl: "Fcp7Timeline", order: list[tuple[str, int]]) -> None:
+    """A clip item next to a transition may say ``<start>-1</start>`` / ``<end>-1</end>``: the transition defines that edge. Fill it with the
+    transition's cut (flagged ``*_derived``); without such a neighbour the edge stays unknown (None) and is reported, not guessed."""
+    from dataclasses import replace
+
+    for pos, (kind, idx) in enumerate(order):
+        if kind != "clip":
+            continue
+        c = tl.clips[idx]
+        changes: dict[str, Any] = {}
+        if c.start is None and pos > 0 and order[pos - 1][0] == "transition":
+            cut = tl.transitions[order[pos - 1][1]].cut_frame
+            if cut is not None:
+                changes.update(start=cut, start_derived=True)
+        if c.end is None and pos + 1 < len(order) and order[pos + 1][0] == "transition":
+            cut = tl.transitions[order[pos + 1][1]].cut_frame
+            if cut is not None:
+                changes.update(end=cut, end_derived=True)
+        if changes:
+            tl.clips[idx] = replace(c, **changes)
+
+
 def parse_fcp7_xml(source: Path | str) -> Fcp7Timeline:
     """Parse a file (``Path``) or XML text (``str`` starting with ``<``/``<?xml``). Raises XmlReadError."""
     try:
@@ -211,6 +240,8 @@ def parse_fcp7_xml(source: Path | str) -> Fcp7Timeline:
         setattr(tl, f"{kind}_tracks", len(tracks))
         for ti, track in enumerate(tracks, 1):
             n = 0
+            first_clip, first_tr = len(tl.clips), len(tl.transitions)
+            order: list[tuple[str, int]] = []      # ("clip"|"transition", index) in file order, for the -1 resolution below
             for item in track:
                 if item.tag in ("clipitem", "generatoritem"):
                     n += 1
@@ -221,15 +252,18 @@ def parse_fcp7_xml(source: Path | str) -> Fcp7Timeline:
                         path = paths.get(fe.get("id", ""))
                     text, gain, speed = _filters(item)
                     generator = item.tag == "generatoritem" or (kind == "video" and path is None)
+                    order.append(("clip", len(tl.clips)))
                     tl.clips.append(XmlClip(
                         kind=kind, track=ti, index=n, item_id=item.get("id"), name=(item.findtext("name") or "").strip(),
                         start=_frame(item, "start"), end=_frame(item, "end"), source_in=_int(item, "in"), source_out=_int(item, "out"),
                         rate=frate, path=path, is_generator=generator, text=text, gain_db=gain, has_speed=speed,
                         enabled=(item.findtext("enabled") or "TRUE").strip().upper() != "FALSE"))
                 elif item.tag == "transitionitem":
+                    order.append(("transition", len(tl.transitions)))
                     tl.transitions.append(XmlTransition(kind, ti, _frame(item, "start"), _frame(item, "end"),
                                                         (item.findtext("alignment") or "").strip() or None,
                                                         (item.findtext("effect/name") or "").strip()))
+            _resolve_unspecified(tl, order)
     for m in seq.findall("marker"):
         tl.markers.append(XmlMarker((m.findtext("name") or "").strip(), (m.findtext("comment") or "").strip(), _frame(m, "in")))
     return tl

@@ -69,6 +69,19 @@ def test_minus_one_means_unspecified():
     assert tl.clips[0].start is None and tl.clips[0].end == 60
 
 
+def test_minus_one_next_to_a_transition_is_derived_from_its_cut():
+    """xmeml writes -1 for the edge a transition defines. The parser takes the transition's cut there (flagged), so a perfect export is not
+    reported as a record mismatch; without a neighbouring transition the edge stays unknown."""
+    text = xmeml(duration=195,
+                 video=[[clipitem(1, "a.mp4", 0, -1, 0, 105, path=MAC, file_id="f1"), transitionitem(97, 112),
+                         clipitem(2, "b.mov", -1, 195, 0, 90, path=WIN2, file_id="f2")]])
+    a, b = parse_fcp7_xml(text).track_clips("video", 1)
+    assert (a.start, a.end, a.end_derived, a.start_derived) == (0, 105, True, False)
+    assert (b.start, b.end, b.start_derived, b.end_derived) == (105, 195, True, False)
+    alone = parse_fcp7_xml(xmeml(duration=60, video=[[clipitem(1, "a.mp4", -1, -1, 0, 60, path=MAC, file_id="f")]])).clips[0]
+    assert (alone.start, alone.end, alone.start_derived) == (None, None, False)
+
+
 def test_parse_errors():
     with pytest.raises(XmlReadError):
         parse_fcp7_xml("<xmeml><sequence>")

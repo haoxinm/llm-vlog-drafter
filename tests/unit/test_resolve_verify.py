@@ -304,10 +304,20 @@ def test_load_expected_json_normalizes(tmp_path):
     ("file://localhost/C:/Users/Me/Clips/a.mp4", r"C:\Users\Me\Clips\a.mp4"),
     (r"\\?\C:\Users\Me\Clips\a.mp4", "C:/Users/Me/Clips/a.mp4"),
     ("file:///C:/My%20Clips/a.mp4", r"C:\My Clips\a.mp4"),
-    ("file:///Users/me/My%20Clips/a.mp4", "/Users/Me/my clips/a.mp4"),
 ])
 def test_paths_equal_case_insensitive(a, b):
-    assert rv.paths_equal(a, b, fold_case=True)
+    assert rv.paths_equal(a, b, fold_case=True) and rv.paths_equal(a, b)      # Windows-style: case-insensitive on every host
+    assert not rv.paths_equal("C:/A/x.mp4", "c:/a/x.mp4", fold_case=False)
+
+
+def test_posix_paths_are_never_case_folded_and_unicode_is_nfc_compared():
+    import unicodedata
+    assert not rv.paths_equal("file:///Users/me/My%20Clips/a.mp4", "/Users/Me/my clips/a.mp4", fold_case=True)
+    assert not rv.paths_equal("/a/B.mp4", "/a/b.mp4") and not rv.paths_equal("/a/B.mp4", "/a/b.mp4", fold_case=True)
+    assert not rv.paths_equal("C:/a/B.mp4", "/a/b.mp4", fold_case=True)                                     # Windows-style vs POSIX
+    nfd, nfc_ = unicodedata.normalize("NFD", "/Users/me/Caf\u00e9/clip.mov"), unicodedata.normalize("NFC", "/Users/me/Caf\u00e9/clip.mov")
+    assert nfd != nfc_ and rv.paths_equal(nfd, nfc_, fold_case=False) and rv.paths_equal(nfd, nfc_)
+    assert rv.paths_equal(unicodedata.normalize("NFD", "C:\\Users\\Me\\Caf\u00e9.mp4"), "c:/users/me/caf\u00e9.mp4")
 
 
 def test_paths_case_sensitive_and_relative(tmp_path):
@@ -388,12 +398,13 @@ def test_title_absent_is_info_only(media):
 
 
 def test_windows_path_case_via_fake(media):
-    exp = make_expected(media)
+    from pathlib import PureWindowsPath
+    exp = make_expected(PureWindowsPath("C:/Media"))
     for t in exp["tracks"]:
         for cl in t["clips"]:
             if cl["source_path"]:
                 cl["source_path"] = cl["source_path"].upper()
-    tl = make_actual_timeline(media)
+    tl = make_actual_timeline(PureWindowsPath("c:/media"))      # Windows-style paths differing only in case; POSIX paths are never folded
     res = checks(rv.compare_timeline(exp, rv.dump_timeline(tl), fold_case=True))
     assert res["media_path"]["status"] == "pass"
     res = checks(rv.compare_timeline(exp, rv.dump_timeline(tl), fold_case=False))

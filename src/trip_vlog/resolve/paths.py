@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import posixpath
 import re
-import sys
+import unicodedata
 import urllib.parse
 from pathlib import PureWindowsPath
 from typing import Any, Iterable
@@ -57,13 +57,23 @@ def normalize_path(p: Any, base_dir: str | os.PathLike | None = None, windows: b
     return s.lower() if windows else s
 
 
+def _windows_style(n: str) -> bool:
+    return re.match(r"^[A-Za-z]:/", n) is not None or n.startswith("//")
+
+
 def paths_equal(a: Any, b: Any, base_a: Any = None, base_b: Any = None, fold_case: bool | None = None) -> bool:
-    if fold_case is None:
-        fold_case = os.name == "nt" or sys.platform == "darwin"
-    na, nb = normalize_path(a, base_a, windows=False), normalize_path(b, base_b, windows=False)
+    """Same file by name: normalised separators, file URLs decoded, Unicode compared in NFC (macOS file systems hand back NFD names).
+
+    Case is folded only when BOTH paths are Windows-style (drive letter or UNC): those are case-insensitive wherever they are compared.
+    POSIX paths always compare case-sensitively, because Linux (and many macOS volumes) are case-sensitive and folding could pair two
+    different files. ``fold_case=False`` turns the Windows-style folding off as well; ``None`` and ``True`` leave it on."""
+    na = unicodedata.normalize("NFC", normalize_path(a, base_a, windows=False))
+    nb = unicodedata.normalize("NFC", normalize_path(b, base_b, windows=False))
     if not na or not nb:
         return False
-    return na.lower() == nb.lower() if fold_case else na == nb
+    if na == nb:
+        return True
+    return fold_case is not False and _windows_style(na) and _windows_style(nb) and na.lower() == nb.lower()
 
 
 

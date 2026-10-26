@@ -31,7 +31,7 @@ def centred_transition_span(cut_frame: int, frames: int) -> tuple[int, int]:
 
 def transition_cut_frame(start: int, end: int) -> int:
     """The cut a transition written by ``centred_transition_span`` is centred on."""
-    return start + (end - start + 1) // 2
+    return start + (end - start + 1) // 2      # same rule as XmlTransition.cut_frame
 
 # feature ids used by the compatibility report
 F_SETTINGS, F_CUTS, F_DISSOLVES, F_STILLS, F_OVERLAYS, F_TITLES = "timeline_settings", "cuts", "dissolves", "stills", "overlays_v2", "titles"
