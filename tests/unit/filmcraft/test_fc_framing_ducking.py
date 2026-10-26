@@ -103,8 +103,9 @@ def test_a_scale_or_keyframe_count_that_differs_is_a_verification_mismatch(fc):
     wrong = replace(spec, placements=tuple(
         replace(p, fit_source_size=(1920, 1080)) if p.clip_instance_id == "c3" else
         replace(p, gain_keys=p.gain_keys[:2]) if p.clip_instance_id == "c4" else p for p in spec.placements))
-    kinds = {m.kind for m in adapter.verify(wrong).mismatches}
-    assert {"framing", "ducking"} <= kinds
+    rep = adapter.verify(wrong)
+    assert {m.kind for m in rep.mismatches} == {"ducking"}           # a wrong scale is a warning (QC framing), a wrong keyframe count fails
+    assert {m.kind for m in rep.warnings} == {"framing"}
 
 
 def test_missing_capability_is_a_clear_error_and_nothing_is_half_applied(tmp_path, monkeypatch):

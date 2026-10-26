@@ -104,7 +104,10 @@ def edit_plan_to_spec(plan: EditPlan, catalog: PlanningCatalog, media_root: Path
             asset = catalog.assets.get(c.asset_id)
             fit_size = None
             if st.fit_mixed_aspect and asset is not None and c.media_type in ("video", "image"):
-                w, h = (asset.display_width or asset.width), (asset.display_height or asset.height)
+                if c.media_type == "image":   # FilmCraft ignores EXIF orientation: it fits the stored size
+                    w, h = asset.width or asset.display_width, asset.height or asset.display_height
+                else:
+                    w, h = (asset.display_width or asset.width), (asset.display_height or asset.height)
                 if not (w and h):
                     warnings.append(MappingWarning("fit_size_unknown", c.clip_instance_id,
                                                    "the source size is not known, so the clip was not scaled to the frame"))
@@ -113,6 +116,10 @@ def edit_plan_to_spec(plan: EditPlan, catalog: PlanningCatalog, media_root: Path
             if asset is None:
                 errors.append(f"{c.clip_instance_id}: asset {c.asset_id} is not in the catalog")
                 continue
+            if c.media_type == "image" and asset.rotation_degrees % 360:
+                warnings.append(MappingWarning("still_rotated", c.clip_instance_id,
+                                               f"the still has EXIF orientation ({asset.rotation_degrees} degrees) that FilmCraft ignores, "
+                                               "so it is shown sideways or upside down; rotate it in Resolve or re-export the file"))
             if c.asset_id not in used:
                 used.append(c.asset_id)
             path = source_path_for(media_root, asset.relative_path)

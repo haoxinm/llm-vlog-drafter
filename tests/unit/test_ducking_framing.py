@@ -167,3 +167,48 @@ def test_framing_check_finds_black_bars_in_a_real_frame(tmp_path, ffmpeg_tools):
     assert r.status == WARN and r.data["findings"][0]["where"] == "preview"
     plain = replace(spec, placements=(replace(spec.placements[0], fit_source_size=None),))
     assert check_framing(plain, None, ok, ffmpeg).status == SKIPPED
+
+
+def test_narration_and_natural_audio_clips_are_speech_windows():
+    plan = make_plan(sel_clip("v1", mid(CAT, "day2/silent.mp4", 0), 8.0, "start", audio="muted"),
+                     sel_clip("n1", mid(CAT, "music/song.wav", 1), 4.0, "start", role="narration"),
+                     sel_clip("m1", mid(CAT, "music/song.wav", 0), 8.0, role="music"), duration=8)
+    d = build_duck_plan(plan, {}, {}, ON)
+    nar = [c for s in plan.scenes for c in s.clips if c.clip_instance_id == "n1"][0]
+    assert [(w.start_frame, w.end_frame, w.reason) for w in d.windows] == [(nar.timeline_start_frame, nar.timeline_start_frame + nar.duration_frames, "narration")]
+    assert "m1" in d.keys
+    # muted narration is not speech
+    muted = make_plan(sel_clip("v1", mid(CAT, "day2/silent.mp4", 0), 8.0, "start", audio="muted"),
+                      sel_clip("n1", mid(CAT, "music/song.wav", 1), 4.0, "start", role="narration", audio="muted"),
+                      sel_clip("m1", mid(CAT, "music/song.wav", 0), 8.0, role="music"), duration=8)
+    assert build_duck_plan(muted, {}, {}, ON).windows == []
+    # speech mode: a natural_audio clip with a timed transcript ducks only where it is spoken
+    nat = make_plan(sel_clip("v1", mid(CAT, "day2/silent.mp4", 0), 8.0, "start", audio="muted"),
+                    sel_clip("a1", mid(CAT, "music/song.wav", 1), 8.0, "start", role="natural_audio"),
+                    sel_clip("m1", mid(CAT, "music/song.wav", 0), 8.0, role="music"), duration=8)
+    a1 = [c for s in nat.scenes for c in s.clips if c.clip_instance_id == "a1"][0]
+    t0 = float(a1.source_in_seconds)
+    tr = {aid("music/song.wav"): [TranscriptSpan(t0 + 2.0, t0 + 4.0, "hello there", False)]}
+    w = build_duck_plan(nat, {}, tr, ON).windows
+    assert len(w) == 1 and w[0].reason == "speech" and w[0].start_frame > a1.timeline_start_frame
+    assert build_duck_plan(nat, {}, {}, ON).windows == []
+
+
+def test_a_still_is_fitted_by_its_stored_size_and_a_rotated_still_is_warned_about():
+    from trip_vlog.planning.catalog_view import AssetInfo
+    still = AssetInfo(asset_id=aid("day1/rot.jpg"), relative_path="day1/rot.jpg", media_type="image", width=3000, height=2000,
+                      display_width=2000, display_height=3000, rotation_degrees=90, content_version="v")
+    cat = PlanningCatalog(list(CAT.assets.values()) + [still], list(CAT.moments.values()) + list(
+        __import__("planning_helpers").mk_moments(still, [])))
+    plan = resolve_selection_plan(sel_plan([sel_clip("s1", cat.moments_for_asset(still.asset_id)[0].moment_id, 2.0)]), cat,
+                                  PlanSettings(target_duration_seconds=2))
+    res = edit_plan_to_spec(plan, cat, ROOT, MappingSettings(fit_mixed_aspect=True))
+    assert res.spec.placements[0].fit_source_size == (3000, 2000)
+    assert [w.code for w in res.warnings if w.clip_instance_id == "s1"] == ["still_rotated"]
+
+
+def test_a_framing_mismatch_is_a_verification_warning_not_a_failure():
+    from trip_vlog.filmcraft.inspect import VerificationReport, Mismatch
+    rep = VerificationReport()
+    rep.warnings.append(Mismatch("framing", "p1", 56.25, 100.0, "p1: scale 100.0 read back"))
+    assert rep.ok and rep.to_dict()["warnings"][0]["kind"] == "framing"

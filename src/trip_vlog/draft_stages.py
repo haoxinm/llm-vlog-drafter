@@ -363,6 +363,9 @@ def _assemble_inputs(ctx: Any) -> Any:
     # keys only appear when the feature is on, so a workspace that does not use it keeps its cache
     if c.fit_mixed_aspect:
         d["fit"] = True
+    if c.fit_mixed_aspect or c.duck_music:
+        # what FilmCraft does with clip.fitToFrame and Volume keyframes depends on its build
+        d["filmcraft_version"] = (ctx.manifest.get("filmcraft") or {}).get("version")
     if c.duck_music:
         d["duck"] = [c.duck_mode, c.duck_db, c.duck_ramp_seconds, c.duck_merge_gap_seconds, ctx.config.qc.audio_active_ratio_min,
                      stable_hash({a: [(t.start, t.end, t.text, t.coarse) for t in ts] for a, ts in sorted(_qc_transcripts(ctx).items())})]
@@ -547,16 +550,18 @@ def qc_stage(ctx: Any) -> StageResult:
         err = f"{type(e).__name__}: {e}"
         seq = None
     bed, bed_error, sources = _render_music_bed(ctx, ad, prep, proj_path, err)
-    report_path, sheet = _qc_paths(ctx)
-    doc = run_qc(QcInputs(
-        plan=prep.plan, catalog=PlanningCatalog.from_catalog(ctx.catalog), source_paths=prep.spec.asset_paths, sequence=seq,
-        project=project, reopen_error=err, mismatches=mism, preview=_preview_path(ctx), report_path=report_path, contact_sheet=sheet,
-        ffmpeg=ctx.ffmpeg, ffprobe=str(ctx.ffprobe) if ctx.ffprobe else None, config=ctx.config,
-        transcripts=_qc_transcripts(ctx), outline_scene_ids=_qc_outline_scene_ids(ctx), index_path=_qc_index_path(ctx),
-        workspace_root=ctx.workspace.root, spec=eff if seq is not None else prep.spec, duck=prep.duck, music_bed=bed, music_bed_error=bed_error,
-        music_sources=sources))
-    if bed is not None:
-        bed.unlink(missing_ok=True)       # a temporary measuring file of ours (the whole sequence's music as WAV); nothing of the user's
+    try:
+        report_path, sheet = _qc_paths(ctx)
+        doc = run_qc(QcInputs(
+            plan=prep.plan, catalog=PlanningCatalog.from_catalog(ctx.catalog), source_paths=prep.spec.asset_paths, sequence=seq,
+            project=project, reopen_error=err, mismatches=mism, preview=_preview_path(ctx), report_path=report_path, contact_sheet=sheet,
+            ffmpeg=ctx.ffmpeg, ffprobe=str(ctx.ffprobe) if ctx.ffprobe else None, config=ctx.config,
+            transcripts=_qc_transcripts(ctx), outline_scene_ids=_qc_outline_scene_ids(ctx), index_path=_qc_index_path(ctx),
+            workspace_root=ctx.workspace.root, spec=eff if seq is not None else prep.spec, duck=prep.duck, music_bed=bed, music_bed_error=bed_error,
+            music_sources=sources))
+    finally:
+        if bed is not None:
+            bed.unlink(missing_ok=True)       # a temporary measuring file of ours (the whole sequence's music as WAV); nothing of the user's, also after a failure
     cs = doc["contact_sheet"]
     summary = {"status": doc["status"], **doc["counts"], "report": _rel(ctx, report_path),
                "contact_sheet": _rel(ctx, sheet) if cs["path"] else None, "preview_sheets": len(cs.get("sheets") or []),
@@ -661,6 +666,9 @@ def _readback_fallback(ctx: Any, export: Any, eff: TimelineSpec, out: Path, proj
                      "see the read-back section of this report and readback_interchange.json")
     elif rb["status"] == "failed":
         notes.append("the read-back interchange fallback was needed but failed: " + rb["reason"])
+    elif rb["status"] == "native_lossy_kept":
+        notes.append("FilmCraft's own FCP7 XML differs from the timeline in ducking keyframes or markers only; it was kept (a file from the read-back "
+                     "would drop the ducking and title styling): see the read-back section of this report")
     return rb
 
 
@@ -734,7 +742,7 @@ def handoff_stage(ctx: Any) -> StageResult:
         xml_path=Path(xml_fmt.path) if xml_fmt else None, filmcraft_version=run.get("filmcraft_version"),
         verified_after_reopen=run.get("verified_after_reopen"), mapping_warnings=[w.to_dict() for w in prep.mapping.warnings],
         finish_report=finish_doc, tool_version=__version__, xml_origin="readback" if xml_from_readback else "native",
-        readback=_readback_summary(readback) if readback.get("status") in ("generated", "failed") else None))
+        readback=_readback_summary(readback) if readback.get("status") in ("generated", "failed", "native_lossy_kept") else None))
     atomic_write_json(out / COMPAT_JSON, compat)
     atomic_write_text(out / COMPAT_MD, render_compatibility_markdown(compat))
     compat_summary = summary_of(compat)
@@ -745,7 +753,7 @@ def handoff_stage(ctx: Any) -> StageResult:
         plan_hash=prep.plan.plan_hash, qc_status=qc_status, media_rows=rows, missing_media=missing,
         mapping_warnings=[w.to_dict() for w in prep.mapping.warnings],
         verification=read_resolve_verification(out / "resolve_verification.json"), stage_notes=notes, compatibility=compat_summary, captions=captions,
-        readback=readback if readback.get("status") in ("generated", "failed") else None))
+        readback=readback if readback.get("status") in ("generated", "failed", "native_lossy_kept") else None))
     atomic_write_text(out / "handoff_report.md", text)
     atomic_write_json(out / "handoff_summary.json", {**export.to_dict(), "missing_media": missing, "generated_at": utc_now_iso(),
                                                       "compatibility": compat_summary})

@@ -297,6 +297,7 @@ class VerificationReport:
     clip_map: ClipMap = field(default_factory=ClipMap)
     checked: dict[str, int] = field(default_factory=dict)
     skipped: list[str] = field(default_factory=list)
+    warnings: list[Mismatch] = field(default_factory=list)   # findings that do not fail a build (framing: cosmetic, QC warns)
 
     @property
     def ok(self) -> bool:
@@ -304,7 +305,7 @@ class VerificationReport:
 
     def to_dict(self) -> dict[str, Any]:
         return {"ok": self.ok, "mismatches": [m.to_dict() for m in self.mismatches], "checked": self.checked,
-                "skipped": self.skipped}
+                "skipped": self.skipped, "warnings": [m.to_dict() for m in self.warnings]}
 
     def summary(self, limit: int = 10) -> str:
         if self.ok:
@@ -331,7 +332,8 @@ def verify_against_spec(
     tol_s = Fraction(tol) / fps + Fraction(1, 10**6)
 
     def add(kind: str, subject: str, expected: Any, actual: Any, msg: str | None = None) -> None:
-        mm.append(Mismatch(kind, subject, expected, actual, msg or f"expected {expected}, got {actual}"))
+        # a scale that is not the planned one is a framing problem, not a broken timeline: reported, never fatal
+        (rep.warnings if kind == "framing" else mm).append(Mismatch(kind, subject, expected, actual, msg or f"expected {expected}, got {actual}"))
 
     # sequence settings
     if (snapshot.width, snapshot.height) != (spec.width, spec.height):

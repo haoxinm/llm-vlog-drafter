@@ -17,6 +17,7 @@ The structure follows FilmCraft's own FCP7 XML export (xmeml version 4) so that 
 
 from __future__ import annotations
 
+import json
 import math
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -262,21 +263,50 @@ LOSES = (
 
 def native_state(xml_path: Path, spec: Any, *, listed_error: str | None = None) -> tuple[str, list[str]]:
     """('ok' | 'missing' | 'unreadable' | 'lossy', details) for FilmCraft's own timeline.xml, judged the way the compatibility report judges it."""
+    state, details, _ = _judge_native(xml_path, spec, listed_error=listed_error)
+    return state, details
+
+
+def _judge_native(xml_path: Path, spec: Any, *, listed_error: str | None = None) -> tuple[str, list[str], list[Any]]:
     from trip_vlog.handoff import xml_roundtrip as X
     from trip_vlog.handoff.fcp7_xml import XmlReadError, parse_fcp7_xml
 
     if listed_error:
-        return "missing", [listed_error]
+        return "missing", [listed_error], []
     if not xml_path.is_file() or xml_path.stat().st_size == 0:
-        return "missing", [f"{xml_path.name} was not written"]
+        return "missing", [f"{xml_path.name} was not written"], []
     try:
         tl = parse_fcp7_xml(xml_path)
     except XmlReadError as e:
-        return "unreadable", [str(e)]
+        return "unreadable", [str(e)], []
     rt = X.compare_timeline_xml(tl, X.expected_from_spec(spec))
     if rt.ok:
-        return "ok", []
-    return "lossy", [str(m) for m in rt.mismatches[:10]] + ([f"... {len(rt.mismatches) - 10} more"] if len(rt.mismatches) > 10 else [])
+        return "ok", [], []
+    return ("lossy", [str(m) for m in rt.mismatches[:10]] + ([f"... {len(rt.mismatches) - 10} more"] if len(rt.mismatches) > 10 else []),
+            list(rt.mismatches))
+
+
+def _sha256(path: Path) -> str | None:
+    import hashlib
+
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _set_aside_stale(out_dir: Path, old: Mapping[str, Any] | None) -> str | None:
+    """A ``timeline.xml`` that this tool generated in an earlier run (its hash is the one in the old provenance record) and that no
+    longer describes the current timeline is renamed to ``timeline.xml.<hash12>.stale``. A file we did not write is never touched."""
+    xml = out_dir / XML_NAME
+    if not old or old.get("status") != "generated" or not old.get("sha256") or not xml.is_file():
+        return None
+    sha = _sha256(xml)
+    if sha != old["sha256"]:
+        return None
+    target = out_dir / f"{XML_NAME}.{sha[:12]}.stale"
+    xml.replace(target)
+    return target.name
 
 
 def run_fallback(adapter: Any, spec: Any, requested: list[str], out_dir: Path, project_path: Path, *, mode: str,
@@ -296,10 +326,14 @@ def run_fallback(adapter: Any, spec: Any, requested: list[str], out_dir: Path, p
     from trip_vlog.state import atomic_write_json, atomic_write_text
 
     rec_path = out_dir / REPORT_NAME
+    try:
+        old_rec = json.loads(rec_path.read_text(encoding="utf-8")) if rec_path.is_file() else None
+    except (OSError, ValueError):
+        old_rec = None
 
     def done(status: str, reason: str, **extra: Any) -> dict[str, Any]:
         rec = {"status": status, "reason": reason, "label": "generated from FilmCraft read-back" if status == "generated" else None, **extra}
-        if status in ("generated", "failed"):
+        if status in ("generated", "failed", "native_lossy_kept"):
             rec["generated_at"] = utc_now_iso()
             atomic_write_json(rec_path, rec)
         elif rec_path.is_file():
@@ -314,16 +348,31 @@ def run_fallback(adapter: Any, spec: Any, requested: list[str], out_dir: Path, p
     if "fcp7_xml" not in requested:
         return done("not_requested", "fcp7_xml is not among the requested interchange formats")
     native = out_dir / XML_NAME
-    state, issues = native_state(native, spec, listed_error=listed_error)
+    state, issues, mismatches = _judge_native(native, spec, listed_error=listed_error)
     if state == "ok":
         return done("not_needed", "FilmCraft's own FCP7 XML export checks out against the timeline sent to FilmCraft", native={"state": state})
     base = {"native": {"state": state, "issues": issues}}
+    drops = any(p.gain_keys for p in spec.placements) or bool(spec.titles)      # what a file from the read-back cannot carry (LOSES)
+    ours = bool(old_rec and old_rec.get("status") == "generated" and old_rec.get("sha256") and _sha256(native) == old_rec["sha256"])
+    if state == "lossy" and not ours and drops and mismatches and all(m.feature in (X.F_DUCKING, X.F_MARKERS) for m in mismatches):
+        # only keyframe timing or markers differ: the generated file would lose the ducking envelope and the title styling to fix that
+        return done("native_lossy_kept", "FilmCraft's own FCP7 XML export differs from the timeline only in ducking keyframes or markers; the generated "
+                    "read-back file would drop the ducking envelope and the title styling it carries, so the native file was kept",
+                    **base, file=XML_NAME, diff=[m.to_dict() for m in mismatches[:20]], diff_count=len(mismatches))
+
+    def failed(reason: str, **extra: Any) -> dict[str, Any]:
+        aside = _set_aside_stale(out_dir, old_rec)
+        if aside:
+            reason += f"; the timeline.xml generated by an earlier run no longer matches this timeline and was set aside as {aside}"
+            extra["stale_set_aside"] = aside
+        return done("failed", reason, **extra)
+
     try:
         adapter.close()
         snap, project = adapter.read_back(project_path)
         gen = build_readback_xml(snap, project)
     except Exception as e:  # noqa: BLE001 - FilmCraft, read-back and generator errors all end in a recorded failure
-        return done("failed", f"the read-back timeline could not be turned into FCP7 XML: {type(e).__name__}: {e}", **base)
+        return failed(f"the read-back timeline could not be turned into FCP7 XML: {type(e).__name__}: {e}", **base)
     cross = verify_against_spec(snap, spec, project=project)
     candidate = out_dir / CANDIDATE_NAME
     atomic_write_text(candidate, gen.text)
@@ -331,10 +380,10 @@ def run_fallback(adapter: Any, spec: Any, requested: list[str], out_dir: Path, p
         rt = X.compare_timeline_xml(parse_fcp7_xml(candidate), X.expected_from_spec(spec), keyframes_carried=False)
     except XmlReadError as e:
         candidate.unlink(missing_ok=True)
-        return done("failed", f"the generated file is not readable: {e}", **base, crosscheck=crosscheck_summary(cross.mismatches))
+        return failed(f"the generated file is not readable: {e}", **base, crosscheck=crosscheck_summary(cross.mismatches))
     if not rt.ok:
         candidate.unlink(missing_ok=True)
-        return done("failed", f"the file generated from the read-back does not round-trip exactly against the expected timeline ({len(rt.mismatches)} mismatch(es)); "
+        return failed(f"the file generated from the read-back does not round-trip exactly against the expected timeline ({len(rt.mismatches)} mismatch(es)); "
                     "it was discarded", **base, crosscheck=crosscheck_summary(cross.mismatches), roundtrip=[str(m) for m in rt.mismatches[:10]])
     if state != "missing" and native.is_file():
         os.replace(native, out_dir / NATIVE_KEPT_NAME)

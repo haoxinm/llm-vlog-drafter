@@ -38,6 +38,7 @@ def transition_cut_frame(start: int, end: int) -> int:
 F_SETTINGS, F_CUTS, F_DISSOLVES, F_STILLS, F_OVERLAYS, F_TITLES = "timeline_settings", "cuts", "dissolves", "stills", "overlays_v2", "titles"
 F_MARKERS, F_GAIN, F_MUTE, F_MUSIC, F_AUDIO, F_SPEED = "markers", "audio_gain", "audio_mute", "music_track", "audio_clips", "speed_changes"
 F_FRAMING, F_DUCKING = "framing_fit", "music_ducking"
+KEYFRAME_TOLERANCE_FRAMES = 1      # a keyframe time is a source frame rounded to the sequence rate; one frame either way is the same keyframe
 
 
 @dataclass(frozen=True)
@@ -274,7 +275,7 @@ def compare_timeline_xml(xml: Fcp7Timeline, exp: ExpectedTimeline, *, tolerance_
             if e.gain_keys and keyframes_carried:
                 got = list(x.gain_keys)
                 ok = len(got) == len(e.gain_keys) and all(
-                    abs(gw - ew) <= tol and abs(gd - ed) <= GAIN_TOLERANCE_DB for (gw, gd), (ew, ed) in zip(got, e.gain_keys))
+                    abs(gw - ew) <= max(tol, KEYFRAME_TOLERANCE_FRAMES) and abs(gd - ed) <= GAIN_TOLERANCE_DB for (gw, gd), (ew, ed) in zip(got, e.gain_keys))
                 if not ok:
                     problems += 1
                     add(F_DUCKING, label, "keyframes", [[w, round(d, 2)] for w, d in e.gain_keys], [[w, round(d, 2)] for w, d in got],

@@ -142,6 +142,9 @@ def render_handoff_report(i: HandoffReportInputs) -> str:
                   f"({rb.get('clips')} clip item(s)). SHA-256 `{rb.get('sha256')}`.", ""]
             if rb.get("kept_native"):
                 L += [f"FilmCraft's own (lossy) export is kept as `{rb['kept_native']}`.", ""]
+        elif rb["status"] == "native_lossy_kept":
+            L += [f"**FilmCraft's own `{rb.get('file')}` is lossy but was kept**: {_esc(rb['reason'])}.", ""]
+            L += [f"Differences ({rb.get('diff_count')}):", ""] + [f"- {_esc(d.get('detail') or d.get('ref'))}" for d in rb.get("diff", [])] + [""]
         else:
             L += [f"**The read-back fallback was needed but did not produce a usable file**: {_esc(rb['reason'])}.", ""]
         if nat.get("issues"):

@@ -553,9 +553,13 @@ class FilmCraftAdapter:
                 params["sequence"] = self.sequence_id
             seconds = float(Fraction(snap.duration_frames) / snap.fps)
             self._cmd("file.exportMedia", params, timeout if timeout is not None else max(300.0, 60.0 + 6.0 * seconds))
+        except BaseException:
+            out.unlink(missing_ok=True)      # a partial render of ours must not stay behind
+            raise
         finally:
             self.close()      # no save: the muted strips never reach the project file
         if not out.is_file() or out.stat().st_size == 0:
+            out.unlink(missing_ok=True)
             raise CommandError("file.exportMedia", f"FilmCraft reported success but {out} was not written")
         return out
 

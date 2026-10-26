@@ -126,6 +126,11 @@ def plan_usage(plan: EditPlan, spec: TimelineSpec, catalog: PlanningCatalog) -> 
     digits = [catalog.assets[c.asset_id].relative_path for c in stills if c.asset_id in catalog.assets
               and re.search(r"\d", Path(catalog.assets[c.asset_id].relative_path).stem)]
     use[X.F_STILLS].data["with_digits_in_name"] = len(digits)
+    turned = [c.clip_instance_id for c in stills if c.asset_id in catalog.assets and catalog.assets[c.asset_id].rotation_degrees % 360]
+    if turned:
+        use[X.F_STILLS].data["exif_rotated"] = len(turned)
+        use[X.F_STILLS].notes.append(f"{len(turned)} still(s) carry EXIF orientation, which FilmCraft ignores: they show sideways or upside down "
+                                     "in the timeline until rotated (Inspector > Transform > Rotation, or re-export the file)")
     use[X.F_OVERLAYS].count = sum(1 for c in clips if c.track_role == "overlay" and c.media_type in ("video", "image"))
     use[X.F_TITLES].count = len(plan.titles)
     use[X.F_MARKERS].count = len(plan.markers)

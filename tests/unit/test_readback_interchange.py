@@ -34,6 +34,11 @@ def built(fc, monkeypatch, tmp_path):
     return adapter, spec, res.project_path, out
 
 
+def shift_first_clip(d):
+    it = next(i for i in d["items"] if i["kind"] == "video")
+    it["end"] += 12
+
+
 def digest(p):
     return hashlib.sha256(p.read_bytes()).hexdigest()
 
@@ -84,7 +89,7 @@ def test_missing_native_export_gets_a_verified_readback_file(built):
 def test_lossy_native_export_is_kept_beside_the_generated_one(built):
     adapter, spec, proj, out = built
     x = out / "timeline.xml"
-    x.write_text(xml_for_spec(spec, mutate=lambda d: d["markers"].clear()), encoding="utf-8")
+    x.write_text(xml_for_spec(spec, mutate=shift_first_clip), encoding="utf-8")
     lossy = digest(x)
     rec = RB.run_fallback(adapter, spec, ["fcp7_xml"], out, proj, mode="auto")
     assert rec["status"] == "generated" and rec["native"]["state"] == "lossy" and rec["kept_native"] == "timeline.native.xml"
@@ -95,7 +100,7 @@ def test_a_readback_that_does_not_match_is_discarded_and_reported(built):
     adapter, spec, proj, out = built
     other = replace(spec, markers=(MarkerSpec(100, "Elsewhere", ""),))        # what the caller expects is not what FilmCraft holds
     x = out / "timeline.xml"
-    x.write_text(xml_for_spec(other, mutate=lambda d: d["markers"].clear()), encoding="utf-8")
+    x.write_text(xml_for_spec(other, mutate=lambda d: (d["markers"].clear(), shift_first_clip(d))), encoding="utf-8")
     before = digest(x)
     rec = RB.run_fallback(adapter, other, ["fcp7_xml"], out, proj, mode="auto")
     assert rec["status"] == "failed" and "does not round-trip" in rec["reason"] and rec["roundtrip"]
@@ -128,3 +133,90 @@ def test_roundtrip_compares_scale_and_ducking_keyframes(built):
     assert X.compare_timeline_xml(no_keys, X.expected_from_spec(spec), keyframes_carried=False).ok
     wrong_scale = parse_fcp7_xml(xml_for_spec(spec, mutate=lambda d: [i.__setitem__("scale", 100.0) for i in d["items"] if i["scale"]]))
     assert [m.feature for m in X.compare_timeline_xml(wrong_scale, X.expected_from_spec(spec)).mismatches] == [X.F_FRAMING]
+
+
+def test_keyframe_times_are_compared_within_one_frame():
+    from trip_vlog.filmcraft.timeline_spec import Placement, TimelineSpec
+    from fractions import Fraction
+    spec = TimelineSpec("M", 1920, 1080, Fraction(30), ("V1", "A1", "A2"), placements=(
+        Placement("m", "/media/m.wav", "audio", "A2", 0, 120, 0.0, 4.0, False, -6.0,
+                  gain_keys=(GainKey(10, 0.0), GainKey(20, -12.0), GainKey(60, -12.0), GainKey(70, 0.0))),))
+    def moved(by):
+        return parse_fcp7_xml(xml_for_spec(spec, mutate=lambda d: d["items"][0].update(keys=tuple((w + by, db) for w, db in d["items"][0]["keys"]))))
+    assert X.compare_timeline_xml(moved(1), X.expected_from_spec(spec)).ok
+    assert X.compare_timeline_xml(moved(-1), X.expected_from_spec(spec)).ok
+    assert [m.feature for m in X.compare_timeline_xml(moved(2), X.expected_from_spec(spec)).mismatches] == [X.F_DUCKING]
+
+
+def test_native_lossy_only_in_ducking_or_markers_is_kept_not_replaced(built):
+    adapter, spec, proj, out = built
+    x = out / "timeline.xml"
+    x.write_text(xml_for_spec(spec, mutate=lambda d: d["markers"].clear()), encoding="utf-8")
+    before = digest(x)
+    rec = RB.run_fallback(adapter, spec, ["fcp7_xml"], out, proj, mode="auto")
+    assert rec["status"] == "native_lossy_kept" and rec["native"]["state"] == "lossy" and rec["diff_count"] >= 1
+    assert "marker" in rec["diff"][0]["detail"]
+    assert digest(x) == before and not (out / "timeline.native.xml").exists() and not (out / RB.CANDIDATE_NAME).exists()
+    assert json.loads((out / RB.REPORT_NAME).read_text(encoding="utf-8"))["status"] == "native_lossy_kept"
+    # a ducking-only difference is the same
+    x.write_text(xml_for_spec(spec, mutate=lambda d: [i.update(keys=()) for i in d["items"]]), encoding="utf-8")
+    assert RB.run_fallback(adapter, spec, ["fcp7_xml"], out, proj, mode="auto")["status"] == "native_lossy_kept"
+
+
+def test_a_failed_fallback_sets_aside_a_stale_generated_file_but_not_one_that_is_not_ours(built):
+    adapter, spec, proj, out = built
+    rec = RB.run_fallback(adapter, spec, ["fcp7_xml"], out, proj, mode="auto", listed_error="x")
+    assert rec["status"] == "generated"
+    x = out / "timeline.xml"
+    sha = digest(x)
+    other = replace(spec, markers=(MarkerSpec(100, "Elsewhere", ""),))       # next run: a different timeline that the read-back cannot match
+    rec2 = RB.run_fallback(adapter, other, ["fcp7_xml"], out, proj, mode="auto")
+    assert rec2["status"] == "failed" and rec2["stale_set_aside"] == f"timeline.xml.{sha[:12]}.stale"
+    assert "set aside" in rec2["reason"] and not x.exists() and digest(out / rec2["stale_set_aside"]) == sha
+    # a timeline.xml that is not the one recorded (FilmCraft's own, or the user's) stays
+    x.write_text(xml_for_spec(other, mutate=lambda d: (d["markers"].clear(), shift_first_clip(d))), encoding="utf-8")
+    mine = digest(x)
+    assert RB.run_fallback(adapter, other, ["fcp7_xml"], out, proj, mode="auto")["status"] == "failed"
+    assert digest(x) == mine
+
+
+def test_a_failed_music_bed_render_leaves_no_file(built, monkeypatch):
+    adapter, spec, proj, out = built
+    bed = adapter.workspace / "preview" / "music_bed.wav"
+    snap = adapter.inspect_sequence()
+    monkeypatch.setattr(adapter, "_require_capability", lambda *a, **k: None)
+    monkeypatch.setattr(adapter, "inspect_sequence", lambda: snap)
+    calls = []
+
+    def cmd(name, params=None, *a, **k):
+        calls.append(name)
+        if name == "file.exportMedia":
+            bed.write_bytes(b"RIFF partial")
+            raise RuntimeError("export died")
+
+    monkeypatch.setattr(adapter, "_cmd", cmd)
+    with pytest.raises(RuntimeError):
+        adapter.render_music_bed(bed, ["A2"], project_path=proj)
+    assert "file.exportMedia" in calls and not bed.exists()
+
+
+def test_assemble_cache_key_carries_the_filmcraft_version_only_with_framing_or_ducking(monkeypatch):
+    from types import SimpleNamespace as NS
+
+    from trip_vlog import draft_stages as D
+
+    monkeypatch.setattr(D, "plan_file_hash", lambda p: "h")
+    monkeypatch.setattr(D, "_pp", lambda ctx: NS(edit_plan="p"))
+    monkeypatch.setattr(D, "_qc_transcripts", lambda ctx: {})
+
+    def ctx(version, **fc):
+        base = dict(project_name="p", sequence_name="s", handle_policy="x", ambient_low_gain_db=-12, executable="fc", fit_mixed_aspect=False,
+                    duck_music=False, duck_mode="speech", duck_db=-12, duck_ramp_seconds=0.3, duck_merge_gap_seconds=1.0)
+        base.update(fc)
+        return NS(config=NS(filmcraft=NS(**base), qc=NS(audio_active_ratio_min=0.5)), catalog=NS(list_assets=lambda: []),
+                  manifest={"filmcraft": {"version": version}})
+
+    assert D._assemble_inputs(ctx("0.13.0")) == D._assemble_inputs(ctx("0.14.0"))           # off: the existing cache stays valid
+    assert "filmcraft_version" not in D._assemble_inputs(ctx("0.13.0"))
+    for on in ({"fit_mixed_aspect": True}, {"duck_music": True}):
+        assert D._assemble_inputs(ctx("0.13.0", **on)) != D._assemble_inputs(ctx("0.14.0", **on))

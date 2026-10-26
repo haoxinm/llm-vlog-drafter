@@ -3,6 +3,7 @@
 Windows. Natural sound the plan keeps (a primary video clip whose audio_policy is not ``muted``, or a stand-alone natural-audio clip)
 is where music is lowered. Which part of such a clip counts depends on ``filmcraft.duck_mode``:
 
+  * narration clips (``narration`` track role, not muted) are speech for their whole length in every mode;
   * ``speech``         the transcript segments (non-coarse) that fall in the clip's used source range, padded; a clip whose transcript has
                        no segment timing (coarse) is treated as speech for its whole length (the timing is unknown, never guessed);
   * ``natural_sound``  the same, and in addition the whole clip when its measured audio is active (``audio_active_ratio_min``) and the
@@ -86,15 +87,22 @@ def _clip_windows(plan: EditPlan, clip_audio: Mapping[str, Mapping[str, Any]], t
     for sc in plan.scenes:
         for c in sc.clips:
             lo, hi = c.timeline_start_frame, c.timeline_start_frame + c.duration_frames
-            if c.media_type == "audio" and c.track_role == "natural_audio" and c.audio_policy != "muted":
+            if c.media_type == "audio" and c.track_role == "narration":
+                if c.audio_policy != "muted":
+                    out.append(DuckWindow(lo, hi, "narration", (c.clip_instance_id,)))   # spoken for its whole length
+                continue
+            if c.media_type == "audio" and c.track_role == "natural_audio":
+                if c.audio_policy == "muted":
+                    continue
+                # a stand-alone natural-audio clip: its timed transcript segments are speech; in natural_sound mode all of it counts
                 if s.mode == "natural_sound":
                     out.append(DuckWindow(lo, hi, "natural_audio", (c.clip_instance_id,)))
-                continue
-            if c.track_role != "primary_video" or not _audible_video(c):
+                    continue
+            elif c.track_role != "primary_video" or not _audible_video(c):
                 continue
             segs = [t for t in transcripts.get(c.asset_id, ()) if t.text.strip()]
             timed = [t for t in segs if not t.coarse]
-            s_in, s_out = float(c.source_in_seconds), float(c.source_out_seconds)
+            s_in, s_out = float(c.source_in_seconds or 0.0), float(c.source_out_seconds if c.source_out_seconds is not None else s_in + c.duration_frames / float(fps))
             found = False
             for t in timed:
                 a, b = max(t.start, s_in), min(t.end, s_out)
