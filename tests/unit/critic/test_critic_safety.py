@@ -296,7 +296,7 @@ def test_the_cli_and_the_handoff_note_surface_a_regression(setup, monkeypatch, c
 
 def test_the_cache_key_covers_validation_planning_still_length_and_the_failed_list(tmp_path, monkeypatch):
     def key(**kw):
-        d = tmp_path / json.dumps(kw, sort_keys=True).replace("/", "_").replace('"', "")[:60]
+        d = tmp_path / f"ws{len(list(tmp_path.iterdir()))}"     # a plain name: ':' and braces are not valid in Windows folder names
         d.mkdir()
         ctx, _, _ = make_draft_ctx(d, monkeypatch, critic_config(**kw))
         return ctx, cs.critic_inputs(ctx)
