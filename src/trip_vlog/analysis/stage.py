@@ -68,6 +68,7 @@ def build_work(ctx: Any, limit: int | None = None) -> Work:
         base = {m["segment_id"]: m for m in moments_from_segments(segs, cv)}
         key = settings.cache_key(kind)
         tx_rows = sc.rows_for(cat, aid, cv) if (kind == "video" and ctx.config.speech.enabled) else []
+        tx_rows = list(sc.usable_rows(tx_rows, len(segs)))   # a whole-clip (coarse) transcript is not spread over several segments
         src = ctx.paths.media_root / Path(*row["relative_path"].split("/"))
         for seg in segs:
             if kind == "video" and seg.get("start_frame") is None:

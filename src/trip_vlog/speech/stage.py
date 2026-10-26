@@ -259,8 +259,9 @@ def _store(cat: Any, e: Entry, rec: Mapping[str, Any]) -> list[dict[str, Any]]:
 def apply_to_moments(cat: Any, row: Any, rows: list[dict[str, Any]]) -> int:
     """Set `transcript_refs` on every moment of the asset from the stored transcript. Returns the moments that have refs."""
     n = 0
+    n_segments = len([s for s in cat.list_segments(row["asset_id"]) if s["content_version"] == row["content_version"]])
     for m in cat.list_moments(row["asset_id"]):
-        refs = sc.refs_for(rows, m["source_in_seconds"], m["source_out_seconds"])
+        refs = sc.refs_for(rows, m["source_in_seconds"], m["source_out_seconds"], n_segments)
         n += bool(refs)
         cat.update_moment_fields(m["moment_id"], {"transcript_refs": refs})
     return n
