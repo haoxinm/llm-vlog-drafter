@@ -15,13 +15,13 @@ from trip_vlog.planning.catalog_view import PlanningCatalog
 from trip_vlog.planning.duration import parse_fps
 from trip_vlog.planning.models import EditPlan
 
-PASS, WARN, FAIL = "pass", "warn", "fail"
+PASS, WARN, FAIL, SKIPPED = "pass", "warn", "fail", "skipped"
 
 
 @dataclass(frozen=True)
 class CheckResult:
     name: str
-    status: str  # pass | warn | fail
+    status: str  # pass | warn | fail | skipped (the check could not run; counts like a pass for the overall status)
     detail: str = ""
     data: Mapping[str, Any] = field(default_factory=dict)
 
@@ -35,7 +35,7 @@ class CheckResult:
 def overall_status(results: Sequence[CheckResult]) -> str:
     if any(r.status == FAIL for r in results):
         return FAIL
-    return WARN if any(r.status == WARN for r in results) else PASS
+    return WARN if any(r.status == WARN for r in results) else PASS   # skipped checks neither warn nor fail
 
 
 def check_media_online(project: ProjectSnapshot | None, source_paths: Sequence[str]) -> CheckResult:
@@ -243,7 +243,7 @@ class TranscriptSpan:
 
 
 def _skipped(name: str, reason: str) -> CheckResult:
-    return CheckResult(name, PASS, f"skipped: {reason}", {"skipped": True, "reason": reason})
+    return CheckResult(name, SKIPPED, f"skipped: {reason}", {"skipped": True, "reason": reason})
 
 
 def _primary_clips(plan: EditPlan) -> list[tuple[str, Any]]:
@@ -393,6 +393,12 @@ def check_music_vs_speech(plan: EditPlan, clip_audio: Mapping[str, Mapping[str, 
     fps = Fraction(plan.sequence.fps)
     found: list[dict[str, Any]] = []
     checked = 0
+    audible_assets = {c.asset_id for _, c in _primary_clips(plan) if _audible_video(c)}
+    coarse_only = any((transcripts or {}).get(a) for a in audible_assets) and not any(
+        s.text.strip() and not s.coarse for a in audible_assets for s in (transcripts or {}).get(a, ()))
+    if coarse_only and not clip_audio:
+        return _skipped(name, "the transcripts have no segment timing (coarse timestamps) and there are no audio measurements, so music "
+                        "cannot be compared with speech")
     for ms, m in music:
         if m.audio_policy == "muted":
             continue
@@ -406,7 +412,7 @@ def check_music_vs_speech(plan: EditPlan, clip_audio: Mapping[str, Mapping[str, 
             checked += 1
             s_lo = v.source_in_seconds + float((lo - v.timeline_start_frame) / fps)
             s_hi = v.source_in_seconds + float((hi - v.timeline_start_frame) / fps)
-            speech = [s for s in (transcripts or {}).get(v.asset_id, ()) if s.text.strip() and s.start < s_hi - 0.1 and s.end > s_lo + 0.1]
+            speech = [s for s in (transcripts or {}).get(v.asset_id, ()) if s.text.strip() and not s.coarse and s.start < s_hi - 0.1 and s.end > s_lo + 0.1]
             feat = clip_audio.get(v.clip_instance_id)
             reason = "speech" if speech else "active_sound" if _audible(feat, active_ratio_min) else None
             if reason is None:
@@ -419,7 +425,8 @@ def check_music_vs_speech(plan: EditPlan, clip_audio: Mapping[str, Mapping[str, 
                               "speech": " ".join(s.text.strip() for s in speech)[:120] if speech else None})
     if not found:
         return CheckResult(name, PASS, f"music is not over speech or active sound, or sits {-max_gain_db:g} dB or more below it "
-                           f"({checked} overlap(s) checked)", {"overlaps_checked": checked})
+                           f"({checked} overlap(s) checked)" + ("; transcripts without segment timing were not used" if coarse_only else ""),
+                           {"overlaps_checked": checked})
     f = found[0]
     return CheckResult(name, WARN, f"music {f['music_clip_instance_id']} plays over {f['reason'].replace('_', ' ')} in {f['clip_instance_id']} "
                        f"without being lowered ({len(found)} overlap(s)); lower the music or the clip gain in the edit, no ducking is generated",

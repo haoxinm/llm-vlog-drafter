@@ -46,7 +46,7 @@ def test_speech_cut_within_tolerance_or_between_segments_passes():
 
 def test_speech_ignores_muted_clips_and_continuing_takes():
     seg = {A1: [tr(1.0, 4.0)]}
-    assert C.check_speech_truncation(plan_speech(policy="muted"), seg).status == C.PASS
+    assert C.check_speech_truncation(plan_speech(policy="muted"), seg).status == C.SKIPPED
     cont = make_plan(("s", [clip("c1", 0, 60, src_in=1.0), clip("c2", 60, 60, src_in=3.0)]))   # c2 continues exactly where c1 stopped
     r = C.check_speech_truncation(cont, {A1: [tr(0.5, 5.5)]})
     assert {(f["clip_instance_id"], f["edge"]) for f in r.data["findings"]} == {("c1", "in"), ("c2", "out")}  # only the outer edges are cuts
@@ -56,7 +56,7 @@ def test_speech_skipped_without_transcripts_or_timing():
     assert C.check_speech_truncation(plan_speech(), None).data["skipped"] is True
     assert C.check_speech_truncation(plan_speech(), {A3: [tr(0, 1)]}).data["skipped"] is True      # an asset the plan does not use
     r = C.check_speech_truncation(plan_speech(), {A1: [tr(0, 9, coarse=True)]})
-    assert r.status == C.PASS and "coarse" in r.detail and r.data["skipped"] is True
+    assert r.status == C.SKIPPED and "coarse" in r.detail and r.data["skipped"] is True
 
 
 # ---- source-audio discontinuity ------------------------------------------------------------------------------
@@ -93,7 +93,7 @@ def test_audio_discontinuity_counts_the_ambient_gain_and_skips_continuing_takes(
 
 def test_audio_discontinuity_skipped_without_measurements():
     r = C.check_audio_discontinuity(two_clips(), {})
-    assert r.status == C.PASS and r.data["skipped"] is True
+    assert r.status == C.SKIPPED and r.data["skipped"] is True
 
 
 def test_clip_audio_features_come_from_the_moment():
@@ -139,7 +139,25 @@ def test_music_speech_outside_the_overlap_does_not_count_and_relative_level_matt
 
 def test_music_skipped_without_a_music_track():
     r = C.check_music_vs_speech(two_clips(), {})
-    assert r.status == C.PASS and r.data["skipped"] is True
+    assert r.status == C.SKIPPED and r.data["skipped"] is True
+
+
+def test_music_ignores_coarse_transcripts_and_reports_skipped_when_only_coarse_exists():
+    coarse = {A1: [tr(0.0, 9.0, coarse=True)]}      # one segment spanning the whole file: no real timing
+    r = C.check_music_vs_speech(music_plan(), {}, coarse)
+    assert r.status == C.SKIPPED and "segment timing" in r.detail and r.data["skipped"] is True
+    # with audio measurements the check still runs, but coarse text is not treated as speech
+    quiet = C.check_music_vs_speech(music_plan(), {"v1": audio(-60.0, silent=True)}, coarse)
+    assert quiet.status == C.PASS and "without segment timing" in quiet.detail
+    loud = C.check_music_vs_speech(music_plan(), {"v1": audio(-25.0)}, coarse)
+    assert loud.status == C.WARN and loud.data["findings"][0]["reason"] == "active_sound"
+    # real timing next to coarse segments still counts
+    assert C.check_music_vs_speech(music_plan(), {}, {A1: [tr(1.0, 3.0)]}).data["findings"][0]["reason"] == "speech"
+
+
+def test_skipped_status_does_not_change_the_overall_status():
+    sk = C.CheckResult("x", C.SKIPPED, "skipped: nothing")
+    assert C.overall_status([sk]) == C.PASS and C.overall_status([sk, C.CheckResult("y", C.WARN)]) == C.WARN
 
 
 # ---- scene order -------------------------------------------------------------------------------------------------
@@ -165,7 +183,7 @@ def test_scene_order_warns_on_swaps_duplicates_and_unknown_scenes():
 
 def test_scene_order_skipped_without_outline():
     r = C.check_scene_order(scenes_plan("scene_01"), None)
-    assert r.status == C.PASS and r.data["skipped"] is True
+    assert r.status == C.SKIPPED and r.data["skipped"] is True
 
 
 # ---- decode ------------------------------------------------------------------------------------------------------

@@ -136,7 +136,7 @@ a render or decode failure, gaps, or a duration out of tolerance):
 - `music_vs_speech`: a music clip over a clip with speech (transcript) or active natural sound, unless the plan's own gains put the music at least
   `-qc.music_max_gain_db` (6 dB) below it. No ducking is generated, so `duck_music_under_speech` does not count.
 - `scene_order`: the plan's scenes follow the approved story outline's order (LLM planner only; skipped otherwise).
-- Checks that cannot run (no transcripts, no audio measurements, no music, no outline) report `pass` with `data.skipped: true` and the reason.
+- Checks that cannot run (no transcripts, no audio measurements, no music, no outline) report status `skipped` (with `data.skipped: true` and the reason). `skipped` is counted separately and does not warn or fail; it is not a pass.
 
 **Preview sheets.** `preview/contact_sheet_timeline.jpg` shows, for every cut, one frame just before (`qc.cut_sample_offset_seconds`, 0.15 s, clamped inside the
 clip) and one just after it, plus the first and last frame; every tile is labelled with record time, scene ID and clip_instance_id. `qc.contact_sheet_max_frames`

@@ -126,7 +126,7 @@ def run_qc(i: QcInputs) -> dict[str, Any]:
             results.append(C.CheckResult("contact_sheet", C.WARN, res.index.error or f"{len(res.failed)} frame(s) could not be extracted",
                                          {"failed": res.failed[:10]}))
     status = C.overall_status(results)
-    counts = {s: sum(1 for r in results if r.status == s) for s in (C.PASS, C.WARN, C.FAIL)}
+    counts = {s: sum(1 for r in results if r.status == s) for s in (C.PASS, C.WARN, C.FAIL, C.SKIPPED)}
     doc = {"schema_version": QC_SCHEMA, "generated_at": utc_now_iso(), "status": status, "counts": counts,
            "plan_hash": plan.plan_hash, "preview": i.preview.name, "contact_sheet": sheet,
            "critic": {"status": "not_run", "reason": "deterministic checks only; an LLM critic (Phase 5b) would read "
@@ -159,13 +159,13 @@ def render_qc_markdown(doc: dict[str, Any]) -> str:
     c = doc["counts"]
     L = [f"# QC report: {doc['status'].upper()}", "",
          f"- Generated: {doc['generated_at']}; plan `{str(doc.get('plan_hash') or '')[:16]}`; preview `{doc['preview']}`",
-         f"- {c['pass']} pass, {c['warn']} warn, {c['fail']} fail. Only objective defects fail (offline media, render or decode failure, "
+         f"- {c['pass']} pass, {c['warn']} warn, {c['fail']} fail, {c.get('skipped', 0)} skipped (could not run; not a pass). Only objective defects fail (offline media, render or decode failure, "
          "gaps, duration out of tolerance); heuristics only warn.", ""]
     L += ["| Check | Status | Detail |", "|---|---|---|"]
     for r in doc["checks"]:
         L.append(f"| {r['name']} | {r['status']} | {_esc(r.get('detail', ''))} |")
     L.append("")
-    flagged = [r for r in doc["checks"] if r["status"] != "pass" and (r.get("data") or {}).get("findings")]
+    flagged = [r for r in doc["checks"] if r["status"] in ("warn", "fail") and (r.get("data") or {}).get("findings")]
     for r in flagged:
         L += [f"## {r['name']}", ""]
         for f in r["data"]["findings"][:10]:

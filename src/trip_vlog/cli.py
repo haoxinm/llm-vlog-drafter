@@ -218,7 +218,8 @@ def _print_draft_result(res: IndexResult) -> None:
         print(f"edit plan approved from the {ap_rec.get('outline_approval_mode')} outline approval (no separate review; set workflow.plan_review: true to stop here)")
     qc = m.stage("qc").get("summary", {})
     if qc:
-        print(f"QC: {qc.get('status')} ({qc.get('pass', 0)} pass, {qc.get('warn', 0)} warn, {qc.get('fail', 0)} fail)"
+        print(f"QC: {qc.get('status')} ({qc.get('pass', 0)} pass, {qc.get('warn', 0)} warn, {qc.get('fail', 0)} fail"
+              + (f", {qc['skipped']} skipped" if qc.get("skipped") else "") + ")"
               + (f"; warnings: {', '.join(qc['warned_checks'])}" if qc.get("warned_checks") else "")
               + (f"; FAILED: {', '.join(qc['failed_checks'])}" if qc.get("failed_checks") else ""))
     pv = m.stage("preview").get("summary", {})
@@ -226,8 +227,9 @@ def _print_draft_result(res: IndexResult) -> None:
         print(f"preview: {ws / pv['preview']} ({pv.get('duration_seconds')} s)")
     if m.stage("handoff").get("status") in ("succeeded", "partial"):
         print(f"handoff: {ws / 'resolve_handoff' / 'handoff_report.md'}")
-        if _compat_line(m.stage("handoff").get("summary", {}), ws):
-            print(_compat_line(m.stage("handoff").get("summary", {}), ws))
+        line = _compat_line(m.stage("handoff").get("summary", {}), ws)
+        if line:
+            print(line)
 
 
 def _compat_line(summary: dict, ws: Path) -> str:
