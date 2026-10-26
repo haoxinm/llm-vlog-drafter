@@ -51,7 +51,7 @@ TRANSCRIPT_GUIDANCE = ("Spoken words heard in this clip (verbatim, possibly mis-
                        "places or claims from the words unless the frames show them too.")
 TOKENS_PER_ITEM = 450      # output budget per labelled segment/photo
 TOKENS_BASE = 300
-MAX_EARLY_BAD_REQUESTS = 2   # HTTP 400s in a row before any request of the run succeeded: a configuration problem, not bad items
+MAX_EARLY_BAD_REQUESTS = 3   # HTTP 400s in a row (any request, batch or singleton) before one succeeded: a configuration problem, not bad items
 
 # Errors of one request that leave the others usable: the affected items are retried once, then fall back.
 RECOVERABLE = (LLMSchemaError, LLMTruncatedError, LLMRefusalError, LLMBadRequestError, LLMInputError)
@@ -211,11 +211,11 @@ def build_request(settings: VisionSettings, kind: str, batch: Sequence[Item], ro
         if kind == "photo":
             parts.append(ImagePart(_long(it.src)))
         elif it.sheet_mode:
-            parts.append(ImagePart(root / str(it.sheet), identity=_identity(settings, it, "sheet", [fr.SHEET_TILE_W, fr.SHEET_VERSION, *(f["frame"] for f in it.frames)])))
+            parts.append(ImagePart(_long(root / str(it.sheet)), identity=_identity(settings, it, "sheet", [fr.SHEET_TILE_W, fr.SHEET_VERSION, *(f["frame"] for f in it.frames)])))
         else:
             for f in it.frames:
                 parts.append(TextPart(f"Segment {it.sid} | frame {f['index']} | t={f['timestamp_seconds']:.2f}s"))
-                parts.append(ImagePart(root / f["artifact"], identity=_identity(settings, it, "frame", f["frame"])))
+                parts.append(ImagePart(_long(root / f["artifact"]), identity=_identity(settings, it, "frame", f["frame"])))
     if note:
         parts.append(TextPart(note))
     t = settings.segment_prompt if kind == "video" else settings.photo_prompt
@@ -265,8 +265,7 @@ class Labeler:
         self.settings, self.root, self.prepare, self.accept, self.logger = settings, root, prepare, accept, logger
         self.stats = RunStats()
         self._answered = 0       # requests of this run the server accepted (cache hits do not count)
-        self._bad_streak = 0     # consecutive rejections of DISTINCT requests (see _batch)
-        self._rejected: set[str] = set()   # segment/photo IDs that were part of a request the server rejected as invalid
+        self._bad_streak = 0     # consecutive bad-request (400) responses, batch or singleton
 
     def _error(self, it: Item, msg: str, *, stage: str) -> None:
         it.error = msg
@@ -304,16 +303,10 @@ class Labeler:
         try:
             resp = gw.complete(req)
         except RECOVERABLE as e:
-            if not isinstance(e, LLMBadRequestError):
-                self._bad_streak = 0
-            elif not any(it.sid in self._rejected for it in batch):
-                # a re-ask of an item whose request was already rejected (the singleton retry) is the same failure again: not evidence
-                self._bad_streak += 1
-            if isinstance(e, LLMBadRequestError):
-                self._rejected.update(it.sid for it in batch)
+            self._bad_streak = self._bad_streak + 1 if isinstance(e, LLMBadRequestError) else 0
             if self._bad_streak >= MAX_EARLY_BAD_REQUESTS and not self._answered:
                 # every request so far was refused outright: the endpoint settings are wrong, retrying each item would only repeat it
-                raise LLMConfigError(f"stopping: the first {self._bad_streak} distinct requests were rejected as invalid and none succeeded, so this is "
+                raise LLMConfigError(f"stopping: the first {self._bad_streak} requests were rejected as invalid and none succeeded, so this is "
                                      f"probably an endpoint configuration problem (model, params, max_tokens_field, structured_output). "
                                      f"Server said: {str(e)[:300]}") from None
             msg = f"{type(e).__name__}: {e}"[:300]

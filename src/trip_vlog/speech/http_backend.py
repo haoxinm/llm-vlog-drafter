@@ -115,7 +115,8 @@ class OpenAITranscriptions:
                 self._sleep(self._backoff(attempt, None))
                 continue
             if resp.status in RETRYABLE_STATUS and not last:
-                if self._retry_after(resp.headers) is not None and self._retry_after(resp.headers) > MAX_RETRY_AFTER:
+                ra = self._retry_after(resp.headers)
+                if ra is not None and ra > MAX_RETRY_AFTER:
                     break  # the server wants a longer pause than we will wait: retrying now would only fail again
                 self._sleep(self._backoff(attempt, resp.headers.get("retry-after")))
                 continue
@@ -165,8 +166,7 @@ class OpenAITranscriptions:
             return SpeechNotFoundError(f"not found (404) at {self.url}: check speech.endpoint.base_url/path and the model name: {msg}", status_code=status)
         ra = self._retry_after(headers or {})
         if ra is not None and ra > MAX_RETRY_AFTER:
-            wait = (f"the server asked to wait {ra:g}s (Retry-After), longer than the {MAX_RETRY_AFTER:g}s this tool waits, so it did not retry; "
-                    "try again later")
+            wait = (f"the server asked to wait {ra:g}s (Retry-After), longer than the {MAX_RETRY_AFTER:g}s this tool waits; try again later")
             if status == 429:
                 return SpeechRateLimitError(f"rate limited (429) by the transcription endpoint; {wait}: {msg}", status_code=status)
             return SpeechProviderError(f"the transcription endpoint returned HTTP {status}; {wait}: {msg}", status_code=status)

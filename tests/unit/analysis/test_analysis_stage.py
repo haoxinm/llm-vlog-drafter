@@ -311,12 +311,20 @@ def _four_hundred(msg):
     return lambda call, default: HttpResponse(400, {}, json.dumps({"error": {"message": msg}}).encode())
 
 
-def test_config_level_400_aborts_after_two_requests_with_the_server_message(tmp_path):
+def test_config_level_400_aborts_after_three_requests_with_the_server_message(tmp_path):
     ctx, tr, _ = setup(tmp_path, photos=3, vision_batch_max_images=1)
     tr.respond = _four_hundred("Unsupported parameter: 'max_tokens'")
-    with pytest.raises(LLMConfigError, match="Unsupported parameter.*|configuration") as ei:
+    with pytest.raises(LLMConfigError, match="Unsupported parameter") as ei:
         st.analyze_stage(ctx)
-    assert len(tr.calls) == 2 and "Unsupported parameter" in str(ei.value) and "configuration" in str(ei.value)
+    assert len(tr.calls) == 3 and "configuration" in str(ei.value)
+
+
+def test_single_batch_all_400_aborts_after_three_calls(tmp_path):
+    ctx, tr, _ = setup(tmp_path, photos=0)          # one round-1 batch, then singleton re-asks
+    tr.respond = _four_hundred("unknown model")
+    with pytest.raises(LLMConfigError, match="unknown model"):
+        st.analyze_stage(ctx)
+    assert len(tr.calls) == 3
 
 
 def test_item_specific_400_after_a_success_is_still_recoverable(tmp_path):
@@ -363,5 +371,5 @@ def test_a_batch_400_and_its_singleton_retry_do_not_trip_the_breaker(tmp_path):
     ctx, tr, _ = setup(tmp_path, photos=3)
     bad = _four_hundred("this batch is too large")
     tr.respond = lambda call, default: bad(call, default) if len(tr.calls) <= 2 else default
-    res = st.analyze_stage(ctx)          # request 1 = video batch rejected, request 2 = its first singleton retry also rejected
+    res = st.analyze_stage(ctx)          # request 1 = video batch rejected, request 2 = its first singleton retry rejected, 3+ succeed
     assert res.summary["labeled"] >= 3 and len(tr.calls) > 3

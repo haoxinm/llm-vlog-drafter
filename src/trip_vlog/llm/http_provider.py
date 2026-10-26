@@ -189,8 +189,7 @@ class HttpProvider:
             return LLMNotFoundError(f"not found (404) at {self.url}: check base_url/path and the model id: {msg}", **kw)
         ra = self._retry_after(headers)
         if ra is not None and ra > MAX_RETRY_AFTER:
-            wait = (f"the server asked to wait {ra:g}s (Retry-After), longer than the {MAX_RETRY_AFTER:g}s this tool waits, so it did not retry; "
-                    "try again later")
+            wait = (f"the server asked to wait {ra:g}s (Retry-After), longer than the {MAX_RETRY_AFTER:g}s this tool waits; try again later")
             if status == 429:
                 return LLMRateLimitError(f"rate limited (429) at endpoint {self.endpoint!r}; {wait}: {msg}", **kw)
             return LLMProviderError(f"endpoint {self.endpoint!r} returned HTTP {status}; {wait}: {msg}", **kw)

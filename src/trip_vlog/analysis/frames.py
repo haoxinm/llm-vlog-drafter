@@ -103,7 +103,7 @@ def _cleanup_stale(root: Path, records: Sequence[dict[str, Any]], seg: dict[str,
     keep = {Path(r["artifact"]).name for r in records} | {Path(records[0]["artifact"].rsplit("_", 1)[0] + ".frames.json").name}
     d = (root / records[0]["artifact"]).parent
     for pattern in (f"{seg['segment_id']}_*.jpg", f"{seg['segment_id']}_*.frames.json"):
-        for p in d.glob(pattern):
+        for p in long_path(d).glob(pattern):
             if p.name not in keep:
                 try:
                     long_path(p).unlink()
@@ -189,7 +189,7 @@ def make_segment_sheet(records: Sequence[dict[str, Any]], seg: dict[str, Any], r
         thumbs._compose(tiles, min(4, len(tiles)), SHEET_TILE_W, long_path(out))
     except Exception as e:  # noqa: BLE001 - the sheet is an artifact; a failure is reported, not fatal
         return f"cannot create contact sheet: {type(e).__name__}: {e}"
-    for p in out.parent.glob(f"{seg['segment_id']}_*.jpg"):
+    for p in long_path(out.parent).glob(f"{seg['segment_id']}_*.jpg"):
         if p.name != out.name:
             try:
                 long_path(p).unlink()
