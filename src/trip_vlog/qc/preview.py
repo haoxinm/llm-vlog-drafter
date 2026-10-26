@@ -316,7 +316,10 @@ def build_preview_sheets(ffmpeg: Path, preview: Path, first_sheet: Path, plan: T
     with tempfile.TemporaryDirectory(prefix="tv-sheet-") as td:
         for i, t in enumerate(plan.tiles):
             f = Path(td) / f"f{i:04d}.jpg"
-            err = grab_frame(ffmpeg, preview, max(0.0, float((Fraction(t.record_frame) - Fraction(1, 4)) / fps)), f, tile_width)
+            try:
+                err = grab_frame(ffmpeg, preview, max(0.0, float((Fraction(t.record_frame) - Fraction(1, 4)) / fps)), f, tile_width)
+            except Exception as ex:  # noqa: BLE001 - e.g. a timeout; treat like any other failed frame
+                err = f"{type(ex).__name__}: {ex}"
             if err:
                 failed.append(f"{t.tile_id} ({t.side} @ {_ts(t.record_seconds)}, {t.clip_instance_id}): {err}")
                 images[t.tile_id] = None  # type: ignore[assignment]

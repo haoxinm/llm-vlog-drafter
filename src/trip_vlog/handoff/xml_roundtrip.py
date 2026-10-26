@@ -220,6 +220,9 @@ def compare_timeline_xml(xml: Fcp7Timeline, exp: ExpectedTimeline, *, tolerance_
         xs = xml.track_clips(kind, trk)
         for e in sorted(items, key=lambda c: (c.start, c.clip_instance_id)):
             cands = [(i, x) for i, x in enumerate(xs) if id(x) not in used and x.enabled and _identity_ok(e, x, fold_case)]
+            # An exact path match wins over one that only matches after case folding (A.mov vs a.mov on macOS).
+            exact = [c for c in cands if e.is_title or _identity_ok(e, c[1], False)]
+            cands = exact or cands
             label = f"{e.track_name} {e.clip_instance_id}" + (f" ({e.text})" if e.is_title else "")
             if not cands:
                 add(e.feature, label, "missing", {"start": e.start, "end": e.end, "path": e.path or e.text}, None,

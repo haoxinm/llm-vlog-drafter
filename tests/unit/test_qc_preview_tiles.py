@@ -183,7 +183,6 @@ def test_qc_without_a_preview_removes_the_sheets_of_an_earlier_run(tmp_path):
 
 
 def test_failed_frame_extraction_also_removes_stale_sheets(tmp_path, generated_media, ffmpeg_tools):
-    from qc_helpers import make_plan  # noqa: F401  (keeps the helper path importable)
     ffmpeg = Path(ffmpeg_tools[0])
     first = tmp_path / "sheet.jpg"
     for p in (first, tmp_path / "sheet_02.jpg"):
@@ -200,3 +199,16 @@ def test_failed_frame_extraction_also_removes_stale_sheets(tmp_path, generated_m
 def test_qc_schema_version_covers_the_skipped_status():
     from trip_vlog.qc.report import QC_SCHEMA
     assert QC_SCHEMA == 3
+
+
+def test_a_frame_grab_that_raises_counts_as_a_failed_frame(tmp_path, monkeypatch):
+    import subprocess
+
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired("ffmpeg", 60)
+    monkeypatch.setattr(P, "grab_frame", boom)
+    first = tmp_path / "sheet.jpg"
+    first.write_bytes(b"old")
+    plan = P.plan_tiles(clips((0, 30), (30, 60)), FPS, 60)
+    res = P.build_preview_sheets(Path("ffmpeg"), tmp_path / "p.mp4", first, plan, FPS, duration_frames=60)
+    assert res.index.error and res.failed and "TimeoutExpired" in res.failed[0] and not first.exists()

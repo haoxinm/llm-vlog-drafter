@@ -343,3 +343,16 @@ def test_clips_report_rows_for_every_expected_item():
     assert rows[("clip_001", "V1")]["record"] == [0, 105] == rows[("clip_001", "V1")]["xml_record"] and rows[("clip_001", "A1")]["ok"] is True
     assert rows[("clip_001", "V1")]["source"] == [15, 120] == rows[("clip_001", "V1")]["xml_source"]
     assert r.to_dict()["ok"] is True
+
+
+def test_exact_path_match_wins_over_a_case_folded_one():
+    # Two distinct files that differ only in case (possible on case-sensitive volumes). Folding must not let one stand in for the other.
+    sp = TimelineSpec("Main Draft", 1920, 1080, Fraction(30), ("V1", "A1"), placements=(
+        Placement("clip_001", "/m/A.mov", "video", "V1", 0, 30, 0.0, 1.0, False),
+        Placement("clip_002", "/m/a.mov", "video", "V1", 30, 30, 0.0, 1.0, False)))
+    assert rt(xml_for_spec(sp), sp, fold_case=True).ok
+
+    def swap(doc):
+        a, b = (i for i in doc["items"] if i["kind"] == "video")
+        a["path"], b["path"] = b["path"], a["path"]
+    assert not rt(xml_for_spec(sp, mutate=swap), sp, fold_case=True).ok
