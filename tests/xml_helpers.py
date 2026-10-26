@@ -75,7 +75,9 @@ def xml_for_spec(spec: Any, *, ntsc: bool | None = None, url_style: str = "local
         items.append({"i": n, "kind": e.kind, "track": e.track, "name": e.text or (e.path or "x").replace("\\", "/").rsplit("/", 1)[-1], "start": e.start, "end": e.end,
                       "in_": e.source_in if e.source_in is not None else 0, "out": e.source_out if e.source_out is not None else e.end - e.start,
                       "path": e.path, "text": e.text, "gain": e.gain_db if (e.kind == "audio" and e.gain_db) else None})
-    trans = [{"track": t.track, "start": t.cut_frame - t.frames // 2, "end": t.cut_frame - t.frames // 2 + t.frames} for t in exp.transitions]
+    from trip_vlog.handoff.xml_roundtrip import centred_transition_span
+
+    trans = [dict(zip(("track", "start", "end"), (t.track, *centred_transition_span(t.cut_frame, t.frames)))) for t in exp.transitions]
     marks = [(m.name, m.comment, m.frame) for m in exp.markers]
     doc = {"items": items, "transitions": trans, "markers": marks, "duration": exp.duration_frames, "width": exp.width, "height": exp.height}
     if mutate:

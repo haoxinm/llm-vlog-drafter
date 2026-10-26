@@ -131,8 +131,80 @@ def test_record_and_source_frames_are_compared_exactly():
     r = rt(xml_for_spec(spec(), mutate=shift))
     kinds = sorted((m.feature, m.kind) for m in r.mismatches)
     assert ("cuts", "record") in kinds and ("cuts", "source") in kinds
-    assert not rt(xml_for_spec(spec(), mutate=shift), tolerance_frames=1).mismatches or all(m.kind != "record" for m in rt(xml_for_spec(spec(), mutate=shift), tolerance_frames=1).mismatches)
-    assert rt(xml_for_spec(spec(), mutate=shift), tolerance_frames=1).ok
+    assert rt(xml_for_spec(spec(), mutate=shift), tolerance_frames=1).ok      # the tolerance is opt-in and applies to these fields
+    assert not rt(xml_for_spec(spec(), mutate=shift), tolerance_frames=0).ok
+
+
+def test_off_by_one_sequence_duration_is_caught_at_tolerance_zero():
+    for delta in (1, -1):
+        r = rt(xml_for_spec(spec(), mutate=lambda d, delta=delta: d.update(duration=d["duration"] + delta)))
+        assert [m.kind for m in r.for_feature("timeline_settings")] == ["settings"] and "duration" in r.mismatches[0].detail
+        assert rt(xml_for_spec(spec(), mutate=lambda d, delta=delta: d.update(duration=d["duration"] + delta)), tolerance_frames=1).ok
+
+
+def test_transition_span_is_exact_and_off_by_one_is_caught():
+    def moved(ds, de):
+        def f(doc):
+            doc["transitions"][0]["start"] += ds
+            doc["transitions"][0]["end"] += de
+        return f
+
+    assert rt(xml_for_spec(spec(), mutate=moved(0, 0))).ok
+    # the 15-frame dissolve on the cut at 105 is written 97..112 by FilmCraft (the odd frame goes before the cut)
+    assert X.centred_transition_span(105, 15) == (97, 112) and X.centred_transition_span(105, 16) == (97, 113)
+    assert X.centred_transition_span(105, 10) == (100, 110) and X.centred_transition_span(105, 3) == (103, 106) and X.centred_transition_span(105, 2) == (104, 106)
+    for ds, de, what in ((1, 1, "centre shifted by one frame"), (-1, -1, "centre shifted by one frame"), (0, 1, "one frame longer"), (0, -1, "one frame shorter"),
+                         (1, 0, "one frame shorter"), (-1, 0, "one frame longer")):
+        r = rt(xml_for_spec(spec(), mutate=moved(ds, de)))
+        assert [m.kind for m in r.for_feature("dissolves")] == ["transition", "transition"], what    # the planned one is missing, this one is unplanned
+        assert rt(xml_for_spec(spec(), mutate=moved(ds, de)), tolerance_frames=1).ok, what
+
+
+def test_hard_cut_bookkeeping_is_exact():
+    r = rt(xml_for_spec(spec()))
+    assert r.expected["cuts_boundaries"] == r.matched["cuts_boundaries"] == 1
+
+    def gap(doc):                # clip_005 starts one frame late: the cut is no longer contiguous
+        c = next(i for i in doc["items"] if i["start"] == 195 and i["kind"] == "video")
+        c["start"] += 1
+        c["end"] += 1
+    bad = rt(xml_for_spec(spec(), mutate=gap))
+    assert bad.matched["cuts_boundaries"] == 0 and any(m.kind == "record" for m in bad.mismatches)
+
+
+def test_audio_of_a_muted_clip_one_frame_off_is_not_waved_through_as_muted_bookkeeping():
+    def add(shift):
+        def f(doc):
+            doc["items"].append({"i": 98, "kind": "audio", "track": 1, "name": "clip #1.mov", "start": 60 + shift, "end": 120 + shift, "in_": 30, "out": 90,
+                                 "path": MAC, "text": None, "gain": None})
+        return f
+    assert [m.feature for m in rt(xml_for_spec(spec(), mutate=add(0))).mismatches] == ["audio_mute"]
+    assert [m.feature for m in rt(xml_for_spec(spec(), mutate=add(1))).mismatches] == ["audio_clips"]
+
+
+@pytest.mark.parametrize("fps,secs,tb", [(Fraction(30), 0.25, 30), (Fraction(25), 0.3, 25)])
+def test_exact_half_frame_source_points_accept_either_rounding_and_nothing_else(fps, secs, tb):
+    sp = TimelineSpec("S", 1920, 1080, fps, ("V1", "V2", "A1", "A2"),
+                      placements=(Placement("c1", MAC, "video", "V1", 0, 60, secs, secs + 2.0, False),))
+    exact = Fraction(secs).limit_denominator(10 ** 6) * fps
+    assert exact.denominator == 2
+    lo, hi = int(exact - Fraction(1, 2)), int(exact + Fraction(1, 2))
+    n = int(2 * fps)
+
+    def xml(i):
+        return xmeml(duration=60, tb=tb, video=[[clipitem(1, "clip #1.mov", 0, 60, i, i + n, path=MAC, file_id="f", tb=tb)]], audio=[[]])
+
+    assert (lo, hi) == (int(exact), int(exact) + 1)
+    assert rt(xml(lo), sp).ok and rt(xml(hi), sp).ok                          # both roundings of an exact half pass
+    assert [m.kind for m in rt(xml(lo - 1), sp).mismatches] == ["source"]     # one frame further does not
+    assert [m.kind for m in rt(xml(hi + 1), sp).mismatches] == ["source"]
+    # a non-half position still has only one acceptable frame
+    sp2 = TimelineSpec("S", 1920, 1080, fps, ("V1", "V2", "A1", "A2"),
+                       placements=(Placement("c1", MAC, "video", "V1", 0, 60, 1.0, 3.0, False),))
+    k = int(fps)
+    ok = xmeml(duration=60, tb=tb, video=[[clipitem(1, "clip #1.mov", 0, 60, k, k + n, path=MAC, file_id="f", tb=tb)]], audio=[[]])
+    off = xmeml(duration=60, tb=tb, video=[[clipitem(1, "clip #1.mov", 0, 60, k + 1, k + 1 + n, path=MAC, file_id="f", tb=tb)]], audio=[[]])
+    assert rt(ok, sp2).ok and not rt(off, sp2).ok
 
 
 def test_missing_and_unexpected_items_and_wrong_track():

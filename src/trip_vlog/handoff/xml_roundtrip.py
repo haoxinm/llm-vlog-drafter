@@ -20,7 +20,18 @@ from trip_vlog.handoff.fcp7_xml import Fcp7Timeline, XmlClip
 from trip_vlog.resolve.paths import paths_equal
 
 GAIN_TOLERANCE_DB = 0.25
-TRANSITION_TOLERANCE_FRAMES = 1   # a centred dissolve on an odd number of frames cannot be centred on the cut exactly
+
+
+def centred_transition_span(cut_frame: int, frames: int) -> tuple[int, int]:
+    """(start, end) a centred dissolve of ``frames`` frames on ``cut_frame`` occupies in the FCP7 XML. An odd length cannot be centred
+    exactly; FilmCraft puts the extra frame before the cut (measured on its real export: 15 frames at 105 -> 97..112, 3 -> 103..106)."""
+    start = cut_frame - (frames + 1) // 2
+    return start, start + frames
+
+
+def transition_cut_frame(start: int, end: int) -> int:
+    """The cut a transition written by ``centred_transition_span`` is centred on."""
+    return start + (end - start + 1) // 2
 
 # feature ids used by the compatibility report
 F_SETTINGS, F_CUTS, F_DISSOLVES, F_STILLS, F_OVERLAYS, F_TITLES = "timeline_settings", "cuts", "dissolves", "stills", "overlays_v2", "titles"
@@ -35,11 +46,13 @@ class ExpectedClip:
     track: int                      # 1-based within kind
     start: int
     end: int
-    source_in: int | None           # sequence frames; None for stills and titles
+    source_in: int | None           # sequence frames (rounded); None for stills and titles
     source_out: int | None
     path: str | None
     text: str | None = None         # title text
     gain_db: float | None = None    # constant gain (audio items)
+    source_in_exact: Fraction | None = None    # the same, unrounded: an exact half frame accepts either rounding
+    source_out_exact: Fraction | None = None
 
     @property
     def is_title(self) -> bool:
@@ -84,24 +97,28 @@ def _track_no(track: str) -> int:
 def expected_from_spec(spec: TimelineSpec) -> ExpectedTimeline:
     fps = Fraction(spec.fps)
     exp = ExpectedTimeline(fps, spec.width, spec.height, spec.end_frame)
-    frames = lambda sec: int(round(Fraction(sec).limit_denominator(10 ** 9) * fps)) if sec is not None else None
+    exact = lambda sec: Fraction(sec).limit_denominator(10 ** 9) * fps if sec is not None else None
+    frames = lambda sec: int(round(exact(sec))) if sec is not None else None
     for p in spec.placements:
         vtrack = _track_no(p.track)
         sin, sout = (frames(p.source_in_seconds), frames(p.source_out_seconds)) if p.media_kind != "image" else (None, None)
+        xin, xout = (exact(p.source_in_seconds), exact(p.source_out_seconds)) if p.media_kind != "image" else (None, None)
         if p.media_kind == "video":
             feat = F_CUTS if p.track == "V1" else F_OVERLAYS
-            exp.clips.append(ExpectedClip(p.clip_instance_id, feat, "video", vtrack, p.timeline_start_frame, p.end_frame, sin, sout, p.source_path))
+            exp.clips.append(ExpectedClip(p.clip_instance_id, feat, "video", vtrack, p.timeline_start_frame, p.end_frame, sin, sout, p.source_path,
+                                          source_in_exact=xin, source_out_exact=xout))
         elif p.media_kind == "image":
             feat = F_STILLS if p.track == "V1" else F_OVERLAYS
             exp.clips.append(ExpectedClip(p.clip_instance_id, feat, "video", vtrack, p.timeline_start_frame, p.end_frame, None, None, p.source_path))
         else:
             feat = F_MUSIC if p.track == "A2" else F_AUDIO
             exp.clips.append(ExpectedClip(p.clip_instance_id, feat, "audio", vtrack, p.timeline_start_frame, p.end_frame, sin, sout,
-                                          p.source_path, gain_db=p.audio_gain_db or 0.0))
+                                          p.source_path, gain_db=p.audio_gain_db or 0.0, source_in_exact=xin, source_out_exact=xout))
         if p.media_kind == "video":
             if p.include_linked_audio and p.audio_track:
                 exp.clips.append(ExpectedClip(p.clip_instance_id, F_CUTS if p.track == "V1" else F_OVERLAYS, "audio", _track_no(p.audio_track),
-                                              p.timeline_start_frame, p.end_frame, sin, sout, p.source_path, gain_db=p.audio_gain_db or 0.0))
+                                              p.timeline_start_frame, p.end_frame, sin, sout, p.source_path, gain_db=p.audio_gain_db or 0.0,
+                                              source_in_exact=xin, source_out_exact=xout))
             else:
                 exp.muted_video_paths.add((p.source_path, p.timeline_start_frame))
         if p.transition_in.type == "dissolve" and p.transition_in.frames > 0 and p.media_kind in ("video", "image"):
@@ -154,6 +171,16 @@ def _near(a: int | float | None, b: int | float | None, tol: float) -> bool:
     return a is not None and b is not None and abs(a - b) <= tol
 
 
+def _near_source(actual: Fraction | int | None, e_int: int | None, e_exact: Fraction | None, tol: float) -> bool:
+    """Source frame check against the unrounded expected value: an exact half frame accepts either rounding, anything else only the
+    nearest frame (plus ``tol``)."""
+    if actual is None or e_int is None:
+        return False
+    exact = e_exact if e_exact is not None else Fraction(e_int)
+    slack = Fraction(1, 2) if exact.denominator != 1 else Fraction(0)
+    return abs(Fraction(actual) - exact) <= slack + Fraction(tol).limit_denominator(1000)
+
+
 def _identity_ok(e: ExpectedClip, x: XmlClip, fold_case: bool | None) -> bool:
     if e.is_title:
         return x.is_generator and (x.name == e.text or x.text == e.text)
@@ -161,7 +188,7 @@ def _identity_ok(e: ExpectedClip, x: XmlClip, fold_case: bool | None) -> bool:
 
 
 def compare_timeline_xml(xml: Fcp7Timeline, exp: ExpectedTimeline, *, tolerance_frames: int = 0, fold_case: bool | None = None) -> RoundTrip:
-    """Compare every clip, title, transition and marker of ``exp`` with ``xml``. ``tolerance_frames`` applies to record and source frames."""
+    """Compare every clip, title, transition and marker of ``exp`` with ``xml``. ``tolerance_frames`` (default 0: exact) applies to every frame comparison: sequence duration, record and source frames, transition start/end, markers."""
     rt = RoundTrip(tolerance_frames=tolerance_frames)
     tol = tolerance_frames
     add = lambda *a, **k: rt.mismatches.append(Mismatch(*a, **k))
@@ -173,7 +200,7 @@ def compare_timeline_xml(xml: Fcp7Timeline, exp: ExpectedTimeline, *, tolerance_
         bad.append(f"frame rate {xml.fps} (expected {exp.fps})")
     if (xml.width, xml.height) != (exp.width, exp.height):
         bad.append(f"size {xml.width}x{xml.height} (expected {exp.width}x{exp.height})")
-    if not _near(xml.duration, exp.duration_frames, max(tol, 1)):
+    if not _near(xml.duration, exp.duration_frames, tol):
         bad.append(f"duration {xml.duration} frames (expected {exp.duration_frames})")
     bump(rt.expected, F_SETTINGS)
     if bad:
@@ -209,7 +236,7 @@ def compare_timeline_xml(xml: Fcp7Timeline, exp: ExpectedTimeline, *, tolerance_
                 add(e.feature, label, "record", [e.start, e.end], [x.start, x.end], f"record {x.start}-{x.end}, expected {e.start}-{e.end}")
             if e.source_in is not None:
                 sin, sout = x.source_in_in(exp.fps), x.source_out_in(exp.fps)
-                if not (_near(sin, e.source_in, tol) and _near(sout, e.source_out, tol)):
+                if not (_near_source(sin, e.source_in, e.source_in_exact, tol) and _near_source(sout, e.source_out, e.source_out_exact, tol)):
                     problems += 1
                     add(e.feature, label, "source", [e.source_in, e.source_out], [_f(sin), _f(sout)],
                         f"source {_f(sin)}-{_f(sout)}, expected {e.source_in}-{e.source_out}")
@@ -232,7 +259,7 @@ def compare_timeline_xml(xml: Fcp7Timeline, exp: ExpectedTimeline, *, tolerance_
             continue
         if x.has_speed:
             feat = F_SPEED
-        elif x.kind == "audio" and x.path and any(paths_equal(p, x.path, fold_case=fold_case) and abs(s - (x.start or 0)) <= max(tol, 1)
+        elif x.kind == "audio" and x.path and any(paths_equal(p, x.path, fold_case=fold_case) and abs(s - (x.start or 0)) <= tol
                                                   for p, s in exp.muted_video_paths):
             feat = F_MUTE
         elif x.is_generator:
@@ -252,11 +279,12 @@ def compare_timeline_xml(xml: Fcp7Timeline, exp: ExpectedTimeline, *, tolerance_
     left = list(xts)
     for et in exp.transitions:
         bump(rt.expected, F_DISSOLVES)
-        hit = next((t for t in left if t.track == et.track and t.centre is not None and abs(t.centre - et.cut_frame) <= TRANSITION_TOLERANCE_FRAMES + tol
-                    and t.frames is not None and abs(t.frames - et.frames) <= max(tol, 1)), None)
+        es, ee = centred_transition_span(et.cut_frame, et.frames)
+        hit = next((t for t in left if t.track == et.track and t.start is not None and t.end is not None
+                    and abs(t.start - es) <= tol and abs(t.end - ee) <= tol), None)
         if hit is None:
-            add(F_DISSOLVES, f"V{et.track} {et.clip_instance_id}", "transition", {"cut_frame": et.cut_frame, "frames": et.frames}, None,
-                f"no {et.frames}-frame transition centred on frame {et.cut_frame} of V{et.track}")
+            add(F_DISSOLVES, f"V{et.track} {et.clip_instance_id}", "transition", {"cut_frame": et.cut_frame, "frames": et.frames, "start": es, "end": ee},
+                None, f"no {et.frames}-frame transition at {es}-{ee} (centred on frame {et.cut_frame}) on V{et.track}")
         else:
             left.remove(hit)
             bump(rt.matched, F_DISSOLVES)
@@ -270,9 +298,9 @@ def compare_timeline_xml(xml: Fcp7Timeline, exp: ExpectedTimeline, *, tolerance_
 
     # hard cuts on V1: contiguous neighbours without a transition between them
     exp_bounds = _hard_cuts([(c.start, c.end) for c in exp.clips if c.kind == "video" and c.track == 1 and not c.is_title],
-                            [t.cut_frame for t in exp.transitions if t.track == 1], max(tol, 1))
+                            [t.cut_frame for t in exp.transitions if t.track == 1], tol)
     xml_bounds = _hard_cuts([(c.start, c.end) for c in xml.track_clips("video", 1) if not c.is_generator and c.start is not None and c.end is not None],
-                            [t.centre for t in xts if t.track == 1 and t.centre is not None], max(tol, 1) + TRANSITION_TOLERANCE_FRAMES)
+                            [transition_cut_frame(t.start, t.end) for t in xts if t.track == 1 and t.start is not None and t.end is not None], tol)
     rt.expected[F_CUTS + "_boundaries"] = exp_bounds
     rt.matched[F_CUTS + "_boundaries"] = xml_bounds
 
@@ -291,11 +319,11 @@ def compare_timeline_xml(xml: Fcp7Timeline, exp: ExpectedTimeline, *, tolerance_
     return rt
 
 
-def _hard_cuts(spans: list[tuple[int | None, int | None]], transition_centres: list[float | int], tol: float) -> int:
+def _hard_cuts(spans: list[tuple[int | None, int | None]], transition_cuts: list[int], tol: float) -> int:
     ordered = sorted((s, e) for s, e in spans if s is not None and e is not None)
     n = 0
     for (_, e1), (s2, _) in zip(ordered, ordered[1:]):
-        if abs(s2 - e1) <= max(tol, 1) and not any(abs(c - s2) <= tol + 1 for c in transition_centres):
+        if abs(s2 - e1) <= tol and not any(abs(c - s2) <= tol for c in transition_cuts):
             n += 1
     return n
 
