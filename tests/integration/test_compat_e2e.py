@@ -62,7 +62,7 @@ def test_compatibility_report_rows_and_xml_round_trip(drafted):
     assert {"timeline_settings", "cuts", "stills", "titles", "markers"} <= set(rows)
     assert rows["titles"]["plan_count"] == 2 and rows["titles"]["xml"]["matched"] == 2 and rows["titles"]["verdict"] == "manual"
     assert rows["stills"]["plan_count"] == 1 and rows["stills"]["verdict"] == "manual" and "resolve-finish" in rows["stills"]["instruction"]
-    assert rows["cuts"]["verdict"] == "verified" and rows["markers"]["verdict"] == "verified"
+    assert rows["cuts"]["verdict"] == "expected" and rows["markers"]["verdict"] == "verified"
     assert all(r["filmcraft"]["status"] == "supported" and r["xml"]["status"] == "ok" for r in doc["features"])
     assert doc["resolve_finish_report"]["used"] is False and doc["resolve_evidence"]["resolve"]["version"] == "21.1.1.10"
     summ = rj(drafted / "manifest.json")["stages"]["handoff"]["summary"]

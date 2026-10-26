@@ -318,13 +318,14 @@ def _verdict(feature: str, fc: Mapping[str, Any], xml: Mapping[str, Any], rs: Ma
     if feature == X.F_DISSOLVES and usage is not None and usage.ids:
         # asked != placed: the XML (matching what was sent to FilmCraft) holds hard cuts, so it does not carry the plan's dissolves
         return "manual", f"{len(usage.ids)} of {usage.count} planned dissolve(s) became hard cuts in the handoff", _downgrade_instruction(usage)
-    if xml["status"] == "not_exported":
-        return "unknown", "FCP7 XML was not exported, so the XML could not be checked (nothing is known to be wrong)", None
+    # recorded / measured manual steps do not depend on the XML, so they come before "unknown"
     if rs["status"] == "failed":
         return "manual", rs["summary"], rs.get("manual") or RE.RESOLVE_FINISH
     if rs.get("manual"):
         return "manual", {RE.NEEDS_REPAIR: "arrives broken in Resolve unless repaired (recorded)", RE.ABSENT: "not carried into Resolve (recorded)"}.get(
             rs["status"], "needs a check in Resolve"), rs["manual"]
+    if xml["status"] == "not_exported":
+        return "unknown", "FCP7 XML was not exported, so the XML could not be checked (nothing is known to be wrong)", None
     if rs["status"] == RE.PROVEN and fc["status"] == "supported":
         return "verified", "FilmCraft supports it, the XML carries it, and Resolve is " + (
             "measured by resolve-finish on this workspace" if rs["source"] == "resolve_finish_report" else "recorded to import it"), None

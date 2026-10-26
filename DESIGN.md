@@ -1178,7 +1178,7 @@ support, presence in the exported FCP7 XML (the XML is parsed and compared with 
 integration suite records this round trip as a test result: zero mismatches, tolerance 0 frames, for cuts, a dissolve, a still, a V2 overlay and title,
 gain, music and a marker), and the Resolve result. The Resolve result is the static table in `handoff/resolve_evidence.py`, limited to what §15.5/§15.6 record
 (Studio 21.1.1.10, Windows) and `unverified` otherwise, or, when a real `resolve_finish_report.json` of the same `timeline.xml` exists, that run's per-check
-results. Verdicts: verified / expected / manual / unsupported / unknown (`unknown`: no XML was exported; a dissolve the engine placed as a hard cut is `manual`, never verified). The deterministic QC additions (decode, speech truncation, source-audio jump, music vs
+results. Cuts and dissolves are recorded only partly (no hard cut between two clips; one 15-frame centred dissolve), so they read `expected`, not `verified`. Verdicts: verified / expected / manual / unsupported / unknown (`unknown`: no XML was exported; a dissolve the engine placed as a hard cut is `manual`, never verified). The deterministic QC additions (decode, speech truncation, source-audio jump, music vs
 speech, scene order, preview sheets with `qc/preview_sheet.json`) only warn; the LLM critic of Phase 5b reads the sheet index and the check data.
 
 ## 16. Natural-language revisions

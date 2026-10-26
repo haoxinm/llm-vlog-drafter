@@ -631,7 +631,7 @@ aspect ratio/orientation (plain scaling, e.g. 4K into 1080p, is not flagged), sp
 read-back after reopening); whether the exported `timeline.xml` really contains it (the XML is parsed and every clip's record and source in/out, track, path,
 gain, title, transition and marker is compared with the timeline sent to FilmCraft **at frame precision, tolerance 0**, any mismatch is listed; a dissolve the
 engine could only place as a hard cut counts as asked-but-missing); and the **recorded** Resolve
-result. Verdict per feature: `verified` (FilmCraft + XML ok and Resolve recorded/measured to import it), `expected` (Resolve unverified or partly recorded),
+result. Verdict per feature: `verified` (FilmCraft + XML ok and Resolve recorded/measured to import it), `expected` (Resolve unverified or partly recorded: cuts and dissolves are only partly recorded, so they are `expected`, not `verified`),
 `manual` (a step in Resolve is needed; the instruction is given; a dissolve the engine downgraded to a hard cut is always `manual`: add it in Resolve), `unknown` (no FCP7 XML was exported,
 so nothing could be checked; the overall result is then `unknown`, not `problem`) or `unsupported` (FilmCraft cannot, or the XML does not carry it as planned; the handoff stage then
 ends `partial`). The recorded results are a static, versioned table (`trip_vlog/handoff/resolve_evidence.py`) holding only what DESIGN §15.5/§15.6 record on

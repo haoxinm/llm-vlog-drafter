@@ -396,6 +396,9 @@ def check_music_vs_speech(plan: EditPlan, clip_audio: Mapping[str, Mapping[str, 
     audible_assets = {c.asset_id for _, c in _primary_clips(plan) if _audible_video(c)}
     coarse_only = any((transcripts or {}).get(a) for a in audible_assets) and not any(
         s.text.strip() and not s.coarse for a in audible_assets for s in (transcripts or {}).get(a, ()))
+    coarse_assets = sorted(a for a in audible_assets if (transcripts or {}).get(a) and not any(
+        s.text.strip() and not s.coarse for s in (transcripts or {})[a]))
+    note = (f"; not checked for speech (transcript without segment timing): {', '.join(coarse_assets)}" if coarse_assets else "")
     if coarse_only and not clip_audio:
         return _skipped(name, "the transcripts have no segment timing (coarse timestamps) and there are no audio measurements, so music "
                         "cannot be compared with speech")
@@ -425,12 +428,13 @@ def check_music_vs_speech(plan: EditPlan, clip_audio: Mapping[str, Mapping[str, 
                               "speech": " ".join(s.text.strip() for s in speech)[:120] if speech else None})
     if not found:
         return CheckResult(name, PASS, f"music is not over speech or active sound, or sits {-max_gain_db:g} dB or more below it "
-                           f"({checked} overlap(s) checked)" + ("; transcripts without segment timing were not used" if coarse_only else ""),
-                           {"overlaps_checked": checked})
+                           f"({checked} overlap(s) checked)" + note,
+                           {"overlaps_checked": checked, **({"coarse_transcript_assets": coarse_assets} if coarse_assets else {})})
     f = found[0]
     return CheckResult(name, WARN, f"music {f['music_clip_instance_id']} plays over {f['reason'].replace('_', ' ')} in {f['clip_instance_id']} "
-                       f"without being lowered ({len(found)} overlap(s)); lower the music or the clip gain in the edit, no ducking is generated",
-                       {"findings": found[:30], "total": len(found), "max_relative_db": max_gain_db})
+                       f"without being lowered ({len(found)} overlap(s)); lower the music or the clip gain in the edit, no ducking is generated" + note,
+                       {"findings": found[:30], "total": len(found), "max_relative_db": max_gain_db,
+                        **({"coarse_transcript_assets": coarse_assets} if coarse_assets else {})})
 
 
 def check_scene_order(plan: EditPlan, outline_scene_ids: Sequence[str] | None) -> CheckResult:

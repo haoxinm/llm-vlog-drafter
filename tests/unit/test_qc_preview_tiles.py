@@ -180,3 +180,23 @@ def test_qc_without_a_preview_removes_the_sheets_of_an_earlier_run(tmp_path):
     md = (prev / "qc_report.md").read_text(encoding="utf-8")
     assert "skipped" in md and doc["counts"]["skipped"] >= 1
     assert doc["status"] in ("pass", "warn", "fail") and doc["status"] != "skipped"
+
+
+def test_failed_frame_extraction_also_removes_stale_sheets(tmp_path, generated_media, ffmpeg_tools):
+    from qc_helpers import make_plan  # noqa: F401  (keeps the helper path importable)
+    ffmpeg = Path(ffmpeg_tools[0])
+    first = tmp_path / "sheet.jpg"
+    for p in (first, tmp_path / "sheet_02.jpg"):
+        p.write_bytes(b"old")
+    plan = P.plan_tiles(clips((0, 30), (30, 60)), FPS, 60)
+    missing = tmp_path / "no_such_preview.mp4"                       # every grab fails
+    res = P.build_preview_sheets(ffmpeg, missing, first, plan, FPS, duration_frames=60, plan_hash="x" * 64)
+    assert res.index.error and not res.written and not first.exists() and not (tmp_path / "sheet_02.jpg").exists()
+    first.write_bytes(b"old")
+    empty = P.build_preview_sheets(ffmpeg, missing, first, P.plan_tiles([], FPS, 0), FPS, duration_frames=0)
+    assert empty.index.error and not first.exists()
+
+
+def test_qc_schema_version_covers_the_skipped_status():
+    from trip_vlog.qc.report import QC_SCHEMA
+    assert QC_SCHEMA == 3

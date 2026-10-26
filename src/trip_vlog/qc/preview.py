@@ -325,6 +325,7 @@ def build_preview_sheets(ffmpeg: Path, preview: Path, first_sheet: Path, plan: T
                 images[t.tile_id] = im.convert("RGB").copy()
     if not any(im is not None for im in images.values()):
         idx.error = "no frames could be extracted from the preview"
+        remove_stale_sheets(first_sheet, None)      # sheets of an earlier run would describe a different preview
         for sn, tiles in enumerate(sheets, 1):  # still record what was planned
             idx.sheets.append(SheetEntry(sn, "", [t.tile_id for t in tiles]))
         for sn, tiles in enumerate(sheets, 1):

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-EVIDENCE_VERSION = 1
+EVIDENCE_VERSION = 2
 RESOLVE_TARGET = {"product": "DaVinci Resolve Studio", "version": "21.1.1.10", "os": "Windows", "file": "FCP7 XML (timeline.xml)"}
 
 # results
@@ -43,14 +43,15 @@ EVIDENCE: dict[str, Evidence] = {e.feature: e for e in (
              "Frame rate (30) and duration (195 frames) of the Phase 0 fixture were correct after import via ImportTimelineFromFile. "
              "Resolution was not reported.",
              "DESIGN §15.5 (scripted verification, Studio 21.1.1.10); docs/phase0-filmcraft-spike.md §8.1"),
-    Evidence("cuts", PROVEN,
+    Evidence("cuts", PARTIAL,
              "Clip order and record and source in/out of the clips on V1 of the Phase 0 fixture (a landscape clip and a still) were correct "
-             "and the media was linked (the still excepted, see 'stills'). The fixture has no hard cut between two clips, so hard cuts as "
-             "such were not recorded separately.",
+             "and the media was linked (the still excepted, see 'stills'). The fixture has no hard cut between two clips, so a hard cut "
+             "between two clips was not recorded.",
              "DESIGN §15.5 (scripted verification, Studio 21.1.1.10); docs/phase0-filmcraft-spike.md §8, §8.1"),
-    Evidence("dissolves", PROVEN,
+    Evidence("dissolves", PARTIAL,
              "The two transitions of the Phase 0 fixture were found as timeline items: one cross dissolve centred on the V1 cut, plus the "
-             "audio fade (listed by Resolve as 'Final Cut Pro 7', ending at the clip end). Their look was not reported.",
+             "audio fade (listed by Resolve as 'Final Cut Pro 7', ending at the clip end). The fixture's dissolve is one 15-frame dissolve; "
+             "other lengths and the look were not reported.",
              "DESIGN §15.5; docs/phase0-filmcraft-spike.md §8.1 (scripted runs)"),
     Evidence("stills", NEEDS_REPAIR,
              "A still whose file name contains digits (e.g. still_1080p.png, IMG_1042.JPG) is misread as an image sequence and arrives "
@@ -75,7 +76,7 @@ EVIDENCE: dict[str, Evidence] = {e.feature: e for e in (
              "DESIGN §15.5, §15.6 step 3"),
     Evidence("audio_gain", UNVERIFIED,
              "The audio level (-6 dB) of the Phase 0 fixture was not reported.",
-             "docs/phase0-filmcraft-spike.md §8.1 (\"audio levels) was not reported yet\")"),
+             "docs/phase0-filmcraft-spike.md §8.1 (\"Detailed per-check fidelity (clip order, in/out, transitions, markers, audio levels) was not reported yet\")"),
     Evidence("audio_mute", UNVERIFIED,
              "A video clip placed without its audio was not part of the recorded tests.",
              "DESIGN §15.5 (nothing recorded)"),

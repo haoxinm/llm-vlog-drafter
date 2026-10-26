@@ -20,7 +20,7 @@ from trip_vlog.qc import checks as C
 from trip_vlog.qc.preview import CutClip, build_preview_sheets, plan_tiles, remove_stale_sheets
 from trip_vlog.state import atomic_write_json, atomic_write_text
 
-QC_SCHEMA = 2   # 2: speech/audio/music/scene-order/decode checks, several preview sheets + index, `critic` block
+QC_SCHEMA = 3   # 2: speech/audio/music/scene-order/decode checks, several preview sheets + index, `critic` block; 3: `skipped` status and counts key
 
 
 @dataclass

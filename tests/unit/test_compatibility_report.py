@@ -45,13 +45,13 @@ def test_rows_for_the_features_the_plan_uses_with_recorded_verdicts(tmp_path):
     r = rows(doc)
     assert set(r) == {"timeline_settings", "dissolves", "stills", "titles", "markers", "audio_gain"} and "cuts" not in r   # one hard cut-free V1
     assert doc["xml"]["roundtrip"]["ok"] and doc["xml"]["status"] == "ok"
-    assert {k: r[k]["verdict"] for k in r} == {"timeline_settings": "expected", "dissolves": "verified", "stills": "manual", "titles": "manual",
+    assert {k: r[k]["verdict"] for k in r} == {"timeline_settings": "expected", "dissolves": "expected", "stills": "manual", "titles": "manual",
                                                "markers": "verified", "audio_gain": "expected"}
     assert r["stills"]["instruction"] and "resolve-finish" in r["stills"]["instruction"] and r["titles"]["instruction"]
     assert r["audio_gain"]["resolve"]["status"] == "unverified" and r["audio_gain"]["plan_count"] == 1
     assert r["titles"]["plan_count"] == 1 and r["dissolves"]["xml"]["matched"] == 1
     assert r["markers"]["filmcraft"]["capability"] == "add_marker" and r["markers"]["resolve"]["source"] == "recorded_evidence"
-    assert doc["overall"] == "attention" and doc["counts"] == {"verified": 2, "expected": 2, "manual": 2, "unsupported": 0, "unknown": 0}
+    assert doc["overall"] == "attention" and doc["counts"] == {"verified": 1, "expected": 3, "manual": 2, "unsupported": 0, "unknown": 0}
     json.dumps(doc)
 
 
@@ -63,7 +63,9 @@ def test_stills_without_digits_are_not_claimed_broken_or_fine(tmp_path):
 
 def test_evidence_table_only_claims_what_is_recorded():
     proven = {f for f, e in RE.EVIDENCE.items() if e.result == RE.PROVEN}
-    assert proven == {"cuts", "dissolves", "overlays_v2", "markers"}
+    assert proven == {"overlays_v2", "markers"}      # cuts and dissolves are PARTIAL: no hard cut between two clips / one 15-frame dissolve recorded
+    assert RE.EVIDENCE["cuts"].result == RE.PARTIAL and RE.EVIDENCE["dissolves"].result == RE.PARTIAL and RE.EVIDENCE_VERSION == 2
+    assert "audio levels) was not reported yet" in RE.EVIDENCE["audio_gain"].reference
     for f in ("audio_gain", "audio_mute", "audio_clips", "mixed_fps", "mixed_resolution", "speed_changes"):
         assert RE.EVIDENCE[f].result == RE.UNVERIFIED
     assert RE.EVIDENCE["titles"].result == RE.ABSENT and RE.EVIDENCE["stills"].result == RE.NEEDS_REPAIR
@@ -96,6 +98,13 @@ def test_missing_filmcraft_capability_and_missing_xml(tmp_path):
     plan, cat, spec = world(tmp_path)
     doc = K.build_compatibility_report(K.CompatInputs(plan, spec, cat, None, tmp_path / "timeline.xml"))
     assert doc["xml"]["status"] == "unreadable" and rows(doc)["markers"]["filmcraft"]["status"] == "unknown"
+
+
+def test_recorded_manual_steps_survive_a_missing_xml(tmp_path):
+    doc, _ = build(tmp_path, xml=False)
+    r = rows(doc)
+    assert r["titles"]["verdict"] == "manual" and r["titles"]["instruction"] and r["stills"]["verdict"] == "manual" and "resolve-finish" in r["stills"]["instruction"]
+    assert r["markers"]["verdict"] == "unknown" and doc["overall"] == "attention" and doc["counts"]["unknown"] > 0
 
 
 def finish_doc(sha, **over):
@@ -160,9 +169,9 @@ def test_dissolve_the_engine_placed_as_a_hard_cut_is_never_verified(tmp_path):
     assert r["details"]["downgraded"] == 1 and doc["overall"] == "attention"
     md = K.render_compatibility_markdown(doc)
     assert "## Manual steps in Resolve" in md and "downgraded (0/1)" in md
-    # the same plan with the dissolve placed is verified, as before
+    # the same plan with the dissolve placed is "expected" (the recorded Resolve result for dissolves is only partial), not manual
     ok, _ = build(tmp_path)
-    assert rows(ok)["dissolves"]["verdict"] == "verified"
+    assert rows(ok)["dissolves"]["verdict"] == "expected" and rows(ok)["dissolves"]["xml"]["status"] == "ok"
 
 
 def test_mixed_resolution_flags_a_different_aspect_ratio_but_not_plain_scaling(tmp_path):

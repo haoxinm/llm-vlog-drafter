@@ -155,6 +155,15 @@ def test_music_ignores_coarse_transcripts_and_reports_skipped_when_only_coarse_e
     assert C.check_music_vs_speech(music_plan(), {}, {A1: [tr(1.0, 3.0)]}).data["findings"][0]["reason"] == "speech"
 
 
+def test_music_names_assets_that_were_not_checked_for_speech():
+    coarse = {A1: [tr(0.0, 9.0, coarse=True)]}
+    r = C.check_music_vs_speech(music_plan(), {"v1": audio(-60.0, silent=True)}, coarse)
+    assert r.status == C.PASS and A1 in r.detail and "not checked for speech" in r.detail and r.data["coarse_transcript_assets"] == [A1]
+    w = C.check_music_vs_speech(music_plan(), {"v1": audio(-25.0)}, coarse)
+    assert w.status == C.WARN and A1 in w.detail and "not checked for speech" in w.detail
+    assert "not checked for speech" not in C.check_music_vs_speech(music_plan(), {"v1": audio(-60.0, silent=True)}, {A1: [tr(1.0, 3.0)]}).detail
+
+
 def test_skipped_status_does_not_change_the_overall_status():
     sk = C.CheckResult("x", C.SKIPPED, "skipped: nothing")
     assert C.overall_status([sk]) == C.PASS and C.overall_status([sk, C.CheckResult("y", C.WARN)]) == C.WARN
