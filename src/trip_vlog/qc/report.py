@@ -45,6 +45,9 @@ def run_qc(i: QcInputs) -> dict[str, Any]:
     results.append(C.check_project_reopens(i.sequence is not None, i.mismatches, i.reopen_error))
     if i.sequence is not None:
         results.append(C.check_v1_gaps(i.sequence))
+    tcheck = C.check_titles(plan, i.sequence)
+    if tcheck is not None:
+        results.append(tcheck)
     results.append(C.check_duplicates(plan, i.catalog))
     results.append(C.check_stills(plan, q.min_still_seconds))
     seq = i.sequence

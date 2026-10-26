@@ -22,9 +22,10 @@ from typing import Any, Mapping
 
 from pydantic import ValidationError
 
-from trip_vlog.planning.catalog_view import AssetInfo, MomentInfo, PlanningCatalog, ref_matches, ref_targets
+from trip_vlog.planning.catalog_view import AssetInfo, MomentInfo, PlanningCatalog, ref_matches, ref_targets, required_label
 from trip_vlog.planning.duration import (cumulative_starts, frame_distance, frames_to_float, parse_fps, seconds_to_frames)
 from trip_vlog.planning.models import EditClip, EditPlan, EditTransition, SelectionPlan, edit_plan_hash
+from trip_vlog.planning.titles import validate_edit_titles, validate_selection_titles
 
 AUDIO_ROLES = ("natural_audio", "music", "narration")
 VISUAL_ROLES = ("primary_video", "overlay")
@@ -46,13 +47,20 @@ class ValidationSettings:
     include_narration: bool = False
     check_hash: bool = True
     repair: bool = True
+    # titles (planning.titles)
+    project_title: str = "Trip Vlog"
+    opening_title: bool = False
+    scene_titles: bool = False
+    closing_title: str | None = None
+    max_titles: int = 6
 
     @classmethod
     def from_config(cls, config: Any, **overrides: Any) -> "ValidationSettings":
         p, e = config.project, config.editorial
         base = dict(frame_rate=p.frame_rate, target_duration_seconds=float(p.target_duration_seconds),
                     must_include=tuple(e.must_include), must_exclude=tuple(e.must_exclude),
-                    music_policy=p.music_policy, include_narration=p.include_narration)
+                    music_policy=p.music_policy, include_narration=p.include_narration, project_title=p.title,
+                    opening_title=e.opening_title, scene_titles=e.scene_titles, closing_title=e.closing_title, max_titles=e.max_titles)
         for name in ("duration_tolerance_pct", "duration_tolerance_seconds"):
             if hasattr(config.project, name):
                 base[name] = getattr(config.project, name)
@@ -137,17 +145,21 @@ def _schema_errors(report: ValidationReport, err: ValidationError) -> None:
 def _check_refs(report: ValidationReport, clips: list[tuple[str, str]], catalog: PlanningCatalog, s: ValidationSettings) -> None:
     """clips: (clip_instance_id, moment_id). must_include / must_exclude references (§11.1)."""
     used = [(cid, catalog.moments[mid], catalog.assets.get(catalog.moments[mid].asset_id)) for cid, mid in clips if mid in catalog.moments]
+    # Errors can be sent back to the model, and a reference is a path, folder or glob from the user's own layout: the error says
+    # "required item N" / "an exclusion rule", and a warning (local only) names the reference itself.
     for ref in s.must_exclude:
         for cid, m, a in used:
             if a is not None and ref_matches(ref, a, m):
-                report.error("excluded_included", f"clip {cid} uses {m.moment_id}, which matches must_exclude {ref!r}", clip=cid)
+                report.error("excluded_included", f"clip {cid} uses {m.moment_id}, which matches an exclusion rule (editorial.must_exclude)", clip=cid)
+                report.warn("must_exclude_ref", f"clip {cid} matches the must_exclude reference {ref!r}", clip=cid)
     used_ids = {m.moment_id for _, m, _ in used}
-    for ref in s.must_include:
+    for n, ref in enumerate(dict.fromkeys(s.must_include), 1):
         targets = [m for m in ref_targets(ref, catalog) if catalog.assets[m.asset_id].present]
         if not targets:
             report.warn("must_include_unavailable", f"must_include {ref!r} matches no available moment")
         elif not any(m.moment_id in used_ids for m in targets):
-            report.error("must_include_missing", f"must_include {ref!r} is not used by any clip")
+            report.error("must_include_missing", f"{required_label(n)} is not used by any clip")
+            report.warn("must_include_ref", f"{required_label(n)} is the must_include reference {ref!r}")
 
 
 # ---- selection plans -----------------------------------------------------------------------------------
@@ -217,6 +229,8 @@ def validate_selection_plan(plan: SelectionPlan | Mapping[str, Any], catalog: Pl
                     f"(tolerance {settings.total_tolerance_seconds():.2f}s)")
     _check_refs(report, clips, catalog, settings)
     _check_duplicates_selection(report, plan, catalog)
+    folders = {m.moment_id: catalog.assets[m.asset_id].folder for m in catalog.moments.values() if m.asset_id in catalog.assets}
+    validate_selection_titles(report, plan, settings, folders)
     return report
 
 
@@ -332,6 +346,7 @@ def validate_edit_plan(plan: EditPlan | Mapping[str, Any], catalog: PlanningCata
     _check_totals(report, plan, fps, settings)
     _check_duplicates_edit(report, plan, catalog)
     _check_refs(report, [(c.clip_instance_id, c.moment_id) for _, _, c in clips], catalog, settings)
+    validate_edit_titles(report, plan, fps, settings)
 
     if report.repairs:
         plan.plan_hash = edit_plan_hash(plan)

@@ -28,7 +28,7 @@ def read_resolve_verification(path: Path) -> tuple[str, str]:
     if not path.is_file():
         return "absent", ""
     try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
+        doc = json.loads(path.read_text(encoding="utf-8-sig"))
         status = str(doc.get("status", "")).lower()
     except (OSError, ValueError, AttributeError):
         return "unreadable", "resolve_verification.json exists but could not be read"
@@ -143,7 +143,9 @@ def render_handoff_report(i: HandoffReportInputs) -> str:
         L.append("")
         if ex.report.titles_not_carried:
             L += ["Titles that must be recreated:", ""] + [f"- \"{_esc(t['text'])}\" at frame {t['start_frame']} for {t['duration_frames']} frames on {t['track']}"
-                                                            for t in ex.report.titles_not_carried] + [""]
+                                                            for t in ex.report.titles_not_carried] + [
+                "`trip-vlog resolve-finish` can recreate them as editable Resolve titles (experimental, Studio only); "
+                "otherwise add them by hand. The FilmCraft project keeps them as editable text clips.", ""]
         else:
             L += ["This draft contains no titles.", ""]
 

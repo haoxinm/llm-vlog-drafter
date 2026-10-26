@@ -8,6 +8,8 @@ Placement rules
   * primary_video clips are laid end to end across scenes (V1); a transition never changes their length.
   * every other role (overlay, natural_audio, music, narration) is laid end to end on its own track, starting at the
     start of the scene it is listed in.
+Titles (V2) are placed from their start rule (scene start, clip start or the end of the sequence) and moved inside the sequence
+when needed (`planning.titles.resolve_titles`).
 Transitions are center-aligned dissolves when both neighbours have enough source handle (>= half the transition each side,
 docs/phase0-filmcraft-spike.md §7 gap 4). Otherwise the alignment shifts (start_at_cut / end_at_cut), the dissolve is
 shortened, or it becomes a cut. Each change is noted on the clip; nothing is downgraded silently.
@@ -25,6 +27,7 @@ from trip_vlog.planning.duration import (cumulative_starts, fps_string, frames_t
 from trip_vlog.planning.models import (SCHEMA_VERSION, AudioSettings, EditClip, EditPlan, EditScene, EditTransition,
                                        ProjectSettings, SceneMarker, SelectionClip, SelectionPlan, SequenceSettings,
                                        selection_plan_hash, with_hash)
+from trip_vlog.planning.titles import resolve_titles
 
 DEFAULT_STILL_SECONDS = 3.0
 MIN_DISSOLVE_FRAMES = 2
@@ -254,6 +257,9 @@ def resolve_selection_plan(selection: SelectionPlan, catalog: PlanningCatalog, s
                                 duration_frames=scene_primary, clips=clips))
         markers.append(SceneMarker(marker_id=f"marker_{scene.scene_id}", name=scene.title, frame=scene_start, scene_id=scene.scene_id))
     total = cursor_end
+    titles, title_issues = resolve_titles(selection, scenes, fps, total)
+    if title_issues:
+        raise PlanResolutionError(title_issues)
     width, height = sequence_dimensions(settings.aspect_ratio, settings.short_side)
     uncertainties = list(selection.uncertainties)
     if shortfalls:
@@ -264,7 +270,7 @@ def resolve_selection_plan(selection: SelectionPlan, catalog: PlanningCatalog, s
                                 aspect_ratio=settings.aspect_ratio, frame_rate=settings.frame_rate),
         sequence=SequenceSettings(width=width, height=height, fps=fps_string(fps), aspect_ratio=settings.aspect_ratio,
                                   still_duration_seconds=settings.still_duration_seconds),
-        scenes=scenes, markers=markers,
+        scenes=scenes, markers=markers, titles=titles,
         audio=AudioSettings(music_policy=settings.music_policy, preserve_natural_audio=settings.preserve_natural_audio,  # type: ignore[arg-type]
                             duck_music_under_speech=settings.duck_music_under_speech),
         total_duration_frames=total, total_duration_seconds=frames_to_float(total, fps), uncertainties=uncertainties)

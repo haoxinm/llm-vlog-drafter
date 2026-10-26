@@ -1,0 +1,193 @@
+{
+  "$id": "https://trip-vlog.local/schemas/timeline_planner_response:1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Timeline planner reply: clips per outline scene (moment, duration, anchor, sound, transition) and optional scene titles. No timestamps and no editor commands; clip ids are assigned by code.",
+  "properties": {
+    "scenes": {
+      "description": "One entry per outline scene, in the outline's order.",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "clips": {
+            "description": "Clips in playing order (at most 500).",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "anchor": {
+                  "description": "Where inside the moment the clip is taken.",
+                  "enum": [
+                    "start",
+                    "center",
+                    "end",
+                    "best"
+                  ],
+                  "type": "string"
+                },
+                "audio_policy": {
+                  "description": "What happens to the clip's own sound.",
+                  "enum": [
+                    "natural_sound",
+                    "ambient_low",
+                    "muted"
+                  ],
+                  "type": "string"
+                },
+                "intentional_repeat_reason": {
+                  "description": "Only when a moment is deliberately used again; otherwise null.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "moment_id": {
+                  "description": "A candidate moment of this scene, copied exactly from its 'id' field.",
+                  "type": "string"
+                },
+                "rationale": {
+                  "description": "One short sentence on why the clip is there (at most 400 characters).",
+                  "type": "string"
+                },
+                "target_duration_seconds": {
+                  "description": "How long the clip plays, in seconds; more than 0 and never more than the moment's 'use' value.",
+                  "type": "number"
+                },
+                "track_role": {
+                  "description": "primary_video for the story; overlay is rarely needed.",
+                  "enum": [
+                    "primary_video",
+                    "overlay"
+                  ],
+                  "type": "string"
+                },
+                "transition_in": {
+                  "additionalProperties": false,
+                  "description": "How the clip begins.",
+                  "properties": {
+                    "duration_seconds": {
+                      "description": "0 for a cut; 0.3 to 1.0 for a dissolve (never more than 5).",
+                      "type": "number"
+                    },
+                    "type": {
+                      "enum": [
+                        "cut",
+                        "dissolve"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "duration_seconds"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "moment_id",
+                "target_duration_seconds",
+                "anchor",
+                "track_role",
+                "audio_policy",
+                "transition_in",
+                "rationale",
+                "intentional_repeat_reason"
+              ],
+              "type": "object"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "scene_id": {
+            "description": "The outline's scene_id, exactly.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scene_id",
+          "clips"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "titles": {
+      "description": "Scene titles, only when enabled; otherwise empty.",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "duration_seconds": {
+            "description": "1 to 10 seconds.",
+            "type": "number"
+          },
+          "rationale": {
+            "description": "At most 300 characters.",
+            "type": "string"
+          },
+          "scene_id": {
+            "description": "The scene the title belongs to.",
+            "type": "string"
+          },
+          "start": {
+            "additionalProperties": false,
+            "properties": {
+              "clip_number": {
+                "description": "For clip_start: the clip's position in the scene's clip list, counted from 1; else null.",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "offset_seconds": {
+                "description": "Seconds after that point (0 to 600).",
+                "type": "number"
+              },
+              "relative_to": {
+                "description": "Start at the scene's first frame or at one of its clips.",
+                "enum": [
+                  "scene_start",
+                  "clip_start"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "relative_to",
+              "clip_number",
+              "offset_seconds"
+            ],
+            "type": "object"
+          },
+          "text": {
+            "description": "Exactly the outline's title of that scene (at most 60 characters, one line).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scene_id",
+          "text",
+          "start",
+          "duration_seconds",
+          "rationale"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "uncertainties": {
+      "description": "Things the user should check in the result (up to 100, each at most 500 characters).",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "scenes",
+    "titles",
+    "uncertainties"
+  ],
+  "title": "timeline_planner_response",
+  "type": "object"
+}
