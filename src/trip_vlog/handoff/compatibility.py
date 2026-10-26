@@ -6,17 +6,24 @@ rate, mixed size / orientation, speed changes), each with
 
   * ``plan_count``       how often the plan uses it;
   * ``filmcraft``        supported / unsupported / unknown, from the capability map of this workspace (the commands the adapter
-                         uses) and whether the saved project read back equal after reopening;
+                         uses) and whether the saved project read back equal after reopening; ``downgraded`` when the engine
+                         placed fewer dissolves than the plan asked for (the rest became hard cuts);
   * ``xml``              the exported ``timeline.xml`` parsed and compared with what was sent to FilmCraft at frame precision
-                         (``trip_vlog.handoff.xml_roundtrip``): items expected / found, and every mismatch;
+                         (``trip_vlog.handoff.xml_roundtrip``): items expected / found, and every mismatch. For dissolves "expected"
+                         is what the PLAN asked for, so a dissolve the engine placed as a hard cut shows as ``downgraded`` (found
+                         < expected) even though the XML matches what was sent;
   * ``resolve``          the RECORDED result on Resolve (``resolve_evidence``, static, versioned) or, when a real
                          ``resolve_finish_report.json`` of this very timeline exists, the per-check results of that run;
-  * ``verdict``          verified | expected | manual | unsupported:
+  * ``verdict``          verified | expected | manual | unsupported | unknown:
 
         verified     FilmCraft supports it, the XML carries it correctly AND Resolve is recorded (or was measured) to import it;
         expected     FilmCraft and the XML are fine, the Resolve result is unverified or only partly recorded;
         manual       a step in Resolve is needed (``instruction``), or the measured Resolve run failed the feature;
-        unsupported  FilmCraft cannot do it, or the XML does not carry it as planned (so the handoff would be wrong).
+        unsupported  FilmCraft cannot do it, or the XML does not carry it as planned (so the handoff would be wrong);
+        unknown      the FCP7 XML was not exported, so nothing could be checked (not a defect of the plan; export it and run again).
+
+A dissolve the plan asked for but the engine placed as a hard cut (alignment or handles it cannot place) is never "verified": the row
+is ``manual`` with the instruction to add the dissolve in Resolve, because the handoff then holds a hard cut where the plan has a dissolve.
 
 Nothing is claimed beyond the recorded evidence: "not reported" stays ``unverified``.
 """
@@ -41,13 +48,13 @@ from trip_vlog.planning.models import EditPlan
 SCHEMA_VERSION = 1
 REPORT_JSON = "compatibility_report.json"
 REPORT_MD = "compatibility_report.md"
-VERDICTS = ("verified", "expected", "manual", "unsupported")
+VERDICTS = ("verified", "expected", "manual", "unsupported", "unknown")
 MAX_LISTED = 12
 
 # (feature, label, FilmCraft capability the adapter uses for it)
 FEATURES: tuple[tuple[str, str, str], ...] = (
     (X.F_SETTINGS, "Timeline frame rate, size and duration", "create_sequence"),
-    (X.F_CUTS, "Hard cuts on V1 (clip order, record and source in/out)", "place_clip"),
+    (X.F_CUTS, "Clips on V1 (clip order, record and source in/out; hard cuts between them)", "place_clip"),
     (X.F_DISSOLVES, "Dissolves (cross dissolve centred on the cut)", "add_transition"),
     (X.F_STILLS, "Still images", "place_clip"),
     (X.F_OVERLAYS, "Overlay clips on V2", "place_clip"),
@@ -58,7 +65,7 @@ FEATURES: tuple[tuple[str, str, str], ...] = (
     (X.F_MUSIC, "Music track (A2)", "place_clip"),
     (X.F_AUDIO, "Other stand-alone audio clips", "place_clip"),
     ("mixed_fps", "Source clips with a frame rate different from the sequence", "place_clip"),
-    ("mixed_resolution", "Source clips with a size or orientation different from the sequence", "place_clip"),
+    ("mixed_resolution", "Source clips with an aspect ratio or orientation different from the sequence", "place_clip"),
     (X.F_SPEED, "Speed changes", ""),
 )
 LABELS = {f: label for f, label, _ in FEATURES}
@@ -86,6 +93,13 @@ class Usage:
     ids: list[str] = field(default_factory=list)   # clip_instance_ids that use the feature (not written to the report in full)
 
 
+ASPECT_TOLERANCE = 0.005   # relative; 1920x1080 and 3840x2160 are the same aspect ratio, 1920x1080 and 1440x1080 are not
+
+
+def _same_aspect(w: int, h: int, sw: int, sh: int) -> bool:
+    return abs(w * sh - h * sw) <= ASPECT_TOLERANCE * h * sw
+
+
 def plan_usage(plan: EditPlan, spec: TimelineSpec, catalog: PlanningCatalog) -> dict[str, Usage]:
     from fractions import Fraction
 
@@ -98,10 +112,13 @@ def plan_usage(plan: EditPlan, spec: TimelineSpec, catalog: PlanningCatalog) -> 
     asked = [c for c in clips if c.transition_in.type == "dissolve" and c.media_type in ("video", "image")]
     placed = [p for p in spec.placements if p.transition_in.type == "dissolve"]
     use[X.F_DISSOLVES].count = len(asked)
-    if len(asked) != len(placed):
-        use[X.F_DISSOLVES].notes.append(f"{len(asked) - len(placed)} of {len(asked)} requested dissolve(s) were placed as hard cuts (alignment or "
+    placed_ids = {p.clip_instance_id for p in placed}
+    lost = [c.clip_instance_id for c in asked if c.clip_instance_id not in placed_ids]
+    if lost:
+        use[X.F_DISSOLVES].notes.append(f"{len(lost)} of {len(asked)} requested dissolve(s) were placed as hard cuts (alignment or "
                                         "handles the engine cannot place; see Mapping warnings in handoff_report.md)")
-    use[X.F_DISSOLVES].data["placed"] = len(placed)
+    use[X.F_DISSOLVES].ids = lost
+    use[X.F_DISSOLVES].data.update(placed=len(placed), downgraded=len(lost), downgraded_clips=lost[:MAX_LISTED])
     stills = [c for c in clips if c.media_type == "image" and c.track_role == "primary_video"]
     use[X.F_STILLS].count = len(stills)
     digits = [catalog.assets[c.asset_id].relative_path for c in stills if c.asset_id in catalog.assets
@@ -115,7 +132,7 @@ def plan_usage(plan: EditPlan, spec: TimelineSpec, catalog: PlanningCatalog) -> 
                               and (catalog.assets.get(c.asset_id) is None or catalog.assets[c.asset_id].has_audio))
     use[X.F_MUSIC].count = sum(1 for c in clips if c.track_role == "music")
     use[X.F_AUDIO].count = sum(1 for c in clips if c.media_type == "audio" and c.track_role != "music")
-    fps_off, res_off, orient_off = [], [], 0
+    fps_off, res_off, orient_off, scaled_only = [], [], 0, 0
     for c in clips:
         a = catalog.assets.get(c.asset_id)
         if a is None or c.media_type not in ("video", "image"):
@@ -123,14 +140,19 @@ def plan_usage(plan: EditPlan, spec: TimelineSpec, catalog: PlanningCatalog) -> 
         if c.media_type == "video" and a.fps is not None and a.fps != seq_fps:
             fps_off.append(c.clip_instance_id)
         w, h = a.display_width or a.width, a.display_height or a.height
-        if w and h and (w, h) != (plan.sequence.width, plan.sequence.height):
+        if not (w and h):
+            continue
+        if (w, h) != (plan.sequence.width, plan.sequence.height):
+            if _same_aspect(w, h, plan.sequence.width, plan.sequence.height):
+                scaled_only += 1      # e.g. 4K into 1080p: the same picture, scaled; nothing to reframe
+                continue
             res_off.append(c.clip_instance_id)
             orient_off += a.orientation not in (None, "square") and a.orientation != ("portrait" if plan.sequence.height > plan.sequence.width else "landscape")
     use["mixed_fps"].ids, use["mixed_resolution"].ids = fps_off, res_off
     use["mixed_fps"].count = len(fps_off)
     use["mixed_fps"].data["clips"] = fps_off[:MAX_LISTED]
     use["mixed_resolution"].count = len(res_off)
-    use["mixed_resolution"].data.update(clips=res_off[:MAX_LISTED], orientation_differs=orient_off)
+    use["mixed_resolution"].data.update(clips=res_off[:MAX_LISTED], orientation_differs=orient_off, scaled_same_aspect=scaled_only)
     return use
 
 
@@ -184,7 +206,13 @@ def usable_finish_checks(doc: Mapping[str, Any] | None, xml_sha256: str | None) 
         info["reason"] = f"the report is not a completed run (status {doc.get('status')!r}{', dry run' if doc.get('dry_run') else ''})"
         return {}, info
     recorded = ((doc.get("inputs") or {}).get("timeline_xml_sha256"))
-    if xml_sha256 and recorded and recorded != xml_sha256:
+    if not xml_sha256:
+        info["reason"] = "timeline.xml is missing or unreadable here, so the report cannot be tied to this timeline"
+        return {}, info
+    if not recorded:
+        info["reason"] = "the report does not record the hash of the timeline.xml it was made from, so it cannot be tied to this timeline"
+        return {}, info
+    if recorded != xml_sha256:
         info["reason"] = "the report was made from a different timeline.xml (this one was exported again since); run resolve-finish again"
         return {}, info
     info["used"] = True
@@ -207,6 +235,8 @@ def _filmcraft(i: CompatInputs, feature: str, usage: Usage) -> dict[str, Any]:
     elif i.verified_after_reopen is False:
         return {"status": "unsupported", "capability": cap, "detail": "the saved project did NOT read back equal to the plan after reopening"}
     parts.extend(usage.notes)
+    if feature == X.F_DISSOLVES and usage.ids:
+        return {"status": "downgraded", "capability": cap, "detail": "; ".join(parts)}
     return {"status": "supported", "capability": cap, "detail": "; ".join(parts)}
 
 
@@ -229,7 +259,12 @@ def _xml_block(feature: str, usage: Usage, tl: Fcp7Timeline | None, rt: X.RoundT
         matched = max(0, usage.count - len(mism)) if feature == X.F_MUTE else 0
     else:
         expected, matched = rt.expected.get(feature, 0), rt.matched.get(feature, 0)
-    return {"status": "mismatch" if mism else "ok", "expected": expected, "matched": matched,
+    status = "mismatch" if mism else "ok"
+    if feature == X.F_DISSOLVES and usage.ids:
+        expected = usage.count      # what the plan asked for, not what the engine was told to place
+        if not mism:
+            status = "downgraded"
+    return {"status": status, "expected": expected, "matched": matched,
             "mismatches": [m.to_dict() for m in mism[:MAX_LISTED]], "mismatch_count": len(mism)}
 
 
@@ -263,15 +298,28 @@ def _resolve_block(feature: str, usage: Usage, finish: Mapping[str, Mapping[str,
     return block
 
 
-def _verdict(feature: str, fc: Mapping[str, Any], xml: Mapping[str, Any], rs: Mapping[str, Any]) -> tuple[str, str, str | None]:
+def _downgrade_instruction(usage: Usage) -> str:
+    n, total = len(usage.ids), usage.count
+    clips = ", ".join(usage.ids[:MAX_LISTED]) + (" ..." if len(usage.ids) > MAX_LISTED else "")
+    return (f"{n} of the {total} dissolve(s) in the plan were placed as hard cuts, so the handoff has a hard cut where the plan has a dissolve "
+            f"(incoming clip(s): {clips}; see Mapping warnings in handoff_report.md). In Resolve, add a cross dissolve on V1 at each of those cuts "
+            "(the planned lengths are in edit_plan.json).")
+
+
+def _verdict(feature: str, fc: Mapping[str, Any], xml: Mapping[str, Any], rs: Mapping[str, Any],
+             usage: Usage | None = None) -> tuple[str, str, str | None]:
     if fc["status"] == "unsupported":
         return "unsupported", fc["detail"], None
     if xml["status"] == "mismatch":
         n = xml.get("mismatch_count", len(xml.get("mismatches", [])))
         return "unsupported", f"the exported XML does not carry it as planned ({n} mismatch(es))", None
-    if xml["status"] in ("not_exported", "unreadable"):
-        return "unsupported", ("FCP7 XML was not exported, so nothing could be checked" if xml["status"] == "not_exported"
-                               else "the exported FCP7 XML could not be read"), None
+    if xml["status"] == "unreadable":
+        return "unsupported", "the exported FCP7 XML could not be read", None
+    if feature == X.F_DISSOLVES and usage is not None and usage.ids:
+        # asked != placed: the XML (matching what was sent to FilmCraft) holds hard cuts, so it does not carry the plan's dissolves
+        return "manual", f"{len(usage.ids)} of {usage.count} planned dissolve(s) became hard cuts in the handoff", _downgrade_instruction(usage)
+    if xml["status"] == "not_exported":
+        return "unknown", "FCP7 XML was not exported, so the XML could not be checked (nothing is known to be wrong)", None
     if rs["status"] == "failed":
         return "manual", rs["summary"], rs.get("manual") or RE.RESOLVE_FINISH
     if rs.get("manual"):
@@ -308,11 +356,11 @@ def build_compatibility_report(i: CompatInputs) -> dict[str, Any]:
         fc = _filmcraft(i, feature, u)
         xb = _xml_block(feature, u, tl, rt, xml_state)
         rs = _resolve_block(feature, u, finish, finish_info)
-        verdict, reason, instruction = _verdict(feature, fc, xb, rs)
+        verdict, reason, instruction = _verdict(feature, fc, xb, rs, u)
         rows.append({"feature": feature, "label": label, "plan_count": u.count, "details": u.data, "notes": u.notes,
                      "filmcraft": fc, "xml": xb, "resolve": rs, "verdict": verdict, "reason": reason, "instruction": instruction})
     counts = {v: sum(1 for r in rows if r["verdict"] == v) for v in VERDICTS}
-    overall = "problem" if counts["unsupported"] else "attention" if counts["manual"] else "ok"
+    overall = "problem" if counts["unsupported"] else "attention" if counts["manual"] else "unknown" if counts["unknown"] else "ok"
     return {
         "schema_version": SCHEMA_VERSION, "generated_at": utc_now_iso(), "tool_version": i.tool_version,
         "plan_hash": i.plan.plan_hash, "filmcraft_version": i.filmcraft_version,
@@ -346,7 +394,8 @@ def render_compatibility_markdown(doc: Mapping[str, Any]) -> str:
     ev, xml, fin = doc["resolve_evidence"], doc["xml"], doc["resolve_finish_report"]
     c = doc["counts"]
     L = ["# Handoff compatibility report", "",
-         f"- Overall: **{doc['overall']}** ({c['verified']} verified, {c['expected']} expected, {c['manual']} manual, {c['unsupported']} unsupported)",
+         f"- Overall: **{doc['overall']}** ({c['verified']} verified, {c['expected']} expected, {c['manual']} manual, {c['unsupported']} unsupported"
+         + (f", {c['unknown']} unknown" if c.get("unknown") else "") + ")",
          f"- Generated {doc['generated_at']} by trip-vlog {doc.get('tool_version') or '?'}; FilmCraft {doc.get('filmcraft_version') or 'unknown'}; "
          f"plan `{str(doc.get('plan_hash') or '')[:16]}`",
          f"- Recorded Resolve evidence (table v{ev['evidence_version']}): {ev['resolve']['product']} {ev['resolve']['version']} on {ev['resolve']['os']}, "
@@ -371,6 +420,10 @@ def render_compatibility_markdown(doc: Mapping[str, Any]) -> str:
     manual = [r for r in doc["features"] if r["verdict"] == "manual"]
     if manual:
         L += ["## Manual steps in Resolve", ""] + [f"- **{_esc(r['label'])}**: {_esc(r['instruction'])}" for r in manual] + [""]
+    unk = [r for r in doc["features"] if r["verdict"] == "unknown"]
+    if unk:
+        L += ["## Not checked", "", "The FCP7 XML was not exported, so the XML column could not be filled; these rows are `unknown`, not `unsupported`. "
+              "Export `fcp7_xml` (filmcraft.interchange_formats) and run `trip-vlog resume` to check them.", ""] + [f"- {_esc(r['label'])}" for r in unk] + [""]
     bad = [r for r in doc["features"] if r["verdict"] == "unsupported"]
     if bad:
         L += ["## Unsupported or not carried", ""] + [f"- **{_esc(r['label'])}**: {_esc(r['reason'])}" for r in bad] + [""]

@@ -626,12 +626,14 @@ with Python 3.11 and 3.13. Only Linux has been exercised locally so far; treat W
 ### Handoff compatibility report
 
 `resolve_handoff/compatibility_report.json` / `.md` (written by the `handoff` stage; `status` and `handoff_report.md` point to it) has one row per feature the plan
-actually uses (frame rate/size, hard cuts, dissolves, stills, overlays on V2, titles, markers, clip gain, muted clips, music track, mixed source frame rate, mixed
-size/orientation, speed changes if any XML item has them): the count in the plan; whether FilmCraft supports it (capability snapshot of the workspace and the
+actually uses (frame rate/size, hard cuts, dissolves, stills, overlays on V2, titles, markers, clip gain, muted clips, music track, mixed source frame rate, a different
+aspect ratio/orientation (plain scaling, e.g. 4K into 1080p, is not flagged), speed changes if any XML item has them): the count in the plan; whether FilmCraft supports it (capability snapshot of the workspace and the
 read-back after reopening); whether the exported `timeline.xml` really contains it (the XML is parsed and every clip's record and source in/out, track, path,
-gain, title, transition and marker is compared with the timeline sent to FilmCraft **at frame precision**, any mismatch is listed); and the **recorded** Resolve
+gain, title, transition and marker is compared with the timeline sent to FilmCraft **at frame precision, tolerance 0**, any mismatch is listed; a dissolve the
+engine could only place as a hard cut counts as asked-but-missing); and the **recorded** Resolve
 result. Verdict per feature: `verified` (FilmCraft + XML ok and Resolve recorded/measured to import it), `expected` (Resolve unverified or partly recorded),
-`manual` (a step in Resolve is needed; the instruction is given) or `unsupported` (FilmCraft cannot, or the XML does not carry it as planned; the handoff stage then
+`manual` (a step in Resolve is needed; the instruction is given; a dissolve the engine downgraded to a hard cut is always `manual`: add it in Resolve), `unknown` (no FCP7 XML was exported,
+so nothing could be checked; the overall result is then `unknown`, not `problem`) or `unsupported` (FilmCraft cannot, or the XML does not carry it as planned; the handoff stage then
 ends `partial`). The recorded results are a static, versioned table (`trip_vlog/handoff/resolve_evidence.py`) holding only what DESIGN §15.5/§15.6 record on
-Resolve Studio 21.1.1.10 (Windows); everything else is `unverified`. If a real `resolve_finish_report.json` of this very `timeline.xml` exists, its per-check
+Resolve Studio 21.1.1.10 (Windows); everything else is `unverified`. If a real `resolve_finish_report.json` of this very `timeline.xml` exists (it must record the XML's sha256; otherwise it is ignored), its per-check
 results replace the table for the features those checks cover; run `trip-vlog resume` after `resolve-finish` to refresh the report.

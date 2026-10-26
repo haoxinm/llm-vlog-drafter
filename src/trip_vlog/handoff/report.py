@@ -88,7 +88,7 @@ def render_handoff_report(i: HandoffReportInputs) -> str:
               f"See **`compatibility_report.md`** / `compatibility_report.json` in this folder: per feature the plan uses, what FilmCraft supports, "
               f"whether the exported FCP7 XML carries it (checked by parsing `timeline.xml` against the plan), and the RECORDED Resolve result. "
               f"Overall **{cp['overall']}**: {cp['verified']} verified, {cp['expected']} expected, {cp['manual']} needing a manual step, "
-              f"{cp['unsupported']} unsupported. XML round trip: "
+              f"{cp['unsupported']} unsupported" + (f", {cp['unknown']} unknown (not checked)" if cp.get("unknown") else "") + ". XML round trip: "
               + {True: "identical to the plan.", False: f"{cp['xml_mismatches']} mismatch(es) (listed there).",
                  None: f"not checked ({cp['xml_status'].replace('_', ' ')})."}[cp["xml_roundtrip_ok"]]
               + (" A real resolve-finish run was used for the Resolve column." if cp.get("finish_report_used") else ""), ""]

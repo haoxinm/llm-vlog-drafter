@@ -236,7 +236,8 @@ def _compat_line(summary: dict, ws: Path) -> str:
     cp = summary.get("compatibility")
     if not cp:
         return ""
-    return (f"compatibility: {cp['overall']} ({cp['verified']} verified, {cp['expected']} expected, {cp['manual']} manual, {cp['unsupported']} unsupported); "
+    return (f"compatibility: {cp['overall']} ({cp['verified']} verified, {cp['expected']} expected, {cp['manual']} manual, {cp['unsupported']} unsupported"
+            + (f", {cp['unknown']} unknown" if cp.get("unknown") else "") + "); "
             f"XML round trip {'identical' if cp.get('xml_roundtrip_ok') else 'NOT checked' if cp.get('xml_roundtrip_ok') is None else 'has mismatches'}"
             f"\n  report: {ws / 'resolve_handoff' / 'compatibility_report.md'}")
 
