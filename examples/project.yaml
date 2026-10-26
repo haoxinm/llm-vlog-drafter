@@ -127,6 +127,7 @@ revise:
   max_tokens: 4000               # upper bound on the reply (also capped by the endpoint's max_tokens)
   confirm_duration_change_pct: 15.0          # a change of the film's length by more than this share ...
   confirm_duration_change_min_seconds: 10.0  # ... and at least this many seconds needs confirmation
+  confirm_change_pct_any: 30.0   # ... or by more than this share whatever the seconds (moving the target duration or waiving must_include always needs confirmation)
   confirm_removed_clips: 3       # removing more clips than this needs confirmation (a removed scene counts all its clips)
   confirm_scene_removal: true    # removing a whole scene always needs confirmation
   max_duration_change_pct: 50.0  # hard bound: operations that change the length by more than this are refused

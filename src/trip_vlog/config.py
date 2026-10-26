@@ -548,9 +548,11 @@ class ReviseConfig(_Model):
     max_request_chars: int = Field(2000, ge=20, le=20000)   # longer requests are refused (they are not "a revision")
     max_ops: int = Field(12, ge=1, le=50)          # operations kept from one reply; more are dropped and the revision then needs confirmation
     max_tokens: int = Field(4000, ge=256)          # upper bound on the reply (also capped by the endpoint's max_tokens)
-    # confirmation thresholds (any one makes the revision "destructive": it is proposed, not applied)
+    # confirmation thresholds (any one makes the revision "destructive": it is proposed, not applied). A revision that moves the target duration or waives a
+    # must_include requirement always needs confirmation as well
     confirm_duration_change_pct: float = Field(15.0, ge=0, le=100)      # the film gets longer or shorter by more than this share of its length ...
     confirm_duration_change_min_seconds: float = Field(10.0, ge=0, le=3600)   # ... and by at least this many seconds
+    confirm_change_pct_any: float = Field(30.0, ge=0, le=100)           # ... or by more than this share, however short the film is (the seconds floor does not apply)
     confirm_removed_clips: int = Field(3, ge=1, le=1000)                # more clips than this leave the film (a removed scene counts all its clips)
     confirm_scene_removal: bool = True             # removing a whole scene always needs confirmation
     # hard bound: a revision may not move the total away from the current length by more than this share (such operations are refused)

@@ -135,13 +135,13 @@ def test_the_policy_thresholds():
     assert not d.needs_confirmation
     d, _ = decision(p, [{"op": "remove_scene", "scene_id": "scene_002"}], confirm_scene_removal=True)
     assert d.needs_confirmation and any("whole scene" in r for r in d.destructive)
-    d, _ = decision(p, [{"op": "remove_scene", "scene_id": "scene_002"}], confirm_scene_removal=False, confirm_duration_change_pct=100)
+    d, _ = decision(p, [{"op": "remove_scene", "scene_id": "scene_002"}], confirm_scene_removal=False, confirm_duration_change_pct=100, confirm_change_pct_any=100)
     assert not d.needs_confirmation
     d, _ = decision(p, [{"op": "shorten_scene", "scene_id": "scene_001", "shorten_by_seconds": 3}], confirm_duration_change_min_seconds=5)
     assert not d.needs_confirmation                        # 16% but only 3 s
     d, _ = decision(p, [{"op": "shorten_scene", "scene_id": "scene_001", "shorten_by_seconds": 3}], confirm_duration_change_min_seconds=2)
     assert d.needs_confirmation and "-3.0 s (-16%)" in d.destructive[0]
-    d, _ = decision(p, [{"op": "remove_clip", "clip_instance_id": "c1"}, {"op": "remove_clip", "clip_instance_id": "c2"}], confirm_removed_clips=1, confirm_duration_change_pct=100)
+    d, _ = decision(p, [{"op": "remove_clip", "clip_instance_id": "c1"}, {"op": "remove_clip", "clip_instance_id": "c2"}], confirm_removed_clips=1, confirm_duration_change_pct=100, confirm_change_pct_any=100)
     assert d.needs_confirmation and "removes 2 clips (more than 1)" in d.destructive[0]
     d, _ = decision(p, [{"op": "trim_clip", "clip_instance_id": "c1", "duration_seconds": 4}], parsed_kw={"model_destructive": False, "model_destructive_reason": ""})
     d2 = rev.decide(rev.Parsed("", [], [], [{"question": "Which?", "about": "", "assumption": None}], [], False, ""), p, run_ops(p, []), [], rev.Policy())
@@ -152,7 +152,7 @@ def test_required_content_is_found_by_reference_and_never_named():
     p = plan()
     must = ["day2/p.mp4"]
     assert rev.required_status(p, CAT, must) == {"day2/p.mp4": True}
-    d, res = decision(p, [{"op": "remove_clip", "clip_instance_id": "c4"}], must=must, confirm_duration_change_pct=100)
+    d, res = decision(p, [{"op": "remove_clip", "clip_instance_id": "c4"}], must=must, confirm_duration_change_pct=100, confirm_change_pct_any=100)
     assert d.needs_confirmation and d.destructive == ["removes content that must_include requires (required item 1)"]
     assert rev.lost_required(p, res.edit, CAT, must) == ["day2/p.mp4"] and rev.lost_required(p, res.edit, CAT, ["day9/none.mp4"]) == []
 

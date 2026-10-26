@@ -612,6 +612,8 @@ def apply_ops(edit: EditPlan, ops: Sequence[PlanOp | Mapping[str, Any]], ctx: Pl
             res.refused.append(RefusedOp(op, "not_honoured", why))
             continue
         res.warnings += [w for w in _new_findings(er, base_warnings) if w not in res.warnings]
+        if op.op != "set_transition":      # the resolver turns a dissolve into a cut when its neighbours changed (clip moved to the start, handle too short)
+            notes = [*notes, *_dropped_dissolves(cur_edit, final)]
         cur_sel, cur_edit = trial, final
         res.applied.append(AppliedOp(op, notes))
     if atomic and res.refused:
@@ -621,6 +623,13 @@ def apply_ops(edit: EditPlan, ops: Sequence[PlanOp | Mapping[str, Any]], ctx: Pl
     if res.applied:
         res.diff = diff_plans(edit, cur_edit)
     return res
+
+
+def _dropped_dissolves(before: EditPlan, after: EditPlan) -> list[str]:
+    """Notes for clips that had a dissolve into them and only a cut now (the operation changed what surrounds them; the resolver cannot keep it)."""
+    was = {c.clip_instance_id: c.transition_in.type for s in before.scenes for c in s.clips}
+    return [f"transition dropped: the dissolve into {c.clip_instance_id} became a cut (its neighbours changed)"
+            for s in after.scenes for c in s.clips if was.get(c.clip_instance_id) == "dissolve" and c.transition_in.type != "dissolve"]
 
 
 def _first(report: ValidationReport) -> str:

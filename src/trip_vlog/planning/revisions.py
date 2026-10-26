@@ -273,6 +273,7 @@ def new_target(parent: EditPlan, result: ApplyResult, effective: ValidationSetti
 class Policy:
     confirm_duration_change_pct: float = 15.0
     confirm_duration_change_min_seconds: float = 10.0
+    confirm_change_pct_any: float = 30.0
     confirm_removed_clips: int = 3
     confirm_scene_removal: bool = True
     auto_apply: bool = True
@@ -281,7 +282,7 @@ class Policy:
     @classmethod
     def from_config(cls, cfg: Any) -> "Policy":
         r = cfg.revise
-        return cls(r.confirm_duration_change_pct, r.confirm_duration_change_min_seconds, r.confirm_removed_clips, r.confirm_scene_removal, r.auto_apply,
+        return cls(r.confirm_duration_change_pct, r.confirm_duration_change_min_seconds, r.confirm_change_pct_any, r.confirm_removed_clips, r.confirm_scene_removal, r.auto_apply,
                    bool(cfg.workflow.plan_review))
 
 
@@ -301,8 +302,11 @@ def removed_clip_count(parent: EditPlan, result: ApplyResult) -> int:
     return sum(1 for s in parent.scenes for c in s.clips if c.clip_instance_id not in new_ids)
 
 
-def decide(parsed: Parsed, parent: EditPlan, result: ApplyResult, lost: Sequence[str], policy: Policy, must_include: Sequence[str] = ()) -> Decision:
-    """Whether the revision may be applied on its own. Thresholds are the configured ones; the model's own `destructive` and its questions count too."""
+def decide(parsed: Parsed, parent: EditPlan, result: ApplyResult, lost: Sequence[str], policy: Policy, must_include: Sequence[str] = (),
+           target: float | None = None, refused: Sequence[Any] = ()) -> Decision:
+    """Whether the revision may be applied on its own. Thresholds are the configured ones; the model's own `destructive` and its questions count too.
+    ``target``: the new target duration the revision would record (moving it always needs confirmation, like waiving a must_include requirement).
+    ``refused``: operations that could not be made; applying only the rest on its own would not be what was asked, so it is proposed (listing them)."""
     amb = [a["question"] for a in parsed.ambiguous]
     destructive: list[str] = []
     applied = [a.op.op for a in result.applied]
@@ -314,8 +318,11 @@ def decide(parsed: Parsed, parent: EditPlan, result: ApplyResult, lost: Sequence
         destructive.append(f"removes {n_removed} clips (more than {policy.confirm_removed_clips})")
     total0, total1 = float(parent.total_duration_seconds), float(result.edit.total_duration_seconds)
     delta = abs(total1 - total0)
-    if total0 > 0 and delta > total0 * policy.confirm_duration_change_pct / 100 and delta >= policy.confirm_duration_change_min_seconds:
+    pct = delta / total0 * 100 if total0 > 0 else 0.0
+    if total0 > 0 and ((pct > policy.confirm_duration_change_pct and delta >= policy.confirm_duration_change_min_seconds) or pct > policy.confirm_change_pct_any):
         destructive.append(f"changes the length of the film by {total1 - total0:+.1f} s ({(total1 - total0) / total0 * 100:+.0f}%)")
+    if target is not None:
+        destructive.append(f"moves the target duration of the film to {target:g} s")
     if lost:
         order = {r: n for n, r in enumerate(dict.fromkeys(must_include), 1)}      # the numbering the validators use: a reference itself is never shown to a model
         destructive.append("removes content that must_include requires (" + ", ".join(required_label(order.get(r, 0)) for r in lost) + ")")
@@ -323,7 +330,11 @@ def decide(parsed: Parsed, parent: EditPlan, result: ApplyResult, lost: Sequence
         destructive.append(f"the request needs more than the limit of {len(parsed.ops)} operations; the rest was dropped")
     if parsed.model_destructive:
         destructive.append("the model considers it destructive" + (f": {parsed.model_destructive_reason}" if parsed.model_destructive_reason else ""))
-    reasons = [*(f"unclear: {q}" for q in amb), *destructive]
+    partial = []
+    if refused and result.applied:
+        why = "; ".join(str(getattr(r, "message", r)) for r in list(refused)[:2])
+        partial.append(f"{len(refused)} of the requested change(s) could not be made ({why}); only part of the request would be applied")
+    reasons = [*(f"unclear: {q}" for q in amb), *destructive, *partial]
     if not reasons and policy.plan_review:
         reasons.append("workflow.plan_review is true: every revision waits for approval")
     elif not reasons and not policy.auto_apply:
@@ -366,6 +377,9 @@ def render_markdown(doc: Mapping[str, Any]) -> str:
         o = a["op"]
         L.append(f"- {'would be applied' if doc.get('status') in ('proposed', 'dry_run') else 'applied'}: {describe(o)}" + (f" ({o['reason']})" if o.get("reason") else "")
                  + (f" [for: {a['request_part']}]" if a.get("request_part") else ""))
+        for note in a.get("notes") or []:
+            if str(note).startswith("transition dropped"):
+                L.append(f"    - {note}")
     for r in refused:
         L.append(f"- refused: {describe(r['op']) if r.get('op') and r['op'].get('op') else 'malformed change'}: {r['message']}")
     if not ops and not refused:

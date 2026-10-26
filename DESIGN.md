@@ -1375,8 +1375,9 @@ versioned project updates, - rerender and change summary.
 `planning/plan_diff.py` (the critic's seven operations plus `add_moment`, `remove_scene`, `move_scene`); code validates
 every operation through the resolver and validators and refuses what does not hold. Per §16, an ambiguous or
 destructive revision is never applied on its own: thresholds in `revise.*` (a removed scene, more than N removed clips,
-a large change of length, removed must_include content, a model question) make it a `proposed` revision that stops with exit
-code 3 until `trip-vlog approve --revision`; `resume` or `revise --apply` then applies exactly the approved operations,
+a large change of length (a share above `revise.confirm_change_pct_any` whatever the seconds), a moved target duration, removed must_include
+content, a refused operation next to valid ones, a model question) make it a `proposed` revision that stops with exit
+code 3 until `trip-vlog approve --revision` (a request that only asks a question exits 5: nothing to approve); `resume` or `revise --apply` then applies exactly the approved operations,
 and nothing is applied when the plan changed since. An applied revision is a new plan version (approval mode `revision`,
 bound to the new hash with `parent_plan_hash`), a new versioned FilmCraft project, a re-rendered preview, a re-run QC
 and a change summary (`plans/revisions/revise_rNN.md/.json`); QC regressions are reported, not reverted. The round
