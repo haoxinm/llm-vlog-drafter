@@ -1,11 +1,13 @@
 """Execution journal and the versioned, idempotent project build (DESIGN §12.2).
 
 Policy: *versioned rebuilds*. ``build_project`` writes ``filmcraft/<ProjectName>_vNNN.fcproj``.
-  * Same spec hash, same media, and the latest version's journal says it completed (and the file on disk is
-    still the one that was verified) -> no-op: FilmCraft is not even started, nothing is appended anywhere.
-  * Different spec, changed media, or a prior run that failed / was interrupted -> a NEW version; earlier
+  * Same spec hash, same media, and the newest COMPLETED version's journal says it completed (and the file on disk is
+    still the one that was verified) -> no-op (a failed attempt after it does not matter): FilmCraft is not even started, nothing is appended anywhere.
+  * Different spec, changed media, or no completed run -> a NEW version; earlier
     versions are never touched. A plan is therefore never appended to an existing timeline.
-The journal (``filmcraft/execution_journal.json``) is rewritten atomically after every checkpoint.
+The journal (``filmcraft/execution_journal.json``) is rewritten atomically after every checkpoint. Each run records the pid, host and start time of the
+process building it; every read-modify-write of the journal happens under a short lock file (journal_lock.py) and reloads the journal first, so two
+processes never overwrite each other's runs, and a build still running in another live process is never marked abandoned (a second build is refused).
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from trip_vlog.filmcraft.errors import CommandError, FilmCraftError, VerificationFailed
+from trip_vlog.filmcraft.journal_lock import journal_lock, owner_is_live, this_host
 from trip_vlog.filmcraft.inspect import VerificationReport, verify_against_spec
 from trip_vlog.filmcraft.mappings import ClipMap, MediaMap
 from trip_vlog.filmcraft.timeline_spec import TimelineSpec, ensure_valid
@@ -114,12 +117,12 @@ def next_version(doc: dict[str, Any], fc_dir: Path, project_name: str) -> int:
 
 
 def mark_abandoned(doc: dict[str, Any]) -> list[int]:
-    """A run still marked ``running`` when a new build starts was cut off (the process was killed, the machine lost power): mark it ``failed``
-    (``abandoned``) so it is never taken for the current project. Its files are not touched. Returns the versions marked. One trip-vlog
-    process per workspace is supported, so nothing else can be building."""
+    """A run still marked ``running`` whose process is gone (same host, pid not alive; another host: older than the timeout; no pid recorded: an older
+    version's run) was cut off (killed, power loss): mark it ``failed`` (``abandoned``) so it is never taken for the current project. Its files are not
+    touched. A run whose process is alive is left alone. Returns the versions marked."""
     out: list[int] = []
     for r in doc["runs"]:
-        if r.get("status") == "running":
+        if r.get("status") == "running" and not owner_is_live(r.get("pid"), r.get("host"), r.get("started_at")):
             r["status"] = "failed"
             r["abandoned"] = True
             r["finished_at"] = r.get("finished_at") or utc_now_iso()
@@ -127,6 +130,11 @@ def mark_abandoned(doc: dict[str, Any]) -> list[int]:
                                                "message": "the build did not finish (the process stopped before it could record a result)"})
             out.append(r["version"])
     return out
+
+
+def live_builds(doc: dict[str, Any]) -> list[dict[str, Any]]:
+    """Runs still ``running`` (after mark_abandoned): a build of another live process."""
+    return [r for r in doc["runs"] if r.get("status") == "running"]
 
 
 def failed_builds(doc: dict[str, Any], project_name: str) -> list[dict[str, Any]]:
@@ -152,6 +160,13 @@ def latest_complete_project(adapter: "FilmCraftAdapter") -> Path | None:
     return None
 
 
+def _newest_complete(doc: dict[str, Any], project_name: str) -> dict[str, Any] | None:
+    for r in reversed(_runs_for(doc, project_name)):
+        if r.get("status") == "complete":
+            return r
+    return None
+
+
 def _is_noop(adapter: "FilmCraftAdapter", latest: dict[str, Any] | None, spec_hash: str, sig: dict[str, list[int]]) -> bool:
     if not latest or latest.get("status") != "complete" or latest.get("spec_hash") != spec_hash:
         return False
@@ -168,6 +183,21 @@ def _is_noop(adapter: "FilmCraftAdapter", latest: dict[str, Any] | None, spec_ha
 # ----------------------------------------------------------------------------
 
 
+def _new_run(adapter: "FilmCraftAdapter", spec: TimelineSpec, cmap: Any, project_name: str, version: int, project_path: Path, spec_copy: Path,
+             spec_hash: str, sig: dict[str, list[int]]) -> dict[str, Any]:
+    return {
+        "version": version, "project_name": project_name, "status": "running", "pid": os.getpid(), "host": this_host(),
+        "project_path": project_path.relative_to(adapter.workspace).as_posix(),
+        "spec_hash": spec_hash, "spec_file": spec_copy.relative_to(adapter.workspace).as_posix(),
+        "spec_summary": {"placements": len(spec.placements), "titles": len(spec.titles), "markers": len(spec.markers),
+                         "tracks": list(spec.tracks), "end_frame": spec.end_frame, "fps": str(spec.fps)},
+        "filmcraft_version": cmap.version, "started_at": utc_now_iso(), "finished_at": None,
+        "media_signature": sig, "media_mapping": {}, "clip_mapping": {}, "sequence_id": None,
+        "completed_ops": [], "last_checkpoint": None, "errors": [], "warnings": [],
+        "project_sha256": None, "verified_after_reopen": False,
+    }
+
+
 def run_build(adapter: "FilmCraftAdapter", spec: TimelineSpec, project_name: str, *, force_new_version: bool = False) -> BuildResult:
     from trip_vlog.filmcraft.adapter import SequenceSettings
 
@@ -180,16 +210,30 @@ def run_build(adapter: "FilmCraftAdapter", spec: TimelineSpec, project_name: str
     fc_dir = adapter.fc_dir
     fc_dir.mkdir(parents=True, exist_ok=True)
     jpath = adapter.journal_path
-    doc = load_journal(jpath)
-    if mark_abandoned(doc):
-        save_journal(jpath, doc)
     spec_hash = spec.spec_hash()
     sig = media_signature(spec.asset_paths)
-    runs = _runs_for(doc, project_name)
-    latest = runs[-1] if runs else None
+    noop_run: dict[str, Any] | None = None
+    with journal_lock(jpath):
+        doc = load_journal(jpath)
+        if mark_abandoned(doc):
+            save_journal(jpath, doc)
+        latest = _newest_complete(doc, project_name)
+        if not force_new_version and _is_noop(adapter, latest, spec_hash, sig):
+            noop_run = latest
+        elif (other := live_builds(doc)):
+            o = other[0]
+            raise FilmCraftError(f"another build is running on this workspace (version {o.get('version')}, pid {o.get('pid')} on {o.get('host')}, started {o.get('started_at')}); "
+                                 f"wait for it to finish, then run the command again. If that process is gone, its run is marked interrupted automatically")
+        else:
+            version = next_version(doc, fc_dir, project_name)
+            project_path = fc_dir / project_filename(project_name, version)
+            spec_copy = fc_dir / f"{project_path.stem}.timeline_spec.json"
+            run = _new_run(adapter, spec, cmap, project_name, version, project_path, spec_copy, spec_hash, sig)
+            doc["runs"].append(run)
+            save_journal(jpath, doc)       # the version number is reserved from here on
 
-    if not force_new_version and _is_noop(adapter, latest, spec_hash, sig):
-        assert latest is not None
+    if noop_run is not None:
+        latest = noop_run
         adapter.project_path = adapter.workspace / latest["project_path"]
         adapter.sequence_id = latest.get("sequence_id")
         adapter.spec = spec
@@ -197,25 +241,18 @@ def run_build(adapter: "FilmCraftAdapter", spec: TimelineSpec, project_name: str
                            MediaMap.from_dict(latest.get("media_mapping", {})), ClipMap.from_dict(latest.get("clip_mapping", {})),
                            list(latest.get("warnings", [])))
 
-    version = next_version(doc, fc_dir, project_name)
-    project_path = fc_dir / project_filename(project_name, version)
-    spec_copy = fc_dir / f"{project_path.stem}.timeline_spec.json"
-    run: dict[str, Any] = {
-        "version": version, "project_name": project_name, "status": "running",
-        "project_path": project_path.relative_to(adapter.workspace).as_posix(),
-        "spec_hash": spec_hash, "spec_file": spec_copy.relative_to(adapter.workspace).as_posix(),
-        "spec_summary": {"placements": len(spec.placements), "titles": len(spec.titles), "markers": len(spec.markers),
-                         "tracks": list(spec.tracks), "end_frame": spec.end_frame, "fps": str(spec.fps)},
-        "filmcraft_version": cmap.version, "started_at": utc_now_iso(), "finished_at": None,
-        "media_signature": sig, "media_mapping": {}, "clip_mapping": {}, "sequence_id": None,
-        "completed_ops": [], "last_checkpoint": None, "errors": [], "warnings": [],
-        "project_sha256": None, "verified_after_reopen": False,
-    }
-    doc["runs"].append(run)
     current = {"op": "start"}
 
     def flush() -> None:
-        save_journal(jpath, doc)
+        with journal_lock(jpath):
+            cur = load_journal(jpath)          # reload: another process may have written its own runs since
+            for i, r in enumerate(cur["runs"]):
+                if r.get("version") == version and r.get("project_name") == project_name:
+                    cur["runs"][i] = run
+                    break
+            else:
+                cur["runs"].append(run)
+            save_journal(jpath, cur)
 
     def done(op: str, checkpoint: str | None = None) -> None:
         run["completed_ops"].append(op)
@@ -223,7 +260,6 @@ def run_build(adapter: "FilmCraftAdapter", spec: TimelineSpec, project_name: str
             run["last_checkpoint"] = checkpoint
         flush()
 
-    flush()
     try:
         atomic_write_json(spec_copy, spec.to_dict())
         current["op"] = "create_project"

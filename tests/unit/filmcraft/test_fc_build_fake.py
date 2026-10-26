@@ -374,3 +374,119 @@ def test_a_build_that_was_cut_off_is_marked_failed_by_the_next_build(fc):
     runs = journal(ws)["runs"]
     assert runs[0]["status"] == "failed" and runs[0]["abandoned"] and runs[0]["errors"][-1]["type"] == "Interrupted" and runs[1]["status"] == "complete"
     assert (ws / "filmcraft" / "Trip Vlog Draft_v001.fcproj").is_file()
+
+
+# ---- concurrency: pid/host in the journal, abandon only dead builds, journal lock ------------------------------------------
+
+def _dead_pid() -> int:
+    import subprocess
+    import sys
+
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait()
+    return p.pid
+
+
+def _set_running(ws, **fields):
+    jp = ws / "filmcraft" / "execution_journal.json"
+    j = json.loads(jp.read_text(encoding="utf-8"))
+    j["runs"][0].update(status="running", finished_at=None, project_sha256=None, **fields)
+    jp.write_text(json.dumps(j), encoding="utf-8")
+
+
+def test_runs_record_pid_host_and_start_time(fc):
+    from trip_vlog.filmcraft.journal_lock import this_host
+
+    adapter, media, ws = fc
+    adapter.build_project(fcsupport.sample_spec(media))
+    run = journal(ws)["runs"][0]
+    assert run["pid"] == os.getpid() and run["host"] == this_host() and run["started_at"]
+    assert not (ws / "filmcraft" / "execution_journal.lock").exists(), "the lock is released after every journal update"
+
+
+def test_a_build_running_in_a_live_process_is_not_abandoned_and_blocks_a_second_build(fc):
+    from trip_vlog.filmcraft.journal_lock import this_host
+    from trip_vlog.logging_utils import utc_now_iso
+
+    adapter, media, ws = fc
+    spec = fcsupport.sample_spec(media)
+    adapter.build_project(spec)
+    _set_running(ws, pid=os.getppid(), host=this_host(), started_at=utc_now_iso())     # the parent process is alive and is not us
+    with pytest.raises(FilmCraftError, match="another build is running"):
+        adapter.build_project(fcsupport.sample_spec(media, end_marker=90))
+    run = journal(ws)["runs"][0]
+    assert run["status"] == "running" and not run.get("abandoned") and len(journal(ws)["runs"]) == 1
+
+
+def test_a_build_of_a_dead_process_or_a_long_gone_other_host_is_abandoned(fc):
+    from trip_vlog.filmcraft.journal_lock import this_host
+    from trip_vlog.logging_utils import utc_now_iso
+
+    adapter, media, ws = fc
+    spec = fcsupport.sample_spec(media)
+    adapter.build_project(spec)
+    _set_running(ws, pid=_dead_pid(), host=this_host(), started_at=utc_now_iso())
+    assert adapter.build_project(spec).version == 2
+    assert journal(ws)["runs"][0]["abandoned"]
+    _set_running(ws, pid=4242, host="some-other-host", started_at="2001-01-01T00:00:00Z")      # older than the timeout: taken for dead
+    assert adapter.build_project(spec, force_new_version=True).version == 3
+    assert journal(ws)["runs"][0]["abandoned"]
+
+
+def test_a_recent_build_of_another_host_is_taken_for_live(fc):
+    from trip_vlog.logging_utils import utc_now_iso
+
+    adapter, media, ws = fc
+    adapter.build_project(fcsupport.sample_spec(media))
+    _set_running(ws, pid=4242, host="some-other-host", started_at=utc_now_iso())
+    with pytest.raises(FilmCraftError, match="another build is running"):
+        adapter.build_project(fcsupport.sample_spec(media, end_marker=90))
+    assert journal(ws)["runs"][0]["status"] == "running"
+
+
+def test_journal_lock_fails_fast_on_a_live_holder_and_recovers_a_stale_one(tmp_path):
+    from trip_vlog.filmcraft.journal_lock import journal_lock, lock_path_for, this_host
+
+    jp = tmp_path / "execution_journal.json"
+    lock = lock_path_for(jp)
+    lock.write_text(json.dumps({"pid": os.getppid(), "host": this_host(), "at": "2999-01-01T00:00:00+00:00"}), encoding="utf-8")
+    t0 = time.monotonic()
+    with pytest.raises(FilmCraftError, match="updating execution_journal.json"):
+        with journal_lock(jp, wait=0.3):
+            pass
+    assert time.monotonic() - t0 < 3 and lock.exists(), "a live holder's lock is not touched"
+    lock.write_text(json.dumps({"pid": _dead_pid(), "host": this_host(), "at": "2999-01-01T00:00:00+00:00"}), encoding="utf-8")
+    with journal_lock(jp, wait=0.3):
+        assert json.loads(lock.read_text(encoding="utf-8"))["pid"] == os.getpid()
+    assert not lock.exists()
+
+
+def test_each_checkpoint_reloads_the_journal_so_another_process_runs_are_kept(fc, monkeypatch):
+    adapter, media, ws = fc
+    jp = ws / "filmcraft" / "execution_journal.json"
+    orig = adapter.import_media
+
+    def import_and_meanwhile_another_project_records_a_run(paths):
+        j = json.loads(jp.read_text(encoding="utf-8"))
+        j["runs"].append({"version": 7, "project_name": "Other", "status": "complete", "spec_hash": "x"})
+        jp.write_text(json.dumps(j), encoding="utf-8")
+        return orig(paths)
+
+    monkeypatch.setattr(adapter, "import_media", import_and_meanwhile_another_project_records_a_run)
+    res = adapter.build_project(fcsupport.sample_spec(media))
+    runs = journal(ws)["runs"]
+    assert res.version == 1 and [(r["project_name"], r["version"]) for r in runs] == [("Trip Vlog Draft", 1), ("Other", 7)]
+    assert runs[0]["status"] == "complete"
+
+
+def test_a_failed_later_attempt_does_not_hide_the_newest_complete_build(fc, monkeypatch):
+    adapter, media, ws = fc
+    spec = fcsupport.sample_spec(media)
+    assert adapter.build_project(spec).version == 1
+    monkeypatch.setenv("FAKE_FC_FAIL_ON", "timeline.place")
+    with pytest.raises(CommandError):
+        adapter.build_project(spec, force_new_version=True)
+    monkeypatch.delenv("FAKE_FC_FAIL_ON")
+    res = adapter.build_project(spec)
+    assert res.noop and res.version == 1, "the verified v001 still matches; the failed v002 is not rebuilt over"
+    assert [r["status"] for r in journal(ws)["runs"]] == ["complete", "failed"]
