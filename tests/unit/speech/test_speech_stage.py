@@ -308,3 +308,27 @@ def test_missing_credentials_fail_the_stage_with_a_clear_message(tmp_path, monke
     sp.backend_factory = None
     res = sp.transcribe_stage(ctx)
     assert res.status == Status.FAILED and "SPEECH_TEST_KEY" in res.error and "not set" in res.error
+
+
+def test_early_bad_requests_abort_the_run_with_the_server_message(tmp_path, monkeypatch):
+    from trip_vlog.speech.types import SpeechBadRequestError
+
+    install(monkeypatch)
+    ctx = make_speech_ctx(tmp_path)
+    for n in "abcde":
+        add_av(ctx, f"{n}.mp4", 6.0)
+    be = FakeBackend(script=lambda n, p, d: SpeechBadRequestError("rejected the request (400): unknown model 'x'", status_code=400))
+    res = run(ctx, be)
+    assert res.status == Status.FAILED and len(be.calls) == 2 and "unknown model 'x'" in res.error and "configuration" in res.error
+
+
+def test_item_specific_bad_request_after_a_success_stays_recoverable(tmp_path, monkeypatch):
+    from trip_vlog.speech.types import SpeechBadRequestError
+
+    install(monkeypatch)
+    ctx = make_speech_ctx(tmp_path)
+    for n in "abcde":
+        add_av(ctx, f"{n}.mp4", 6.0)
+    be = FakeBackend(script=lambda n, p, d: SpeechBadRequestError("bad audio", status_code=400) if n in (2, 3, 4) else None)
+    res = run(ctx, be)
+    assert res.status == Status.PARTIAL and len(be.calls) == 5

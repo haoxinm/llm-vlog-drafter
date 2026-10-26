@@ -31,7 +31,7 @@ from trip_vlog.speech import context as sc
 from trip_vlog.speech.command_backend import CommandTranscriber
 from trip_vlog.speech.http_backend import OpenAITranscriptions, resolve_speech_model
 from trip_vlog.speech.parse import merge
-from trip_vlog.speech.types import FATAL, SpeechConfigError, SpeechConnectionError, SpeechError, SpeechTimeoutError, Transcription, TranscriptSegment
+from trip_vlog.speech.types import FATAL, SpeechBadRequestError, SpeechConfigError, SpeechConnectionError, SpeechError, SpeechTimeoutError, Transcription, TranscriptSegment
 from trip_vlog.state import StageResult, stable_hash
 
 TRANSCRIBE_VERSION = 1
@@ -39,6 +39,7 @@ ANALYZER = "transcript"
 AUDIO_ANALYZER = "audio_profile"
 MIN_TAIL_SECONDS = 5.0
 MAX_CONSECUTIVE_UNREACHABLE = 3
+MAX_EARLY_BAD_REQUESTS = 2   # HTTP 400s in a row before any request of the run succeeded: a configuration problem, not a bad file
 MAX_ERRORS_IN_SUMMARY = 10
 
 # Test hook: replace to inject a backend double (`lambda ctx: FakeBackend()`).
@@ -288,6 +289,7 @@ def transcribe_stage(ctx: Any) -> StageResult:
     failures: list[dict[str, str]] = []
     fatal: str | None = None
     unreachable = 0
+    bad_requests = 0
     audio_seconds = 0.0
     n_refs = 0
     try:
@@ -310,11 +312,16 @@ def transcribe_stage(ctx: Any) -> StageResult:
                     failures.append({"path": e.row["relative_path"], "error": msg})
                     ctx.logger.event("transcribe", Status.FAILED, asset_id=e.aid, error=msg, path=e.row["relative_path"])
                     unreachable = unreachable + 1 if isinstance(ex, (SpeechConnectionError, SpeechTimeoutError)) else 0
+                    bad_requests = bad_requests + 1 if isinstance(ex, SpeechBadRequestError) else 0
+                    if bad_requests >= MAX_EARLY_BAD_REQUESTS and not summary["transcribed"]:
+                        fatal = (f"stopping: the first {bad_requests} requests were rejected as invalid and none succeeded, so this is "
+                                 f"probably a configuration problem (speech.endpoint model/params/response_format), not the files. Server said: {msg}")
+                        break
                     if unreachable >= MAX_CONSECUTIVE_UNREACHABLE:
                         fatal = f"stopping after {unreachable} consecutive connection failures: {msg}"
                         break
                     continue
-                unreachable = 0
+                unreachable = bad_requests = 0
                 rec = _record(tr, backend.name, getattr(backend, "model", None))
                 cat.cache_put(e.aid, ANALYZER, plan.key, e.row["content_version"], rec)
                 cat.prune_cache(e.aid, ANALYZER, {plan.key})

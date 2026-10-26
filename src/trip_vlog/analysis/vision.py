@@ -29,6 +29,7 @@ from trip_vlog.llm.gateway import Gateway
 from trip_vlog.llm.types import (
     ImagePart,
     LLMBadRequestError,
+    LLMConfigError,
     LLMInputError,
     LLMRefusalError,
     LLMRequest,
@@ -50,6 +51,7 @@ TRANSCRIPT_GUIDANCE = ("Spoken words heard in this clip (verbatim, possibly mis-
                        "places or claims from the words unless the frames show them too.")
 TOKENS_PER_ITEM = 450      # output budget per labelled segment/photo
 TOKENS_BASE = 300
+MAX_EARLY_BAD_REQUESTS = 2   # HTTP 400s in a row before any request of the run succeeded: a configuration problem, not bad items
 
 # Errors of one request that leave the others usable: the affected items are retried once, then fall back.
 RECOVERABLE = (LLMSchemaError, LLMTruncatedError, LLMRefusalError, LLMBadRequestError, LLMInputError)
@@ -262,6 +264,8 @@ class Labeler:
                                      recorder=gateway.recorder, logger=gateway.logger)
         self.settings, self.root, self.prepare, self.accept, self.logger = settings, root, prepare, accept, logger
         self.stats = RunStats()
+        self._answered = 0       # requests of this run the server accepted (cache hits do not count)
+        self._bad_streak = 0     # consecutive bad-request rejections
 
     def _error(self, it: Item, msg: str, *, stage: str) -> None:
         it.error = msg
@@ -299,12 +303,20 @@ class Labeler:
         try:
             resp = gw.complete(req)
         except RECOVERABLE as e:
+            self._bad_streak = self._bad_streak + 1 if isinstance(e, LLMBadRequestError) else 0
+            if self._bad_streak >= MAX_EARLY_BAD_REQUESTS and not self._answered:
+                # every request so far was refused outright: the endpoint settings are wrong, retrying each item would only repeat it
+                raise LLMConfigError(f"stopping: the first {self._bad_streak} requests were rejected as invalid and none succeeded, so this is "
+                                     f"probably an endpoint configuration problem (model, params, max_tokens_field, structured_output). "
+                                     f"Server said: {str(e)[:300]}") from None
             msg = f"{type(e).__name__}: {e}"[:300]
             for it in batch:
                 self._error(it, msg, stage="request")
                 it.singleton = len(batch) > 1
             return list(batch)
         # any other LLMError (auth, connection, config, replay miss, ...) is fatal and propagates: progress so far is persisted
+        self._bad_streak = 0
+        self._answered += 0 if resp.cached else 1
         self.stats.usage = self.stats.usage + (resp.usage if not resp.cached else Usage())
         self.stats.cache_hits += int(resp.cached)
         by_id: dict[str, dict[str, Any]] = {}
@@ -334,6 +346,8 @@ class Labeler:
                 continue
             it.label, it.model, it.error = label, resp.model, None
             self.accept(it)
+        if any(it.error for it in failed) and gw.cache is not None:
+            gw.cache.discard(resp.fingerprint)   # schema-valid but unusable: later runs must ask again, not reuse it
         if self.logger is not None:
             self.logger.event("analyze", Status.SUCCEEDED, batch_size=len(batch), images=sum(i.n_images for i in batch),
                               labeled=len(batch) - len(failed), cache="hit" if resp.cached else "miss", kind=kind)

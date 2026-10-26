@@ -305,3 +305,40 @@ def test_undecodable_photo_fails_alone_and_is_left_out_of_the_batch(tmp_path):
     assert photo_calls and all(len(c.sids) == 2 for c in photo_calls) and len(tr.calls) == 2   # the two good photos travel together; no retry round
     bad = [m for m in moments(ctx).values() if m.get("labeled") is False]
     assert len(bad) == 1 and "HEIC" in bad[0]["label_error"]
+
+
+def _four_hundred(msg):
+    return lambda call, default: HttpResponse(400, {}, json.dumps({"error": {"message": msg}}).encode())
+
+
+def test_config_level_400_aborts_after_two_requests_with_the_server_message(tmp_path):
+    ctx, tr, _ = setup(tmp_path, photos=3, vision_batch_max_images=1)
+    tr.respond = _four_hundred("Unsupported parameter: 'max_tokens'")
+    with pytest.raises(LLMConfigError, match="Unsupported parameter.*|configuration") as ei:
+        st.analyze_stage(ctx)
+    assert len(tr.calls) == 2 and "Unsupported parameter" in str(ei.value) and "configuration" in str(ei.value)
+
+
+def test_item_specific_400_after_a_success_is_still_recoverable(tmp_path):
+    ctx, tr, _ = setup(tmp_path, photos=3, vision_batch_max_images=1)
+    bad = _four_hundred("image rejected")
+    tr.respond = lambda call, default: default if len(tr.calls) == 1 else bad(call, default)
+    res = st.analyze_stage(ctx)
+    assert res.status == Status.PARTIAL and len(tr.calls) > 3 and res.summary["labeled"] >= 1
+
+
+def test_reply_that_fails_label_validation_is_evicted_from_the_response_cache(tmp_path):
+    ctx, tr, segs = setup(tmp_path, photos=0)
+    cache = ctx.workspace.root / "cache" / "llm"
+
+    def respond(call: Call, default):
+        out = [dict(e) for e in default]
+        if not call.retry:
+            out[0]["best_frames"] = {"first_index": 3, "last_index": 1}                 # schema-valid, referentially wrong
+        return out
+    tr.respond = respond
+    st.analyze_stage(ctx)
+    first, retry = tr.calls[0], tr.calls[1]
+    assert not first.retry and retry.retry
+    # retry requests bypass the cache and the unusable first reply was evicted, so nothing is left to be reused
+    assert len(list(cache.glob("*.json"))) == 0
