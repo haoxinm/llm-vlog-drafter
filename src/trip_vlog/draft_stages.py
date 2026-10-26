@@ -624,12 +624,44 @@ def _handoff_inputs(ctx: Any) -> Any:
     out = _handoff_dir(ctx)
     return {"project": _project_sha(ctx), **({"critic_report": c} if (c := _file_sha(_qc_paths_critic(ctx))) else {}), "plan": plan_file_hash(_pp(ctx).edit_plan),
             "formats": list(ctx.config.filmcraft.interchange_formats),
-            "qc": _file_sha(_qc_paths(ctx)[0]),
+            **({"readback": "off"} if ctx.config.filmcraft.readback_interchange == "off" else {}), "qc": _file_sha(_qc_paths(ctx)[0]),
             "resolve_verification": _file_sha(out / "resolve_verification.json"),
             "resolve_finish_report": _file_sha(out / COMPAT_FINISH),
             "filmcraft_version": (ctx.manifest.get("filmcraft") or {}).get("version"),
             "failed_builds": [f["version"] for f in failed_versions(ctx)], "captions": _captions_inputs(ctx),
             "assets": [(a["asset_id"], a["content_version"]) for a in ctx.catalog.list_assets()]}
+
+
+def _readback_summary(rb: dict[str, Any]) -> dict[str, Any]:
+    return {k: rb.get(k) for k in ("status", "reason", "file", "sha256", "kept_native", "not_carried")}
+
+
+def _readback_fallback(ctx: Any, export: Any, eff: TimelineSpec, out: Path, proj: Path, notes: list[str]) -> dict[str, Any]:
+    """DESIGN §15.3: FCP7 XML from the timeline read back from FilmCraft when its own export is missing or lossy. Never replaces a good export."""
+    from trip_vlog.filmcraft.interchange import FORMATS, FormatReport, HandoffReport, GLOBAL_LIMITS, titles_not_carried
+    from trip_vlog.handoff import readback as RB
+
+    cfg = ctx.config.filmcraft
+    fmt = next((f for f in (export.report.formats if export.report else []) if f.format == "fcp7_xml"), None)
+    listed = export.error if export.report is None else (None if fmt is None or fmt.exported else (fmt.error or "FilmCraft did not export the FCP7 XML"))
+    rb = RB.run_fallback(get_adapter(ctx), eff, list(export.requested), out, proj, mode=cfg.readback_interchange, listed_error=listed)
+    if rb["status"] == "generated":
+        info = FORMATS["fcp7_xml"]
+        if export.report is None:
+            export.report = HandoffReport(out_dir=str(out), titles_not_carried=titles_not_carried(eff), limitations=list(GLOBAL_LIMITS))
+        if fmt is None:
+            fmt = FormatReport(format="fcp7_xml", fc_format=info.fc_format, path=str(out / RB.XML_NAME), role=info.role)
+            export.report.formats.insert(0, fmt)
+        fmt.path, fmt.exported, fmt.ok, fmt.error = str(out / RB.XML_NAME), True, True, None
+        fmt.bytes = (out / RB.XML_NAME).stat().st_size
+        fmt.loses = list(RB.LOSES)
+        fmt.postprocess.append("generated from FilmCraft read-back (FilmCraft's own export was " + rb["native"]["state"] + ")")
+        fmt.checks = []
+        notes.append(f"{RB.XML_NAME} was GENERATED FROM THE FILMCRAFT READ-BACK because FilmCraft's own FCP7 XML export was {rb['native']['state']}; "
+                     "see the read-back section of this report and readback_interchange.json")
+    elif rb["status"] == "failed":
+        notes.append("the read-back interchange fallback was needed but failed: " + rb["reason"])
+    return rb
 
 
 def handoff_stage(ctx: Any) -> StageResult:
@@ -674,6 +706,7 @@ def handoff_stage(ctx: Any) -> StageResult:
     export = export_handoff(get_adapter(ctx), eff, cfg.filmcraft.interchange_formats, out, proj)
     if export.error:
         notes.append(f"interchange export failed: {export.error}")
+    readback = _readback_fallback(ctx, export, eff, out, proj, notes)
     captions = _write_captions(ctx, prep, out, notes)
     rows = manifest_rows(ctx.catalog.list_assets(), ctx.paths.media_root, prep.mapping.used_asset_ids)
     write_media_manifest(out / "media_manifest.csv", rows)
@@ -692,6 +725,7 @@ def handoff_stage(ctx: Any) -> StageResult:
     preview = _preview_path(ctx)
     missing = missing_used_media(rows)
     xml_fmt = next((f for f in (export.report.formats if export.report else []) if f.format == "fcp7_xml" and f.exported), None)
+    xml_from_readback = readback.get("status") == "generated"
     finish_doc, finish_note = load_finish_report(out / COMPAT_FINISH)
     if finish_note:
         notes.append(finish_note)
@@ -699,7 +733,8 @@ def handoff_stage(ctx: Any) -> StageResult:
         plan=prep.plan, spec=eff, catalog=PlanningCatalog.from_catalog(ctx.catalog), capabilities=_capabilities(ctx),
         xml_path=Path(xml_fmt.path) if xml_fmt else None, filmcraft_version=run.get("filmcraft_version"),
         verified_after_reopen=run.get("verified_after_reopen"), mapping_warnings=[w.to_dict() for w in prep.mapping.warnings],
-        finish_report=finish_doc, tool_version=__version__))
+        finish_report=finish_doc, tool_version=__version__, xml_origin="readback" if xml_from_readback else "native",
+        readback=_readback_summary(readback) if readback.get("status") in ("generated", "failed") else None))
     atomic_write_json(out / COMPAT_JSON, compat)
     atomic_write_text(out / COMPAT_MD, render_compatibility_markdown(compat))
     compat_summary = summary_of(compat)
@@ -709,7 +744,8 @@ def handoff_stage(ctx: Any) -> StageResult:
         out_dir=out, export=export, project_ref=ref, preview_path=str(preview) if preview.is_file() else None,
         plan_hash=prep.plan.plan_hash, qc_status=qc_status, media_rows=rows, missing_media=missing,
         mapping_warnings=[w.to_dict() for w in prep.mapping.warnings],
-        verification=read_resolve_verification(out / "resolve_verification.json"), stage_notes=notes, compatibility=compat_summary, captions=captions))
+        verification=read_resolve_verification(out / "resolve_verification.json"), stage_notes=notes, compatibility=compat_summary, captions=captions,
+        readback=readback if readback.get("status") in ("generated", "failed") else None))
     atomic_write_text(out / "handoff_report.md", text)
     atomic_write_json(out / "handoff_summary.json", {**export.to_dict(), "missing_media": missing, "generated_at": utc_now_iso(),
                                                       "compatibility": compat_summary})
