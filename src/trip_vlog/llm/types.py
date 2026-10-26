@@ -97,6 +97,9 @@ class ImagePart:
 
     path: Path
     media_type: str = "image/jpeg"
+    # Optional stable identity used by the request fingerprint INSTEAD of the file bytes. For images whose bytes are not
+    # reproducible across machines (ffmpeg-produced frames) the caller names them by what they are derived from.
+    identity: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "path", Path(self.path))
@@ -191,6 +194,7 @@ class PreparedImage:
     max_side: int = 0
     quality: int = 0
     prep_version: str = ""
+    identity: str | None = None  # from ImagePart.identity; replaces source_sha256 in the fingerprint when set
 
 
 @dataclass(frozen=True)

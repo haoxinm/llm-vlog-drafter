@@ -28,7 +28,7 @@ def read_resolve_verification(path: Path) -> tuple[str, str]:
     if not path.is_file():
         return "absent", ""
     try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
+        doc = json.loads(path.read_text(encoding="utf-8-sig"))
         status = str(doc.get("status", "")).lower()
     except (OSError, ValueError, AttributeError):
         return "unreadable", "resolve_verification.json exists but could not be read"

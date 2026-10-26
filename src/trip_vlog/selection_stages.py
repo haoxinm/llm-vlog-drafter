@@ -5,10 +5,11 @@ Runs after `outline_approval`, so it only ever sees an outline a person approved
 the same files as the baseline planner: `plans/selection_plan.json`, `plans/edit_plan.json`, `plans/plan_summary.md`,
 `plans/validation_report.json` and the schemas, plus `plans/selection_report.json` (attempts, findings, repairs, usage).
 
-Cache key (``selection_inputs``): the approved outline (its content hash), the catalog records of its candidate moments, the
+Cache key (``selection_inputs``): the approved outline (its content hash), the catalog records of its candidate moments (as the
+model sees them) and the planning-relevant catalog fields the resolver reads (ranges, lengths, frame rates, audio), the
 whole request text, prompt and schema versions, the editor capabilities, endpoint / model / parameters / mode, retry and token
 limits, and the project, editorial, validation and title settings. Edit the outline, change the model or the target duration
-(which makes a new outline) and the plan is made again; nothing else does.
+(which makes a new outline) or change what the resolver reads of a candidate moment and the plan is made again; nothing else does.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from typing import Any
 
 from trip_vlog import outline_stages
 from trip_vlog.llm.factory import resolve_mode, resolve_model
-from trip_vlog.llm.types import LLMError
+from trip_vlog.llm.types import LLMError, LLMRefusalError, LLMSchemaError, LLMTruncatedError
 from trip_vlog.logging_utils import Status, utc_now_iso
 from trip_vlog.planning import outline as ol
 from trip_vlog.planning import selection as sl
@@ -54,7 +55,9 @@ def selection_inputs(ctx: Any) -> Any:
     cfg = ctx.config
     sctx, h = build_context(ctx)
     profile, ep = cfg.llm.endpoint_for("text")
-    return {"outline": h, "candidates": sl.candidate_digest(sctx), "request": stable_hash(sl.user_text(sctx)), "prompt": sl.prompt_info(),
+    # "catalog": what the resolver and validators read (ranges, best sub-ranges, lengths, frame rates, audio, versions), which the
+    # candidate digest (the text a model sees) does not cover
+    return {"outline": h, "candidates": sl.candidate_digest(sctx), "catalog": sctx.view.fingerprint(sctx.outline.moment_ids()), "request": stable_hash(sl.user_text(sctx)), "prompt": sl.prompt_info(),
             "schema": stable_hash(sl.response_schema()), "capabilities": capability_facts(cfg, read_snapshot(ctx.workspace.root)),
             "settings": {"validation": sctx.vset.__dict__, "plan": sctx.pset.__dict__, "titles": sctx.tset.key(), "min_still": sctx.min_still_seconds},
             "max_tokens": sl.max_tokens(cfg), "retries": cfg.planning.selection_retries, "planner": "llm",
@@ -87,9 +90,14 @@ def plan_llm_stage(ctx: Any) -> StageResult:
         gateway = outline_stages.gateway_factory(ctx) if outline_stages.gateway_factory else outline_stages._default_gateway(ctx)
         res = sl.generate_selection(gateway, sctx)
     except sl.SelectionError as e:
-        return _fail_report(ctx, pp, base, str(e), e.history, e.report)
+        res = _fail_report(ctx, pp, base, str(e), e.history, e.report)
+        res.summary["planning_failure"] = True      # the plan was refused: an earlier plan no longer matches (see draft_stages.plan_stage)
+        return res
     except LLMError as e:
-        return _fail_report(ctx, pp, base, f"{type(e).__name__}: {e}", [], None)
+        res = _fail_report(ctx, pp, base, f"{type(e).__name__}: {e}", [], None)
+        if isinstance(e, (LLMSchemaError, LLMRefusalError, LLMTruncatedError)):
+            res.summary["planning_failure"] = True  # the model answered but its reply is unusable: also a refused plan
+        return res
     usage = {"requests": res.requests, "input_tokens": res.usage.input_tokens, "output_tokens": res.usage.output_tokens}
     _write_all(ctx.workspace, cfg, dict(ctx.paths.outputs), res.selection, res.edit, res.report, sctx.view,
                oc=sctx.oc, outline=sctx.outline, usage=usage)

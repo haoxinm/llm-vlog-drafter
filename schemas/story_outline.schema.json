@@ -44,7 +44,7 @@
       "type": "array"
     },
     "premise": {
-      "description": "A short narrative premise grounded in the catalog.",
+      "description": "A short narrative premise grounded in the catalog (a few sentences).",
       "maxLength": 1500,
       "type": "string"
     },
@@ -71,7 +71,7 @@
             ]
           },
           "purpose": {
-            "description": "What this scene does for the story, in one or two sentences.",
+            "description": "What this scene does for the story, in one or two sentences (up to 500 characters).",
             "maxLength": 500,
             "type": "string"
           },
@@ -97,13 +97,13 @@
             "type": "string"
           },
           "target_duration_seconds": {
-            "description": "Time budget for the scene on the timeline, in seconds.",
+            "description": "Time budget for the scene on the timeline, in seconds (more than 0).",
             "exclusiveMinimum": 0,
             "maximum": 7200,
             "type": "number"
           },
           "title": {
-            "description": "Short working title.",
+            "description": "Short working title, at most 60 characters (it can become an on-screen title).",
             "maxLength": 200,
             "type": "string"
           },

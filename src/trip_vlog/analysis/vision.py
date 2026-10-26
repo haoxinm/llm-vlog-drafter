@@ -23,11 +23,13 @@ from trip_vlog.analysis.labels import (
     validate_label,
 )
 from trip_vlog.config import Config
+from trip_vlog.llm.adapters import fingerprint_extra
 from trip_vlog.llm.factory import resolve_model
 from trip_vlog.llm.gateway import Gateway
 from trip_vlog.llm.types import (
     ImagePart,
     LLMBadRequestError,
+    LLMConfigError,
     LLMInputError,
     LLMRefusalError,
     LLMRequest,
@@ -49,6 +51,7 @@ TRANSCRIPT_GUIDANCE = ("Spoken words heard in this clip (verbatim, possibly mis-
                        "places or claims from the words unless the frames show them too.")
 TOKENS_PER_ITEM = 450      # output budget per labelled segment/photo
 TOKENS_BASE = 300
+MAX_EARLY_BAD_REQUESTS = 3   # HTTP 400s in a row (any request, batch or singleton) before one succeeded: a configuration problem, not bad items
 
 # Errors of one request that leave the others usable: the affected items are retried once, then fall back.
 RECOVERABLE = (LLMSchemaError, LLMTruncatedError, LLMRefusalError, LLMBadRequestError, LLMInputError)
@@ -83,7 +86,7 @@ class VisionSettings:
         return cls(
             sampling=fr.SamplingSettings.from_config(config, m.vision_batch_max_images), input_mode=m.vision_input,
             batch_max_images=m.vision_batch_max_images, max_items_per_request=max_items, send_filenames=m.vision_send_filenames,
-            model=resolve_model(ep, env) or "", provider_extra={"api": ep.api, "params": ep.params}, endpoint=name, is_local=ep.is_local,
+            model=resolve_model(ep, env) or "", provider_extra=fingerprint_extra(ep), endpoint=name, is_local=ep.is_local,
             supports_images=ep.supports_images, max_tokens_cap=ep.max_tokens, image_max_side=config.llm.image_max_side,
             image_quality=config.llm.image_quality, duplicate_distance=m.photo_duplicate_distance,
             analyst=load_template("media_analyst", 1), segment_prompt=load_template("segment_labels", 1),
@@ -208,16 +211,22 @@ def build_request(settings: VisionSettings, kind: str, batch: Sequence[Item], ro
         if kind == "photo":
             parts.append(ImagePart(_long(it.src)))
         elif it.sheet_mode:
-            parts.append(ImagePart(root / str(it.sheet)))
+            parts.append(ImagePart(_long(root / str(it.sheet)), identity=_identity(settings, it, "sheet", [fr.SHEET_TILE_W, fr.SHEET_VERSION, *(f["frame"] for f in it.frames)])))
         else:
             for f in it.frames:
                 parts.append(TextPart(f"Segment {it.sid} | frame {f['index']} | t={f['timestamp_seconds']:.2f}s"))
-                parts.append(ImagePart(root / f["artifact"]))
+                parts.append(ImagePart(_long(root / f["artifact"]), identity=_identity(settings, it, "frame", f["frame"])))
     if note:
         parts.append(TextPart(note))
     t = settings.segment_prompt if kind == "video" else settings.photo_prompt
     max_tokens = min(TOKENS_PER_ITEM * len(batch) + TOKENS_BASE, settings.max_tokens_cap)
     return LLMRequest(t.id, str(t.version), settings.system(kind), tuple(parts), settings.schema(kind), max_tokens)
+
+
+def _identity(settings: VisionSettings, it: Item, what: str, ref: Any) -> str:
+    """Stable name of an ffmpeg-derived image for the request fingerprint: source content version, which frame (or the sheet),
+    the sampling settings (which include the downscale/quality) -- never the machine-dependent JPEG bytes."""
+    return stable_hash({"what": what, "cv": it.asset["content_version"], "ref": ref, "sampling": settings.sampling.key()})
 
 
 def _long(p: Path) -> Path:
@@ -255,6 +264,8 @@ class Labeler:
                                      recorder=gateway.recorder, logger=gateway.logger)
         self.settings, self.root, self.prepare, self.accept, self.logger = settings, root, prepare, accept, logger
         self.stats = RunStats()
+        self._answered = 0       # requests of this run the server accepted (cache hits do not count)
+        self._bad_streak = 0     # consecutive bad-request (400) responses, batch or singleton
 
     def _error(self, it: Item, msg: str, *, stage: str) -> None:
         it.error = msg
@@ -292,12 +303,20 @@ class Labeler:
         try:
             resp = gw.complete(req)
         except RECOVERABLE as e:
+            self._bad_streak = self._bad_streak + 1 if isinstance(e, LLMBadRequestError) else 0
+            if self._bad_streak >= MAX_EARLY_BAD_REQUESTS and not self._answered:
+                # every request so far was refused outright: the endpoint settings are wrong, retrying each item would only repeat it
+                raise LLMConfigError(f"stopping: the first {self._bad_streak} requests were rejected as invalid and none succeeded, so this is "
+                                     f"probably an endpoint configuration problem (model, params, max_tokens_field, structured_output). "
+                                     f"Server said: {str(e)[:300]}") from None
             msg = f"{type(e).__name__}: {e}"[:300]
             for it in batch:
                 self._error(it, msg, stage="request")
                 it.singleton = len(batch) > 1
             return list(batch)
         # any other LLMError (auth, connection, config, replay miss, ...) is fatal and propagates: progress so far is persisted
+        self._bad_streak = 0
+        self._answered += 0 if resp.cached else 1
         self.stats.usage = self.stats.usage + (resp.usage if not resp.cached else Usage())
         self.stats.cache_hits += int(resp.cached)
         by_id: dict[str, dict[str, Any]] = {}
@@ -327,6 +346,8 @@ class Labeler:
                 continue
             it.label, it.model, it.error = label, resp.model, None
             self.accept(it)
+        if any(it.error for it in failed) and gw.cache is not None:
+            gw.cache.discard(resp.fingerprint)   # schema-valid but unusable: later runs must ask again, not reuse it
         if self.logger is not None:
             self.logger.event("analyze", Status.SUCCEEDED, batch_size=len(batch), images=sum(i.n_images for i in batch),
                               labeled=len(batch) - len(failed), cache="hit" if resp.cached else "miss", kind=kind)

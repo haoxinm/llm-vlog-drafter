@@ -10,7 +10,7 @@
         "additionalProperties": false,
         "properties": {
           "clips": {
-            "description": "Clips in playing order.",
+            "description": "Clips in playing order (at most 500).",
             "items": {
               "additionalProperties": false,
               "properties": {
@@ -35,7 +35,6 @@
                 },
                 "intentional_repeat_reason": {
                   "description": "Only when a moment is deliberately used again; otherwise null.",
-                  "maxLength": 400,
                   "type": [
                     "string",
                     "null"
@@ -46,14 +45,11 @@
                   "type": "string"
                 },
                 "rationale": {
-                  "description": "One short sentence on why the clip is there.",
-                  "maxLength": 400,
+                  "description": "One short sentence on why the clip is there (at most 400 characters).",
                   "type": "string"
                 },
                 "target_duration_seconds": {
-                  "description": "How long the clip plays, in seconds; never more than the moment's 'use' value.",
-                  "exclusiveMinimum": 0,
-                  "maximum": 3600,
+                  "description": "How long the clip plays, in seconds; more than 0 and never more than the moment's 'use' value.",
                   "type": "number"
                 },
                 "track_role": {
@@ -69,9 +65,7 @@
                   "description": "How the clip begins.",
                   "properties": {
                     "duration_seconds": {
-                      "description": "0 for a cut; 0.3 to 1.0 for a dissolve.",
-                      "maximum": 5,
-                      "minimum": 0,
+                      "description": "0 for a cut; 0.3 to 1.0 for a dissolve (never more than 5).",
                       "type": "number"
                     },
                     "type": {
@@ -101,7 +95,6 @@
               ],
               "type": "object"
             },
-            "maxItems": 500,
             "minItems": 1,
             "type": "array"
           },
@@ -116,7 +109,6 @@
         ],
         "type": "object"
       },
-      "maxItems": 200,
       "minItems": 1,
       "type": "array"
     },
@@ -127,12 +119,10 @@
         "properties": {
           "duration_seconds": {
             "description": "1 to 10 seconds.",
-            "maximum": 30,
-            "minimum": 0.5,
             "type": "number"
           },
           "rationale": {
-            "maxLength": 300,
+            "description": "At most 300 characters.",
             "type": "string"
           },
           "scene_id": {
@@ -143,17 +133,14 @@
             "additionalProperties": false,
             "properties": {
               "clip_number": {
-                "description": "For clip_start: the clip's position in the scene, counted from 1; else null.",
-                "minimum": 1,
+                "description": "For clip_start: the clip's position in the scene's clip list, counted from 1; else null.",
                 "type": [
                   "integer",
                   "null"
                 ]
               },
               "offset_seconds": {
-                "description": "Seconds after that point.",
-                "maximum": 600,
-                "minimum": 0,
+                "description": "Seconds after that point (0 to 600).",
                 "type": "number"
               },
               "relative_to": {
@@ -173,8 +160,7 @@
             "type": "object"
           },
           "text": {
-            "description": "Exactly the outline's title of that scene (at most 60 characters).",
-            "maxLength": 200,
+            "description": "Exactly the outline's title of that scene (at most 60 characters, one line).",
             "type": "string"
           }
         },
@@ -187,16 +173,13 @@
         ],
         "type": "object"
       },
-      "maxItems": 50,
       "type": "array"
     },
     "uncertainties": {
-      "description": "Things the user should check in the result.",
+      "description": "Things the user should check in the result (up to 100, each at most 500 characters).",
       "items": {
-        "maxLength": 500,
         "type": "string"
       },
-      "maxItems": 100,
       "type": "array"
     }
   },

@@ -12,7 +12,7 @@ Originals are never modified. Everything the tool writes goes into a separate *o
 
 ## Install
 
-Requires Python 3.11+ and FFmpeg (`ffmpeg` and `ffprobe` on `PATH`).
+Requires Python 3.11+ and FFmpeg 4.3 or newer (`ffmpeg` and `ffprobe` on `PATH`; frame extraction uses the scale filter's `force_divisible_by`, added in 4.3).
 
 ```sh
 python -m venv .venv
@@ -221,10 +221,10 @@ llm:
       api_key_env: ANTHROPIC_API_KEY # NAME of the env var holding the key; null = no auth (local servers)
       headers: {}                    # extra headers; values may use ${VAR}; never logged
       timeout_seconds: 120
-      max_retries: 2                 # transport retries on 429/5xx/connection errors (backoff + Retry-After)
+      max_retries: 2                 # transport retries on 429/5xx/connection errors (backoff + Retry-After up to 60 s; a longer Retry-After stops retrying and is reported)
       structured_output: native      # native | json_prompt | none
       max_tokens: 4096               # cap on a request's max_tokens
-      max_tokens_field: null         # e.g. max_completion_tokens for newer OpenAI models
+      max_tokens_field: null         # body field for the token limit; null = adapter default (see below)
       supports_images: true
       params: {}                     # merged into the request body (temperature, top_p, seed, reasoning, store, ...)
       allow_insecure_http: false     # plain http to a non-loopback host is refused unless true
@@ -262,8 +262,13 @@ media: {local_only: true}
   neither, live and record modes fail with a clear message.
 - **Wire formats** (`api`): `anthropic_messages` (`x-api-key`, `anthropic-version`, `output_config.format`), `openai_chat` (`Authorization: Bearer`,
   `response_format`), `openai_responses` (`instructions`/`input`, `text.format`). They follow the providers' public API docs but could not be tested against live
-  servers here; verify against yours and adapt with `path`, `params`, `max_tokens_field` and `structured_output`. `params` may not set `model`, `messages`,
-  `input`, `system` or `instructions`; fields the gateway controls (model, messages, token limit, structured output) win over `params`.
+  servers here; verify against yours and adapt with `path`, `params`, `max_tokens_field` and `structured_output`. `params` may not set fields the
+  gateway controls: `model`, `messages`, `input`, `system`, `instructions`, `stream`, `response_format`, `max_tokens`, `max_completion_tokens`,
+  `max_output_tokens`, the profile's `max_tokens_field`, or a `format` inside `text` / `output_config` (use `structured_output`); such a config is rejected
+  naming the key, as is a value that is not plain data (quote YAML dates). The token-limit field defaults to `max_tokens` (`openai_chat`, `anthropic_messages`)
+  or `max_output_tokens` (`openai_responses`), except that `openai_chat` against `api.openai.com` sends `max_completion_tokens`, which current OpenAI
+  reasoning models require; other OpenAI-compatible servers keep `max_tokens`. Set `max_tokens_field` to override either way. When a server answers 400 and
+  mentions the token field, the error says which field was sent and points at `max_tokens_field`.
 - **Structured output**: `native` sends the provider's JSON-schema option (a sanitized copy: `additionalProperties: false`, no `minimum`/`maxLength`/...; OpenAI
   strict mode also wants every property listed in `required`). `json_prompt` sends no schema parameter and instead appends the schema to the prompt (most local
   servers need this); `none` sends nothing. In every mode the gateway extracts the first JSON value from the reply (fences and prose tolerated), validates it
@@ -273,8 +278,9 @@ media: {local_only: true}
   `llm.text` and `llm.vision` to be local (checked when the config loads). Each call's log record includes `endpoint` and `local`.
 - **Response cache**: `<workspace>/cache/llm/<fingerprint>.json` (`llm.cache_dir`). The fingerprint is a SHA-256 over the prompt template id + version, system text,
   schema, text parts, each image's *source file* hash plus the preparation settings (`image_max_side`, `image_quality`, prep version; not the re-encoded bytes,
-  which can differ across OSes), model id, `max_tokens`, effort, and the profile's `api` and `params`. It excludes `base_url`, `path`, headers, timeouts and keys,
-  so a recording made against one host replays against another. A changed frame, prompt version, schema, model or params is a miss; everything else is a hit with no call.
+  which can differ across OSes), model id, `max_tokens`, effort, and the profile's `api`, `params`, `structured_output`, `max_tokens` cap and token field. Frames cut from video are named in the fingerprint by the asset content
+  version, frame number and sampling settings rather than their (ffmpeg-build dependent) JPEG bytes; photos hash the original file. It excludes `base_url`, `path`, headers, timeouts and keys,
+  so a recording made against one host replays against another. A changed frame, prompt version, schema, model or params is a miss, and so is a changed `content_version` (a re-copied or touched file is re-labelled, even if its pixels are identical); everything else is a hit with no call.
 - **Record / replay** (tests and CI use replay only, no key needed): `TRIP_VLOG_LLM_MODE=replay` (or `llm.mode: replay`) returns stored responses and raises
   `ReplayMissError` naming the fingerprint and template on a miss. `record` calls the real endpoint and also saves each validated response to the fixture dir
   (`llm.fixture_dir` or `TRIP_VLOG_LLM_FIXTURE_DIR`; default the cache dir; tests use `tests/fixtures/llm/`). Replay must use the same model string as the recording.
@@ -380,7 +386,8 @@ trip-vlog resume  --output C:\vlogs\lisbon
   rest, by interest. What was left out and why is in `plans/story_outline_report.json` (`selection`) and in `story_outline.md`.
 - **`must_include` / `must_exclude`** are lists of references, not free text: a `moment_id`, `segment_id`, `asset_id`, a path relative to the media folder (`day2/hike.mp4`), a glob
   (`day2/*.mp4`) or a folder with a trailing slash (`day2/`). A `must_include` reference is satisfied when at least one moment it resolves to is in the outline; one that matches
-  nothing is reported under `missing_coverage`. `preferred_topics` is free text and is passed to the story editor as a preference.
+  nothing is reported under `missing_coverage`. References are paths from your own folder layout, so requests never contain them: the model is told "required item N"
+  together with the moment IDs it resolves to, and that N is spelled out only in the local reports. `preferred_topics` is free text and is passed to the story editor as a preference.
 - **Validation and repair** (deterministic, `planning/outline.py`). Repaired and recorded in the report (and shown under "Checks" in the summary): unknown moment IDs, moments not offered
   to the model, duplicates (a moment is used by one scene; the hook moment may appear once more in its chronological scene), moments matching `must_exclude`, an opening hook longer
   than `editorial.opening_hook_seconds` (shortened), scene budgets outside `project.duration_tolerance_pct`/`_seconds` of the target (all non-hook scenes scaled proportionally to the
@@ -388,9 +395,10 @@ trip-vlog resume  --output C:\vlogs\lisbon
   an out-of-order scene when `story_mode: chronological`, a `must_include` that matches nothing (also added to `missing_coverage`). Everything that would change the story is an **error** instead: a scene left without moments,
   a hook that is not allowed (`allow_nonlinear_hook: false`) or whose scene/moment is inconsistent, an uncovered `must_include`. Errors are sent back to the model **once**
   (`planning.outline_retries`) with the previous reply; if they remain the stage fails with the findings and writes `plans/story_outline_report.json`. Schema violations are retried by the
-  gateway first (`llm.schema_retries`).
+  gateway first (`llm.schema_retries`). Text length and number ranges are not part of the reply schema (providers ignore them and one long sentence must not fail the stage): over-long texts are cut and
+  out-of-range budgets clamped by code, and each change is a recorded repair. When a stage fails, its cached replies are removed, so `resume` asks again.
 - **Your edits are checked, not rewritten**: when you edit `story_outline.json`, `resume` re-validates it without the LLM (any usable moment may be used, not only those that fit in the
-  prompt; budgets off target are a warning). Errors fail the `outline_approval` stage and `approve` refuses; fix the file and run `resume`.
+  prompt; budgets off target are a warning; blanks around moment IDs are ignored; a UTF-8 byte order mark from Windows editors is fine). Errors fail the `outline_approval` stage and `approve` refuses; fix the file and run `resume`.
 - **Caching**: the `outline` stage is keyed by the exact request text (catalog, settings including the target duration, constraints), prompt versions, response schema, model and endpoint
   `api`/`params`, tolerance and retry settings. Unchanged re-runs make no request and never touch an edited outline. Changing `--duration` (or a label, a transcript, the model...) creates a new
   outline; if you had edited the previous one, a copy is kept as `plans/story_outline.<hash>.bak.json`. The gateway's response cache sits underneath.
@@ -442,7 +450,10 @@ trip-vlog resume  --output C:\vlogs\lisbon
   never under 1 s), bad titles dropped. Anything else (a missing scene, too little footage for the target, a `must_include` left out) fails the stage with the findings and `plans/selection_report.json`.
   Scene order always follows the outline. Every repair is listed under "Validation" in `plan_summary.md`.
 - **Caching**: the `plan` stage is keyed by the approved outline hash, the digest of its candidate records, the whole request text, prompt and schema versions, capabilities, endpoint/model/params/mode,
-  retry and token limits, and the project, editorial, validation and title settings. Edit the outline, change the model, or change `--duration` (a new outline) and it plans again; an unchanged run makes no request.
+  retry and token limits, the project, editorial, validation and title settings, and the catalog fields the resolver reads for those moments (ranges, best sub-range, length, frame rate, audio, version).
+  Edit the outline, change the model, change `--duration` (a new outline) or re-index changed media and it plans again; an unchanged run makes no request.
+  A plan stage that replaces an `edit_plan.json` you edited by hand first keeps a copy as `plans/edit_plan.<hash>.bak.json`. A plan stage that **fails because the plan was refused** (validation or selection failure; not a timeout, 401/429/5xx or a missing prerequisite, which leave the earlier plan alone) moves the earlier plan files aside
+  (`edit_plan.stale.json`, `selection_plan.stale.json`, `plan_summary.stale.md`), so nothing that looks current is left next to the failure report; the next successful plan writes the normal names again. A rename that fails (a file locked on Windows) is listed as `stale_rename_failed` in the stage summary.
 - **Files** (`plans/`): `selection_plan.json`, `edit_plan.json`, `plan_summary.md`, `validation_report.json`, `selection_report.json` (model, prompts, usage, each attempt's findings and repairs), `timeline_planner_response.schema.json`
   (also in `schemas/`).
 - **Cost and privacy** (what leaves the machine, per stage; `status` and the stage summaries show token counts; a `local` endpoint sends nothing off the machine, `media.local_only: true` enforces it):
@@ -480,7 +491,7 @@ speech:
   min_speech_seconds: 1.0        # skip assets with less non-silent audio than this (the segmenter's silence detection)
   audio_format: wav              # wav | flac: the temporary 16 kHz mono file handed to the backend
   keep_audio: false              # true keeps media_index/audio/<asset>/... instead of deleting it after use
-  chunk_seconds: 600             # HTTP backend only: longer audio is uploaded in chunks of this length (25 MB limits, retries)
+  chunk_seconds: 600             # HTTP backend only: longer audio is uploaded in chunks of this length (25 MB limits, retries); with wav and a remote endpoint at most 700
   context_max_chars: 1200        # transcript text per segment shown to the vision model in `analyze`; 0 = never send transcripts there
   endpoint:                      # backend: openai_transcriptions
     base_url: https://api.openai.com
@@ -501,6 +512,9 @@ speech:
     output_format: srt           # srt | vtt | json
     timeout_seconds: 3600
 ```
+
+`chunk_seconds` bounds each upload: 16 kHz mono 16-bit WAV is about 1.9 MB per minute, so against a remote (non-loopback) endpoint with `audio_format: wav` a value above 700 s
+(hosted services reject uploads over 25 MB) is a config error, as for any non-loopback server including LAN ones; use `flac` for longer chunks, or a local server, which has no such limit.
 
 **Backends**
 

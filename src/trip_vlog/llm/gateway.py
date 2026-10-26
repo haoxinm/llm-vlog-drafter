@@ -35,7 +35,7 @@ from trip_vlog.paths import nfc
 
 _log = logging.getLogger("trip_vlog.llm")
 
-FINGERPRINT_VERSION = 1
+FINGERPRINT_VERSION = 2   # 2: the provider block gained structured_output, the token cap and the token field
 _OK_STOPS = {"end_turn", "stop_sequence"}
 _TRUNCATED_STOPS = {"max_tokens", "model_context_window_exceeded"}
 
@@ -63,15 +63,16 @@ def _norm(text: str) -> str:
 def request_summary(req: LLMRequest, prepared: list[TextPart | PreparedImage], model: str,
                     extra: dict[str, Any] | None = None) -> dict[str, Any]:
     """The fingerprint inputs. Images appear as SOURCE-byte hashes + preparation parameters (never paths or bytes, and
-    not the re-encoded bytes, which can differ across OSes). `extra` is the provider's output-relevant settings
+    not the re-encoded bytes, which can differ across OSes). An image with an explicit `identity` (ffmpeg-made frames, whose
+    bytes vary with the ffmpeg build) is represented by that identity instead of its bytes. `extra` is the provider's output-relevant settings
     (api kind, params) and never contains URLs, headers, timeouts or keys."""
     parts: list[dict[str, str]] = []
     for p in prepared:
         if isinstance(p, TextPart):
             parts.append({"type": "text", "text": _norm(p.text)})
         else:
-            parts.append({"type": "image", "source_sha256": p.source_sha256, "max_side": p.max_side, "quality": p.quality,
-                          "prep_version": p.prep_version})
+            ident = {"identity": p.identity} if p.identity else {"source_sha256": p.source_sha256}
+            parts.append({"type": "image", **ident, "max_side": p.max_side, "quality": p.quality, "prep_version": p.prep_version})
     return {
         "fingerprint_version": FINGERPRINT_VERSION,
         "template_id": req.template_id,
@@ -147,6 +148,13 @@ class Gateway:
         except LLMError as e:
             self._emit_error(req, fp, e, _ms(t0))
             raise
+
+    def discard(self, fingerprints: Any) -> None:
+        """Drop cached replies (ones that parsed against the schema but proved unusable to the caller)."""
+        if self.cache is not None:
+            for fp in fingerprints:
+                if fp:
+                    self.cache.discard(fp)
 
     # -- internals ------------------------------------------------------
     def _prepare(self, req: LLMRequest) -> tuple[list[TextPart | PreparedImage], str, dict[str, Any]]:

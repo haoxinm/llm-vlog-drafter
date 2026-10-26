@@ -11,6 +11,7 @@ Rules this module enforces
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -75,7 +76,8 @@ def _pp(ctx: Any) -> PlanPaths:
 
 
 def load_plan_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+    """Parse a JSON file the user may have edited by hand. ``utf-8-sig``: Notepad and some editors on Windows add a byte order mark."""
+    return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
 def plan_file_hash(path: Path) -> str:
@@ -219,8 +221,49 @@ def _project_sha(ctx: Any) -> str | None:
 
 # ---- stages ----------------------------------------------------------------------------------------------
 
+PLAN_FILES = ("edit_plan", "selection_plan", "summary")     # PlanPaths attributes of what a plan stage writes next to each other
+
+
+def _backup_edited_plan(ctx: Any, path: Path) -> str | None:
+    """The stage is about to replace `plans/edit_plan.json`: keep a copy of one the user edited by hand
+    (`edit_plan.<hash>.bak.json`), the way the outline stage does for the outline. 'Edited' = it differs from the plan the last
+    plan stage recorded."""
+    if not path.is_file():
+        return None
+    prev = (ctx.manifest.stage("plan").get("summary") or {}).get("plan_hash") or (ctx.manifest.get("plan") or {}).get("plan_hash")
+    try:
+        cur = plan_file_hash(path)
+    except (OSError, ValueError):
+        cur = "invalid-" + sha256_file(path)[:48]
+    if cur == prev:
+        return None
+    bak = path.with_name(f"{path.stem}.{cur[:12].replace('-', '')}.bak.json")
+    shutil.copyfile(path, bak)
+    return _rel(ctx, bak)
+
+
+def _set_stale(ctx: Any) -> tuple[list[str], list[str]]:
+    """The plan stage failed: the files of an earlier plan must not look current next to the failure report. Each is renamed
+    `<name>.stale<ext>` (`edit_plan.stale.json`, `plan_summary.stale.md`, `selection_plan.stale.json`), replacing an older stale copy;
+    the next successful plan stage writes the normal names again. The approval record is untouched: it is bound to a hash that no
+    file carries any more, so nothing can be assembled from a stale plan."""
+    pp = _pp(ctx)
+    moved: list[str] = []
+    failed: list[str] = []
+    for attr in PLAN_FILES:
+        f: Path = getattr(pp, attr)
+        if f.is_file():
+            try:
+                f.replace(f.with_name(f"{f.stem}.stale{f.suffix}"))
+                moved.append(_rel(ctx, f))
+            except OSError:      # e.g. a file locked by another program on Windows
+                failed.append(_rel(ctx, f))
+    return moved, failed
+
+
 def plan_stage(ctx: Any) -> StageResult:
     planner = ctx.config.workflow.planner
+    backup = _backup_edited_plan(ctx, _pp(ctx).edit_plan)
     if planner == "llm":
         from trip_vlog.selection_stages import plan_llm_stage
 
@@ -228,7 +271,19 @@ def plan_stage(ctx: Any) -> StageResult:
     else:
         res = plan_baseline_stage(ctx)
     ctx.data.pop("prepared", None)
-    if res.status != Status.FAILED:
+    if backup:
+        res.summary["edited_plan_backup"] = backup
+    if res.status == Status.FAILED and (res.summary.pop("planning_failure", False) or planner != "llm"):
+        # only when the plan itself was refused (validation / selection failure): an endpoint timeout, a 401/429/5xx or a missing
+        # prerequisite says nothing about the earlier plan, which stays where it is
+        stale, failed = _set_stale(ctx)
+        if stale:
+            res.summary["stale_files"] = stale
+        if failed:
+            res.summary["stale_rename_failed"] = failed
+    elif res.status == Status.FAILED:
+        res.summary.pop("planning_failure", None)
+    else:
         ctx.manifest.set(planner=planner, plan={
             "path": _rel(ctx, _pp(ctx).edit_plan), "summary": _rel(ctx, _pp(ctx).summary), "plan_hash": res.summary.get("plan_hash"),
             "planner": planner, "outline_hash": res.summary.get("outline_hash")})

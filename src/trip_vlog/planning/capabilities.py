@@ -47,7 +47,7 @@ def capability_lines(config: Any, snapshot: dict[str, Any] | None = None) -> lis
     lines.append("- Sound: natural_sound (the clip's own audio), ambient_low (the clip's audio, reduced) and muted. No ducking, fades or mixing "
                  "decisions are made here.")
     if e.scene_titles and _usable(snapshot, "add_title"):
-        lines.append(f"- Titles: scene titles are enabled. Simple text, up to {TITLE_MAX_CHARS} characters on one or two lines, shown "
+        lines.append(f"- Titles: scene titles are enabled. Simple text, one line of up to {TITLE_MAX_CHARS} characters, shown "
                      f"{TITLE_MIN_SECONDS:g} to {TITLE_MAX_SECONDS:g} seconds in a fixed lower-left style; at most {e.max_titles} titles in the whole "
                      "video"
                      + (", counting the opening title" if e.opening_title else "") + (" and the closing title" if e.closing_title else "") + ".")

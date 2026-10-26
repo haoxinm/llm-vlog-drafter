@@ -10,7 +10,7 @@ from typing import Any
 from trip_vlog.llm.gateway import Gateway
 from trip_vlog.llm.types import LLMRequest, TextPart, Usage
 from trip_vlog.llm.untrusted import PREAMBLE
-from trip_vlog.planning.outline import (OutlineSettings, StoryOutline, document_from_response, findings_text, response_schema,
+from trip_vlog.planning.outline import (OutlineSettings, StoryOutline, document_from_response, findings_text, reask_parts, response_schema,
                                         validate_outline)
 from trip_vlog.planning.outline_catalog import OutlineCatalog
 from trip_vlog.planning.validate import ValidationReport
@@ -56,14 +56,17 @@ def settings_text(config: Any) -> str:
 def constraints_text(config: Any, oc: OutlineCatalog) -> str:
     e = config.editorial
     lines = []
+    # References are paths, folders or globs from the user's own layout: the request names them "required item N" and lists the
+    # moments they resolve to. The references themselves appear only in local reports.
     for ref, ids in oc.must_include.items():
+        label = oc.ref_label(ref)
         if ids:
             shown = ", ".join(ids[:MAX_IDS_PER_REF]) + (f" (+{len(ids) - MAX_IDS_PER_REF} more)" if len(ids) > MAX_IDS_PER_REF else "")
-            lines.append(f"- must include {_q(ref)}: use at least one of these moments: {shown}")
+            lines.append(f"- {label}: use at least one of these moments: {shown}")
         else:
-            lines.append(f"- must include {_q(ref)}: matches nothing available; add a line to missing_coverage")
+            lines.append(f"- {label}: matches nothing available; add a line to missing_coverage")
     if e.must_exclude:
-        lines.append("- must exclude (already removed from the catalog): " + ", ".join(_q(r) for r in e.must_exclude))
+        lines.append(f"- {len(e.must_exclude)} exclusion rule(s) were applied; the excluded moments are already removed from the catalog")
     if e.preferred_topics:
         lines.append("- preferred topics: " + ", ".join(_q(t) for t in e.preferred_topics))
     lines.append(f"- at most {e.max_similar_shots_per_scene} visually similar shots will be used in one scene, so offer varied candidates")
@@ -119,6 +122,12 @@ class OutlineResult:
     attempts: list[dict[str, Any]] = field(default_factory=list)   # per ask: findings (errors) and repairs
 
 
+def _evict(gateway: Gateway, history: list[dict[str, Any]]) -> None:
+    """The stage failed: drop every reply of this request chain from the response cache, so that `resume` (after a fix to the
+    endpoint, the prompt-affecting settings or the catalog's text) asks again instead of replaying the same unusable answers."""
+    gateway.discard([h["fingerprint"] for h in history])
+
+
 def generate_outline(gateway: Gateway, config: Any, oc: OutlineCatalog) -> OutlineResult:
     """Ask the story editor, validate and repair deterministically; on errors re-ask with the findings (up to
     `planning.outline_retries` times, default once), then fail rather than silently changing the intent."""
@@ -141,9 +150,8 @@ def generate_outline(gateway: Gateway, config: Any, oc: OutlineCatalog) -> Outli
                         "warnings": [i.to_dict() for i in report.warnings], "repairs": [r.to_dict() for r in report.repairs]})
         if report.ok and report.plan is not None:
             return OutlineResult(report.plan, report, model, res_usage, requests, hits, history)
-        extra = ("Your previous reply was:\n" + json.dumps(resp.parsed, ensure_ascii=False, indent=1),
-                 "It has these problems that cannot be fixed automatically:\n" + findings_text(report) +
-                 "\nReply again with the complete corrected JSON object. Keep everything that was fine.")
+        extra = reask_parts(resp.parsed, report)
     assert report is not None
+    _evict(gateway, history)
     raise OutlineError("the story editor's outline failed validation" + (" after a corrected reply was requested" if retries else "") + ":\n"
                        + findings_text(report), report, history)
