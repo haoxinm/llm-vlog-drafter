@@ -29,12 +29,14 @@ is dropped from the response cache so the same request asks again.
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
 from trip_vlog import draft_stages as ds
 from trip_vlog import revision_common as rc
+from trip_vlog.filmcraft.execution import sha256_file
 from trip_vlog.llm.factory import make_gateway, resolve_model
 from trip_vlog.llm.gateway import Gateway
 from trip_vlog.llm.types import LLMError, LLMResponse
@@ -144,11 +146,19 @@ def _inputs(ctx: Any, setup: Setup, request: str) -> rev.ReviseInputs:
     return rev.ReviseInputs(setup.parent, setup.catalog, _project(ctx), request, setup.alternatives, setup.notes, ctx.config.revise.max_ops)
 
 
+def _file_sha(path: Path) -> str | None:
+    """Content hash of a file the revision starts from (the selection plan carries what the edit plan alone does not: titles, anchors, audio intent)."""
+    try:
+        return sha256_file(path)
+    except OSError:
+        return None
+
+
 def revise_inputs(ctx: Any) -> Any:
     cfg = ctx.config
     req = requested(ctx)
     text = rev.normalize_request(req.get("request") or "")
-    base: dict[str, Any] = {"request": rev.request_hash(text) if text else None, "flags": [bool(req.get("dry_run")), bool(req.get("again")), bool(req.get("apply"))],
+    base: dict[str, Any] = {"request": rev.request_hash(text) if text else None, "dry_run_nonce": uuid.uuid4().hex if req.get("dry_run") else None, "flags": [bool(req.get("dry_run")), bool(req.get("again")), bool(req.get("apply"))],
                             "revise": cfg.revise.model_dump(), "plan_review": cfg.workflow.plan_review, "overrides": cfg.revision_overrides,
                             "validation": stable_hash(ValidationSettings.effective(cfg).__dict__), "planning": stable_hash(effective_plan_settings(cfg).__dict__),
                             "min_still_seconds": float(cfg.qc.min_still_seconds)}
@@ -159,7 +169,7 @@ def revise_inputs(ctx: Any) -> Any:
     pend = pending_of(ctx)
     out = {**base, "plan": setup.parent.plan_hash, "prompt": rev.prompt_info(), "schema": stable_hash(rev.response_schema()), "max_tokens": setup.max_tokens,
            "llm": rc.llm_key(cfg, setup.profile, setup.endpoint), "project": ds._project_sha(ctx),
-           "pending": [pend.get("status"), pend.get("revision_hash")] if pend else None}
+           "selection_plan": _file_sha(ds._pp(ctx).selection_plan), "pending": [pend.get("status"), pend.get("revision_hash")] if pend else None}
     if text:
         out["request_text"] = stable_hash(rev.user_text(_inputs(ctx, setup, text), cfg.revise))
     return out
@@ -316,7 +326,7 @@ def _from_request(ctx: Any, setup: Setup, text: str, req: dict[str, Any], recove
         if target is not None:       # the plan records the target it was made for: resolve once more with it (the timeline is the same)
             res = rev.apply_revision(setup.parent, [a.op for a in res.applied], setup.plan_ctx, r, base_selection=setup.base_selection, target=target)
     lost = rev.lost_required(setup.parent, res.edit, setup.catalog, must) if res.applied else []
-    decision = rev.decide(parsed, setup.parent, res, lost, rev.Policy.from_config(cfg), must)
+    decision = rev.decide(parsed, setup.parent, res, lost, rev.Policy.from_config(cfg), must, target, refused)
     d = Draft(text, rhash, parsed, res, decision, target, lost, refused, resp)
     if recovered:
         d.notes.append(recovered)
@@ -334,7 +344,8 @@ def _from_request(ctx: Any, setup: Setup, text: str, req: dict[str, Any], recove
 
 
 def _nothing(ctx: Any, setup: Setup, d: Draft, dry: bool) -> StageResult:
-    """No operation could be applied. With questions the person is asked (exit 3); otherwise it failed (exit 1). Neither changes the plan."""
+    """No operation could be applied. With questions the person is asked (exit 5, nothing to approve: ask again with the answer); otherwise it failed
+    (exit 1). Neither changes the plan."""
     status = "needs_clarification" if d.parsed.ambiguous else "no_change"
     doc = revision_doc(ctx, setup, d, 0, "dry_run" if dry else status, None)
     if dry:
@@ -346,8 +357,10 @@ def _nothing(ctx: Any, setup: Setup, d: Draft, dry: bool) -> StageResult:
         rel = write_revision(ctx, n, doc)
     lines = rev.render_markdown(doc).splitlines()
     if d.parsed.ambiguous:
-        return StageResult(Status.AWAITING_APPROVAL if not dry else Status.SUCCEEDED,
-                           _summary(ctx, doc, rel, "needs_clarification", lines=lines, clarification=True))
+        if dry:
+            return StageResult(Status.SUCCEEDED, _summary(ctx, doc, rel, "needs_clarification", lines=lines, clarification=True))
+        ctx.data["revise_clarification"] = True       # the run ends with exit code 5: there is nothing to approve, the request has to be asked again
+        return StageResult(Status.PARTIAL, _summary(ctx, doc, rel, "needs_clarification", lines=lines, clarification=True))
     why = "; ".join(f"{r.message}" for r in d.refused[:3]) or "the model proposed no operation" + (f" ({d.parsed.unsupported[0]['reason']})" if d.parsed.unsupported else "")
     return StageResult(Status.SUCCEEDED if dry else Status.FAILED, _summary(ctx, doc, None, "no_change", lines=lines), f"no change could be made: {why}")
 
@@ -446,6 +459,10 @@ def _apply(ctx: Any, setup: Setup, d: Draft, authorization: str, number: int | N
     doc = revision_doc(ctx, setup, d, n, rec["status"], authorization)
     if rec["status"] != "applied":
         cfg.set_revision_overrides(old_ov)
+        pend = pending_of(ctx)
+        if rec.get("remembered") and pend.get("status") == "approved" and pend.get("revision_hash") == rh:
+            # the approved proposal itself is rejected (not an environment failure): `resume` must not build it again
+            _stale(ctx, pend, str(rec.get("error")))
         doc.update(status="failed", note=rec.get("error"))
         return StageResult(Status.FAILED, _summary(ctx, doc, rec.get("revision"), "failed", lines=rev.render_markdown(doc).splitlines()),
                            rec.get("error") or "the revision could not be applied")

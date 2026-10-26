@@ -25,6 +25,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -110,21 +111,24 @@ def seen_hashes(state: Mapping[str, Any]) -> set[str]:
 
 
 def next_number(ctx: Any, kind: RoundKind) -> int:
+    """The next revision number: one more than the highest ``<prefix>NN...json`` in the folder, whatever its digit count (r99 -> r100 -> r101)."""
     d = revisions_dir(ctx)
-    n0 = len(kind.prefix)
-    nums = [int(p.name[n0:n0 + 2]) for p in d.glob(f"{kind.prefix}[0-9][0-9]*.json") if p.name[n0:n0 + 2].isdigit()] if d.is_dir() else []
+    rx = re.compile(re.escape(kind.prefix) + r"(\d+)(?:\.json|\.[a-z_]+\.json)$")
+    nums = [int(m[1]) for p in d.glob(f"{kind.prefix}[0-9]*.json") if (m := rx.match(p.name))] if d.is_dir() else []
     return max(nums + [0]) + 1
 
 
 def halt_text(rec: Mapping[str, Any], kind: RoundKind) -> str | None:
-    """Why no further round ran after this round (None when nothing stopped them)."""
+    """Why no further automatic change followed this round (None when nothing stopped them). A critic round stops further critic rounds; a revision (the
+    person's own request) stops the critic from changing the revised plan on its own: it only reports."""
     halt, tag = rec.get("halt"), kind.tag(int(rec.get("round") or 0))
+    tail = f"no further {kind.noun}s ran" if kind is CRITIC else "no automatic critic round is applied on top of it (the critic only reports)"
     if halt == "preview_failed":
-        return f"the preview of the new version could not be rendered after {tag}; no further {kind.noun}s ran (nothing was reverted)"
+        return f"the preview of the new version could not be rendered after {tag}; {tail} (nothing was reverted)"
     if halt == "qc_failed":
-        return f"QC could not be re-run on the new version after {tag}; no further {kind.noun}s ran (nothing was reverted)"
+        return f"QC could not be re-run on the new version after {tag}; {tail} (nothing was reverted)"
     if halt == "qc_regression":
-        return (f"QC got worse after {tag}: new failing check(s) {', '.join(rec.get('qc_new_failures') or [])}; no further {kind.noun}s ran. The change was not "
+        return (f"QC got worse after {tag}: new failing check(s) {', '.join(rec.get('qc_new_failures') or [])}; {tail}. The change was not "
                 f"reverted: the earlier plan is plans/revisions/{tag}.parent_edit_plan.json")
     return None
 
@@ -384,10 +388,10 @@ def apply_round(ctx: Any, kind: RoundKind, parent: EditPlan, res: ApplyResult, *
         a failure of the environment is retried by the next run."""
         rb(ctx, saved, prev_approval, new_hash=res.edit.plan_hash, parent_hash=parent.plan_hash, new_selection=d / f"{tag}.selection_plan.json",
            new_plan=d / f"{tag}.edit_plan.json")
-        rec.update(status="failed", error=why)
+        rec.update(status="failed", error=why, remembered=bool(remember and hooks.failed_marker))
         upd: dict[str, Any] = {"applying": None, "rounds": [r for r in state_of(ctx, kind).get("rounds", []) if not (r.get("round") == n and r.get("plan_hash") == res.edit.plan_hash)]}
         if remember and hooks.failed_marker:
-            upd["failed"] = [*state_of(ctx, kind).get("failed", []), hooks.failed_marker]
+            upd["failed"] = list(dict.fromkeys([*state_of(ctx, kind).get("failed", []), hooks.failed_marker]))
         save_state(ctx, kind, **upd)
         rdoc.update(status="failed", error=why, note=f"the previous plan was put back; the proposed new plan is kept in this folder as {tag}.edit_plan.json")
         hooks.write_revision(ctx, n, rdoc, res)

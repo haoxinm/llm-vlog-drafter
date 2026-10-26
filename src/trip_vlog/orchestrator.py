@@ -39,6 +39,9 @@ class RunContext:
     echo: Callable[[str], None] = print
 
 
+CLARIFICATION_EXIT = 5      # `trip-vlog revise`: the request needs an answer first; nothing is proposed, so there is nothing to approve
+
+
 @dataclass
 class IndexResult:
     run_id: str
@@ -381,6 +384,23 @@ def run_revise(output: Path | str, config_path: Path | str | None = None, overri
                     revise={"request": text or None, "dry_run": dry_run, "apply": apply and not text, "again": again})
 
 
+def reset_revision_overrides(output: Path | str) -> dict[str, Any] | None:
+    """`trip-vlog revise --reset-overrides`: forget what accepted revisions changed about the rules (target length, waived must_include references); the
+    next run checks the plan against project.yaml again. Touches nothing else (plan, project, proposals, history). Returns what was cleared (None: nothing)."""
+    ws = Workspace(Path(output).expanduser().resolve())
+    manifest = Manifest.load(ws.manifest_path) if ws.manifest_path.exists() else None
+    if manifest is None or manifest.get("pipeline") != "draft":
+        raise ConfigError(f"{ws.root} holds no draft; run `trip-vlog draft` first")
+    st = dict(manifest.get("revise") or {})
+    ov = st.get("overrides")
+    if not ov:
+        return None
+    st["overrides"] = None
+    manifest.set(revise=st)
+    manifest.save()
+    return dict(ov)
+
+
 def run_analyze(media: Path | str | None, output: Path | str, config_path: Path | str | None = None,
                 overrides: Mapping[str, Any] | None = None, *, limit: int | None = None, dry_run: bool = False,
                 echo: Callable[[str], None] = print, command: str = "analyze") -> IndexResult:
@@ -510,7 +530,8 @@ def _execute(media: Path | str | None, output: Path | str, config_path: Path | s
     any_failed = any(s == Status.FAILED for s in statuses.values())
     awaiting = any(s == Status.AWAITING_APPROVAL for s in statuses.values())
     logger.event("run", Status.FAILED if any_failed else Status.AWAITING_APPROVAL if awaiting else Status.SUCCEEDED, command=command)
-    return IndexResult(run_id, {k: str(v) for k, v in statuses.items()}, 1 if any_failed else 3 if awaiting else 0, ws.root, summary,
+    clarify = ctx is not None and bool(ctx.data.get("revise_clarification"))
+    return IndexResult(run_id, {k: str(v) for k, v in statuses.items()}, 1 if any_failed else 3 if awaiting else CLARIFICATION_EXIT if clarify else 0, ws.root, summary,
                        awaiting_approval=awaiting, dry_run=dry_report)
 
 

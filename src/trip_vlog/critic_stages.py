@@ -221,7 +221,7 @@ def critic_inputs(ctx: Any) -> Any:
     return {**base, "plan": inp.plan.plan_hash, "qc": cr.qc_digest(inp.qc), "index": cr.index_digest(inp.index), "images": shown,
             "request": stable_hash(cr.user_text(inp, len(shown))), "prompt": cr.prompt_info(), "schema": stable_hash(cr.response_schema()),
             "max_tokens": aux.max_tokens, "llm": _llm_key(cfg, aux.profile, aux.endpoint), "project": ds._project_sha(ctx),
-            "rounds_done": len(done), "halted": (done[-1].get("halt") if done else None), "pending": [pend.get("status"), pend.get("revision_hash")] if pend else None}
+            "rounds_done": len(done), "halted": (_halting_round(ctx, inp.plan.plan_hash, done) or {}).get("halt"), "pending": [pend.get("status"), pend.get("revision_hash")] if pend else None}
 
 
 def critic_verify(ctx: Any) -> bool:
@@ -454,6 +454,15 @@ def _authorize(ctx: Any, rv: Review, selected: list[cr.Finding], res: ApplyResul
     return None, None, StageResult(Status.AWAITING_APPROVAL, {**_summary(ctx, doc, rel), "revision": rpath, "revision_summary": rpath[:-5] + ".md"})
 
 
+def _halting_round(ctx: Any, plan_hash: str, done: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The latest applied round (a critic round or a natural-language revision) that led to ``plan_hash``: its `halt` says whether the critic may still change
+    the plan on its own. A revision that made QC worse stops the critic from stacking automatic changes on the revised plan."""
+    from trip_vlog.revise_stages import change_lineage
+
+    chain = change_lineage(ctx, plan_hash)
+    return chain[-1] if chain else (done[-1] if done else None)
+
+
 def critic_stage(ctx: Any) -> StageResult:
     try:
         return _critic_stage(ctx)
@@ -489,7 +498,8 @@ def _critic_stage(ctx: Any) -> StageResult:
         requests += 0 if rv.resp.cached else 1
         hits += int(rv.resp.cached)
         done = lineage(st, rv.inp.plan.plan_hash)
-        halted = done[-1].get("halt") if done else None      # the latest round made QC worse or left no preview: no more rounds on this lineage
+        last = _halting_round(ctx, rv.inp.plan.plan_hash, done)
+        halted = last.get("halt") if last else None      # the latest round (the critic's or a revision) made QC worse or left no preview: report only, no more rounds
         rounds_left = len(done) < q.critic_max_rounds and applied_now < q.critic_max_rounds and not halted
         selected, res = _assess(ctx, rv, mode)
         if selected and _revision_hash(rv.inp.plan.plan_hash, selected) in state_of(ctx).get("failed", []):
@@ -526,7 +536,7 @@ def _critic_stage(ctx: Any) -> StageResult:
         for f in selected:
             if f.change_status == "valid":
                 f.change_note = (f.change_note + "; " if f.change_note else "") + ("would be applied with qc.critic: apply" if mode == "report" else "no round left")
-        reason = (done[-1].get("halt_note") if halted else
+        reason = (last.get("halt_note") if halted else
                   "the round limit (qc.critic_max_rounds) is reached; this is the review of the final version and changes nothing" if mode == "apply" and not rounds_left else None)
         doc = _report_doc(ctx, rv, mode=mode, status="ok", reason=reason, selected=selected, res=res, rounds=done)
         if recovered:

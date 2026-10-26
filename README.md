@@ -100,7 +100,7 @@ trip-vlog resolve-finish --output /path/to/vlog-project [--dry-run] [--project-n
   A failed or interrupted assembly leaves its numbered `.fcproj` behind, never reused; `resume` builds the next version, so clips are never appended twice.
 - `resume` continues the pipeline recorded in `manifest.json`; the media folder is taken from there. Settings persist in `<output>/project.yaml`.
 
-Exit codes: `0` finished (QC warnings and unprobeable files are reported, not fatal), `1` a stage failed, `2` bad configuration/arguments, `3` stopped at the approval gate, `4` `approve` refused (nothing to approve yet, or the plan/outline is invalid), `130` interrupted.
+Exit codes: `0` finished (QC warnings and unprobeable files are reported, not fatal), `1` a stage failed, `2` bad configuration/arguments, `3` stopped at the approval gate, `4` `approve` refused (nothing to approve yet, or the plan/outline is invalid), `5` `revise` needs an answer first (nothing was proposed, so there is nothing to approve: ask again with the answer in the request), `130` interrupted.
 
 Configuration: copy [examples/project.yaml](examples/project.yaml), edit, pass with `--config`. Command-line overrides win:
 `--duration`, `--aspect`, `--fingerprint sha256`, `--no-recursive`, `--ffprobe PATH`, or any field via `--set media.thumbnail_max_side=320`.
@@ -529,6 +529,7 @@ trip-vlog revise --output ./vlog "make the beach scene shorter and drop the blur
 trip-vlog revise --output ./vlog --file request.txt --dry-run     # ask the model and show the diff; nothing is changed
 trip-vlog revise --output ./vlog "..."                            # exit 3: proposed, not applied (see "Confirmation"); read ./vlog/plans/revisions/revise_r01.md
 trip-vlog approve --output ./vlog --revision && trip-vlog resume --output ./vlog      # or: trip-vlog revise --output ./vlog --apply
+trip-vlog revise --output ./vlog --reset-overrides                # forget a target length / waived must_include requirement that earlier revisions set (see "Length and requirements move on purpose")
 ```
 
 - **How it works** (stage `revise`, after `qc`): a model (purpose `revise`: `llm.revise: <profile>`, else the `text` profile; prompt `revise.v1` + `revise_input.v1`; strict schema `revise_response`, also in `schemas/`) maps your request onto the
@@ -544,9 +545,9 @@ trip-vlog approve --output ./vlog --revision && trip-vlog resume --output ./vlog
   that no longer resolves to itself (hand-edited `edit_plan.json`) is not changed.
 - **Confirmation**: a revision is applied on its own only when it is clear and not destructive; otherwise it is written as `plans/revisions/revise_rNN.json` / `.md` with status `proposed`, recorded in `manifest.revise.pending`, and the
   run stops (exit code **3**, nothing changed). It needs confirmation when: the model asks a question (`ambiguous`) or flags it destructive; it **removes a whole scene** (`revise.confirm_scene_removal`, true); it removes **more than
-  `revise.confirm_removed_clips`** (3) clips; it changes the length of the film by more than `revise.confirm_duration_change_pct` (15%) **and** at least `revise.confirm_duration_change_min_seconds` (10 s); it removes content that
+  `revise.confirm_removed_clips`** (3) clips; it changes the length of the film by more than `revise.confirm_duration_change_pct` (15%) **and** at least `revise.confirm_duration_change_min_seconds` (10 s), or by more than `revise.confirm_change_pct_any` (30%) whatever the seconds (a 43% cut of an 18 s film is not small); it would move the film's target duration or waive a `must_include` requirement (always); some of the requested changes were refused (only part of the request would be applied: the proposal lists the refused ones, and approving applies exactly the valid ones); it removes content that
   `editorial.must_include` requires (the summary says "required item N", never the reference); the request needed more than `revise.max_ops` operations; `workflow.plan_review: true`; or `revise.auto_apply: false`. Code decides this from the
-  result of the operations, whatever the model says. A request that yields no operation but a question stops with exit 3 too (nothing to approve: ask again with the answer in the request). `trip-vlog approve --revision` records the approval, bound
+  result of the operations, whatever the model says. A request that yields no operation but a question stops with exit **5** (nothing is proposed, so there is nothing to approve: ask again with the answer in the request). `trip-vlog approve --revision` records the approval, bound
   to that proposal and to the plan it was made for (refused when the plan changed since); `resume` or `revise --apply` then applies **exactly** those operations (no new request to the model) and refuses, changing nothing, if they no longer give
   the approved plan. A new request replaces an open proposal (the old files stay, marked `superseded`). Removing must_include content or a scene is only possible this way.
 - **Result**: a **new** edit plan (`plans/edit_plan.json`; the parent plan, selection plan, summary, QC and mapping reports are kept as `plans/revisions/revise_rNN.parent_*`), approval `mode: revision` bound to the new hash with `parent_plan_hash`,
@@ -556,12 +557,15 @@ trip-vlog approve --output ./vlog --revision && trip-vlog resume --output ./vlog
 - **Change summary** (`plans/revisions/revise_rNN.md` + `.json`, printed by the command, referenced in `handoff_report.md`): the request and what the model understood, each change with its reason and the words it answers, the refused ones and why, per scene
   and clip what changed, the length before and after (and the new target), new warnings, and QC before and after. `trip-vlog status` lists the revision history.
 - **Length and requirements move on purpose**: when a revision takes the total outside the tolerance of the target duration, the target becomes the new total, and must_include references whose clips a confirmed revision removed are waived. Both are
-  recorded in `manifest.revise.overrides` (valid while the plan stage's plan is the one they were made on; re-planning starts from `project.yaml` again), not in `project.yaml`.
+  recorded in `manifest.revise.overrides` (valid while the plan stage's plan is the one they were made on; whenever the plan stage runs again, even when it makes the same plan, the overrides and any open proposal are dropped and the rules start from `project.yaml` again), not in `project.yaml`. `status` lists active overrides; `revise --reset-overrides` clears them by hand (nothing else is touched).
   QC may warn `scene_order` after `move_scene` (the plan no longer follows the approved outline's order); that is expected.
 - **Repeating a command**: the same request that produced the current plan is not applied twice (`--again` overrides); a failed or unusable model reply is never cached, so the request asks again. Unchanged inputs make no request (the response cache answers a repeat).
   Stage cache key: the request text, the plan hash, the whole request sent (plan summary, alternatives, limits), prompt and schema versions, endpoint / model / parameters / mode, `revise.*`, the validation and planning settings with the revision overrides,
   and the pending proposal.
-- **Exit codes**: 0 applied (or `--dry-run` shown), 1 nothing could be changed (every operation refused, the model unreachable, a stale proposal), 2 usage or configuration error, 3 proposed or needs clarification.
+- **Dry runs** always ask (the response cache answers an identical request) and always print the diff; they never write a plan, project or record of a revision.
+- **Dropped transitions**: when an operation makes the resolver turn a dissolve into a cut (a moved scene or clip now starts the film, handle too short), the change summary says "transition dropped".
+- **After a revision that made QC worse** the critic only reports for that plan (it does not stack automatic rounds on it); revision numbers grow past `r99` (`r100`, ...).
+- **Exit codes**: 0 applied (or `--dry-run` shown), 1 nothing could be changed (every operation refused, the model unreachable, a stale or rejected proposal), 2 usage or configuration error, 3 proposed (waiting for `approve --revision`), 5 needs clarification (rephrase the request; nothing to approve). An approved proposal whose rebuild is rejected as a plan is marked stale and is not retried by `resume`; a failure of the environment is retried.
 
 ## Titles
 

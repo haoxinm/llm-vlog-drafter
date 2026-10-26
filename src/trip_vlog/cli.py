@@ -9,6 +9,7 @@ Exit codes
        here with a proposal (plans/revisions/revise_rNN.md) when a request is ambiguous or destructive: `approve --revision`, then `resume`
   4    `approve` refused: the outline/plan is missing, failed validation, or its stage did not succeed
        (`resolve-finish`: 0 finished, 1 required checks failed, 2 preconditions/arguments, 3 Resolve scripting unavailable)
+  5    `revise` needs an answer first (the request was unclear and no change could be proposed): nothing to approve, ask again with the answer
   130  interrupted (Ctrl-C); `resume` continues
 """
 
@@ -25,7 +26,7 @@ import yaml
 from trip_vlog import __version__
 from trip_vlog.config import ConfigError
 from trip_vlog.draft_stages import DRAFT_STAGES
-from trip_vlog.orchestrator import (ApprovalRefused, IndexResult, approve_pending, read_status, run_analyze, run_critic, run_draft, run_index,
+from trip_vlog.orchestrator import (ApprovalRefused, IndexResult, approve_pending, read_status, reset_revision_overrides, run_analyze, run_critic, run_draft, run_index,
                                     run_outline, run_revise, run_transcribe)
 
 
@@ -119,7 +120,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("revise", help="change a finished draft with a request in your own words (e.g. \"make the beach scene shorter and drop the blurry "
                                       "sunset clip\"): a model maps it onto a closed set of plan operations, code validates them, and the result is a new plan "
                                       "version, a new FilmCraft project version, a new preview and a QC re-run. Ambiguous or destructive requests are only "
-                                      "proposed (exit 3): `approve --revision`, then `resume`")
+                                      "proposed (exit 3): `approve --revision`, then `resume`. A request that needs an answer first (exit 5) proposes nothing: ask again with the "
+                                      "answer in the request")
     p.add_argument("request", nargs="?", help="what to change, in your own words (or use --file)")
     p.add_argument("--file", type=Path, help="read the request from this text file (UTF-8)")
     p.add_argument("--output", type=Path, required=True, help="the draft workspace")
@@ -128,6 +130,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="ask the model and show what would change; the plan, project and preview stay as they are")
     p.add_argument("--apply", action="store_true", help="apply the proposal you approved with `approve --revision` (the same as `resume`); takes no request")
     p.add_argument("--again", action="store_true", help="apply a request again even though it produced the current plan (a repeated command is otherwise skipped)")
+    p.add_argument("--reset-overrides", action="store_true",
+                   help="forget what accepted revisions changed about the rules (a new target length, waived must_include references): the plan is checked against "
+                        "project.yaml again (`status` shows them). Takes no request and changes nothing else")
     p.add_argument("--filmcraft", help="path to filmcraft-cli (filmcraft.executable; else $FILMCRAFT_CLI, PATH)")
 
     p = sub.add_parser("approve", help="approve what is waiting at the approval gate: the story outline (plans/story_outline.json), "
@@ -287,6 +292,16 @@ def _print_draft_result(res: IndexResult) -> None:
             print(line)
 
 
+def _overrides_text(ov: dict | None) -> str:
+    ov = ov or {}
+    parts = []
+    if ov.get("target_duration_seconds"):
+        parts.append(f"target duration {float(ov['target_duration_seconds']):g} s")
+    if ov.get("must_include_waived"):
+        parts.append(f"{len(ov['must_include_waived'])} must_include reference(s) waived")
+    return ", ".join(parts) or "none"
+
+
 def _print_revise_block(m: Any, ws: Path) -> None:
     """What `revise` did or wants (the stage summary): the change summary lines, then what to do next."""
     st = m.stage("revise")
@@ -314,7 +329,8 @@ def _print_revise_block(m: Any, ws: Path) -> None:
         print(f"  review: {ws / str(s.get('revision_summary'))}")
         print(f"  then  : trip-vlog approve --revision --output {ws}  &&  trip-vlog resume --output {ws}")
     elif out == "needs_clarification":
-        print(f"\nThe request needs clarification; nothing was changed{mod}. Ask again with the answers in the request.")
+        print(f"\nThe request needs clarification; nothing was changed and there is nothing to approve{mod}. Ask again with the answers in the request "
+              "(exit code 5).")
     elif out == "dry_run":
         print(f"\ndry run: nothing was changed{mod}" + ("; applying it would ask for your confirmation first" if s.get("would_need_confirmation") else ""))
     elif out == "applied":
@@ -348,6 +364,13 @@ def _cmd_draft(args: argparse.Namespace, command: str = "draft") -> int:
 
 def _cmd_revise(args: argparse.Namespace) -> int:
     request = args.request
+    if args.reset_overrides:
+        if request or args.file is not None or args.apply or args.dry_run or args.again:
+            raise ConfigError("--reset-overrides takes no request and no other option; it only clears the runtime rule changes of earlier revisions")
+        cleared = reset_revision_overrides(args.output)
+        print("revision overrides cleared: " + _overrides_text(cleared) + "; the plan is checked against project.yaml again (run `trip-vlog resume`)"
+              if cleared else "no revision overrides are active; nothing was changed")
+        return 0
     if args.file is not None:
         if request:
             raise ConfigError("give the request either as an argument or with --file, not both")
@@ -604,6 +627,9 @@ def _cmd_status(args: argparse.Namespace) -> int:
             print(f"  {Path(str(h.get('revision'))).stem:<10} {h['status']:<9} {q}{tail}")
             if h.get("halt_note"):
                 print(f"            WARNING: {h['halt_note']}")
+    ov = (m.get("revise") or {}).get("overrides")
+    if ov and (ov.get("target_duration_seconds") or ov.get("must_include_waived")):
+        print(f"overrides : {_overrides_text(ov)} (set by accepted revisions, not in project.yaml; `trip-vlog revise --reset-overrides` clears them)")
     oap = m.get("outline_approval")
     if oap:
         print(f"outline   : {oap.get('status')}" + (f" ({oap.get('mode')})" if oap.get("mode") else "") + f" outline {str(oap.get('outline_hash', ''))[:12]}")

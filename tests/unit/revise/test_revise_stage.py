@@ -108,7 +108,7 @@ def test_an_ambiguous_request_with_no_usable_operation_asks_and_changes_nothing(
     calls = stub_rebuild(monkeypatch)
     before = plan_files(ctx)
     res = ask(ctx, "make the beach shorter")
-    assert res.status == Status.AWAITING_APPROVAL and res.summary["outcome"] == "needs_clarification" and not calls
+    assert res.status == Status.PARTIAL and res.summary["outcome"] == "needs_clarification" and not calls and ctx.data["revise_clarification"] is True
     assert plan_files(ctx) == before and not ctx.manifest.get("revise", {}) .get("pending")
     assert res.summary["questions"][0]["question"].startswith("Which beach")
     doc = rj(ctx.workspace.root / "plans" / "revisions" / "revise_r01.json")
@@ -223,10 +223,11 @@ def test_thresholds_come_from_the_config(setup, monkeypatch):
     stub_rebuild(monkeypatch)
     res = ask(ctx, "shorten the first scene by 3 seconds")
     assert res.status == Status.AWAITING_APPROVAL and any("changes the length of the film by -3.0 s (-16%)" in r for r in res.summary["confirm_reasons"])
-    ctx2, plan2, _ = setup(transport=ReviseTransport(shorten), revise={"confirm_duration_change_pct": 20})
+    ctx2, plan2, _ = setup(transport=ReviseTransport(shorten), revise={"confirm_duration_change_pct": 20}, project={"duration_tolerance_seconds": 4})
     stub_rebuild(monkeypatch)
     assert ask(ctx2, "shorten the first scene by 3 seconds").status == Status.SUCCEEDED
-    ctx3, plan3, _ = setup(transport=ReviseTransport(shorten), revise={"confirm_duration_change_pct": 5, "confirm_duration_change_min_seconds": 5})
+    ctx3, plan3, _ = setup(transport=ReviseTransport(shorten), revise={"confirm_duration_change_pct": 5, "confirm_duration_change_min_seconds": 5},
+                         project={"duration_tolerance_seconds": 4})
     stub_rebuild(monkeypatch)
     assert ask(ctx3, "shorten the first scene by 3 seconds").status == Status.SUCCEEDED, "a change under the minimum number of seconds is not large"
 
@@ -272,20 +273,30 @@ def test_a_newer_proposal_supersedes_the_open_one(setup, monkeypatch):
 
 # ---- refusals ----------------------------------------------------------------------------------------------------
 
-def test_operations_that_cannot_be_made_are_refused_with_the_reason_and_the_rest_is_applied(setup, monkeypatch):
+def test_a_request_with_a_refused_operation_is_proposed_not_applied_in_part(setup, monkeypatch):
     t = ReviseTransport(lambda c: answer([op("trim_clip", clip_instance_id="c1", duration_seconds=4.0), op("remove_clip", clip_instance_id="c99"),
                                           op("trim_clip", clip_instance_id="c4", duration_seconds=60.0), op("remove_clip", clip_instance_id="c5")],
                                          unsupported=[{"request_part": "add music", "reason": "revisions do not change the music"}]))
-    ctx, plan, _ = setup(transport=t, revise={"confirm_duration_change_pct": 50})
-    stub_rebuild(monkeypatch)
+    ctx, plan, _ = setup(transport=t, revise={"confirm_duration_change_pct": 50, "confirm_change_pct_any": 100}, project={"duration_tolerance_seconds": 6})
+    calls = stub_rebuild(monkeypatch)
+    before = plan_files(ctx)
     res = ask(ctx, "shorten the opening, drop c99, make c4 a minute, drop the photo, add music")
-    assert res.status == Status.SUCCEEDED and res.summary["changes_applied"] == 2 and res.summary["changes_refused"] == 2
+    assert res.status == Status.AWAITING_APPROVAL and res.summary["outcome"] == "proposed" and not calls and plan_files(ctx) == before
+    assert res.summary["changes_applied"] == 2 and res.summary["changes_refused"] == 2
+    assert any("2 of the requested change(s) could not be made" in r for r in res.summary["confirm_reasons"])
     doc = rj(ctx.workspace.root / "plans" / "revisions" / "revise_r01.json")
     msgs = [r["message"] for r in doc["ops_refused"]]
-    assert any("no clip 'c99'" in m for m in msgs) and any("longer than the" in m for m in msgs)
+    assert doc["status"] == "proposed" and any("no clip 'c99'" in m for m in msgs) and any("longer than the" in m for m in msgs)
     assert doc["unsupported"][0]["reason"] == "revisions do not change the music"
     md = (ctx.workspace.root / "plans" / "revisions" / "revise_r01.md").read_text(encoding="utf-8")
     assert "refused: remove c99" in md and "Not possible with revisions" in md and "add music" in md
+    approve_revision(ctx.workspace.root)        # approving applies exactly the two valid operations
+    ctx.manifest.data.update(type(ctx.manifest).load(ctx.workspace.manifest_path).data)
+    ctx.data.pop("revise", None)
+    res = rs.revise_stage(ctx)
+    assert res.status == Status.SUCCEEDED and res.summary["changes_applied"] == 2 and res.summary["changes_refused"] == 2, res
+    ids = [c.clip_instance_id for s in current_plan(ctx).scenes for c in s.clips]
+    assert "c5" not in ids and "c1" in ids and [c[0] for c in calls] == ["assemble", "preview", "qc"]
 
 
 def test_nothing_applicable_fails_without_touching_anything_and_asks_the_model_again_next_time(setup, monkeypatch):

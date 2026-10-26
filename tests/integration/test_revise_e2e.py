@@ -87,6 +87,9 @@ def test_direct_revision_dry_run_proposal_approval_and_status(media, tmp_path, f
     assert "dry run: nothing was changed" in out and "c" in out and f"{ids[1]}: 4.00 s -> 3.00 s" in out and len(fake.calls) == 1
     assert EditPlan.model_validate(rj(ws / "plans" / "edit_plan.json")).plan_hash == plan1.plan_hash and not (ws / "plans" / "revisions").exists()
     assert sorted(p.name for p in (ws / "filmcraft").glob("*.fcproj")) == ["Trip Vlog Draft_v001.fcproj"]
+    code, out, err = run(capsys, "revise", "--output", ws, "make the portrait clip shorter and mute the first clip", "--dry-run", "--set", ENDPOINT, "--filmcraft", CLI)
+    assert code == 0, out + err      # a repeated dry run is never a cache hit that prints nothing: it shows the diff again (the response cache answers, no new request)
+    assert "dry run: nothing was changed" in out and f"{ids[1]}: 4.00 s -> 3.00 s" in out and len(fake.calls) == 1
 
     # ---- the same request for real: applied on its own, the response cache answers --------------------------------------
     code, out, err = run(capsys, "revise", "--output", ws, "make the portrait clip shorter and mute the first clip", "--set", ENDPOINT, "--filmcraft", CLI)
@@ -176,3 +179,10 @@ def test_direct_revision_dry_run_proposal_approval_and_status(media, tmp_path, f
     plan4 = EditPlan.model_validate(rj(ws / "plans" / "edit_plan.json"))
     assert plan4.total_duration_seconds == pytest.approx(plan3.total_duration_seconds - 2.0, abs=0.05) and ids3 == [c.clip_instance_id for c in plan4.scenes[0].clips]
     assert rj(ws / "manifest.json")["filmcraft"]["project_version"] == 4 and hash_tree(media) == before
+
+    # ---- a request that only asks a question: exit 5, nothing is proposed, so there is nothing to approve ----------------------
+    fake.respond = lambda call: answer(ambiguous=[question("Which scene do you mean?", "the scene")])
+    code, out, err = run(capsys, "revise", "--output", ws, "make the scene better", "--set", ENDPOINT, "--filmcraft", CLI)
+    assert code == 5, out + err
+    assert "needs clarification" in out and "nothing to approve" in out and not rj(ws / "manifest.json")["revise"].get("pending")
+    assert run(capsys, "approve", "--output", ws, "--revision")[0] == 4

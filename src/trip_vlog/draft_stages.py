@@ -293,8 +293,18 @@ def plan_stage(ctx: Any) -> StageResult:
         ctx.manifest.set(planner=planner, plan={
             "path": _rel(ctx, _pp(ctx).edit_plan), "summary": _rel(ctx, _pp(ctx).summary), "plan_hash": res.summary.get("plan_hash"),
             "planner": planner, "outline_hash": res.summary.get("outline_hash")})
+        _forget_revision_rules(ctx)
         ctx.manifest.save()
     return res
+
+
+def _forget_revision_rules(ctx: Any) -> None:
+    """A plan that was made again starts from the configured rules: the revision overrides (target length, waived requirements) and an open proposal
+    belonged to the earlier plan, even when the new plan happens to have the same hash."""
+    st = ctx.manifest.get("revise")
+    if isinstance(st, dict) and (st.get("overrides") or st.get("pending")):
+        ctx.manifest.set(revise={**st, "overrides": None, "pending": None})
+    ctx.config.set_revision_overrides(None)
 
 
 def _assemble_inputs(ctx: Any) -> Any:
