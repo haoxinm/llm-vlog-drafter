@@ -59,8 +59,8 @@ def trim_and_dissolve(call):
         finding(severity="major", category="pacing", summary="The portrait clip lingers.", clips=[second],
                 evidence=[{"kind": "plan", "ref": second, "note": "4 s for one view"}, {"kind": "tile", "ref": tile, "note": "the first frame"}],
                 proposed=change("trim_clip", clip_instance_id=second, duration_seconds=3.0)),
-        finding(severity="minor", category="story_clarity", summary="Soften the change to the photo.", clips=[second, third],
-                evidence=[{"kind": "qc_check", "ref": "orientation", "note": "portrait in a landscape sequence"}],
+        finding(severity="major", category="story_clarity", summary="Soften the change to the photo.", clips=[second, third],
+                evidence=[{"kind": "qc_check", "ref": "orientation", "note": "portrait in a landscape sequence"}, {"kind": "plan", "ref": third, "note": "hard cut"}],
                 proposed=change("set_transition", clip_instance_id=third, transition_type="dissolve", transition_seconds=0.5))]}
 
 

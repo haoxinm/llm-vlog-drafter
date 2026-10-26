@@ -518,6 +518,9 @@ def handoff_stage(ctx: Any) -> StageResult:
         from trip_vlog.critic_stages import lineage
 
         applied = lineage(cs, prep.plan.plan_hash)
+        for a in applied:
+            if a.get("halt_note"):
+                notes.append(f"WARNING: {a['halt_note']}")
         if applied:
             notes.append(f"this is project version v{run['version']}: {len(applied)} critic round(s) changed the plan after the first draft (" + ", ".join(
                 a["revision"] for a in applied if a.get("revision")) + "); the earlier project versions are kept in filmcraft/ and the parent plans in plans/revisions/")
@@ -594,10 +597,11 @@ def build_draft_runner(ctx: Any) -> StageRunner:
     runner.register("assemble", assemble_stage, deps=("approval",), inputs=_assemble_inputs, verify=_assemble_verify)
     runner.register("preview", preview_stage, deps=("assemble",), inputs=_preview_inputs, verify=lambda c: _preview_path(c).is_file())
     runner.register("qc", qc_stage, deps=("assemble",), inputs=_qc_inputs, verify=_qc_verify)
-    if ctx.config.qc.critic != "off":
-        # after qc, before handoff: a critic fix rebuilds the project, preview and QC, and the handoff then packages the latest version
-        from trip_vlog.critic_stages import critic_inputs, critic_stage, critic_verify
+    from trip_vlog.critic_stages import critic_inputs, critic_stage, critic_verify, critic_wanted
 
+    if critic_wanted(ctx):
+        # after qc, before handoff: a critic fix rebuilds the project, preview and QC, and the handoff then packages the latest version.
+        # Also registered (in apply mode) when a revision was approved with `approve --critic`, whatever qc.critic says now.
         runner.register("critic", critic_stage, deps=("qc",), inputs=critic_inputs, verify=critic_verify)
     runner.register("handoff", handoff_stage, deps=("assemble",), inputs=_handoff_inputs,
                     verify=lambda c: (_handoff_dir(c) / "handoff_report.md").is_file() and (_handoff_dir(c) / COMPAT_JSON).is_file())

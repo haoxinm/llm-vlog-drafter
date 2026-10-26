@@ -20,9 +20,17 @@ It authorizes the listed validated operations and nothing else; a later edit of 
 With ``workflow.plan_review: true`` nothing is applied by itself: the stage writes the proposed revision (``status: proposed``), records it as pending
 in ``manifest.critic.pending`` and stops (``awaiting_approval``); ``trip-vlog approve --critic`` then ``resume`` applies exactly that revision.
 
+Safety rails of a round. The round limit counts the applied rounds of the lineage that ends in the current plan (an append-only list in the manifest)
+and, separately, the rounds of this run; a change that would return the plan to a version an earlier round already produced or started from is not
+applied. Nothing is reverted automatically when QC gets worse, but no further round runs when the new version has a failing check the old one did not
+(or its preview or QC could not be produced); the report, the CLI and the handoff note say so. A rebuild that fails for a reason of the environment
+(missing FilmCraft CLI, full disk, timeout) puts the previous plan back and is retried by a later `resume`; only a plan that is rejected is remembered
+as failed (`trip-vlog critic` clears that list). A round writes a marker (``critic.applying``) before it touches any file; a crash or Ctrl-C leaves it
+and the next run of the stage puts the saved parent files back (also deleting files that did not exist before).
+
 Cache key (``critic_inputs``): the plan hash, the QC results digest, the preview sheet index digest, the whole request text (plan, QC, audio, tiles,
-alternatives), prompt and schema versions, the images sent, endpoint / model / parameters / mode, and the mode, round and operation limits plus
-the rounds already applied. Unchanged inputs make no request: the stage is a cache hit, or (after a `report` is wanted again) the gateway's response cache answers.
+alternatives), prompt and schema versions, the images sent, endpoint / model / parameters / mode, the validation and planning settings, the minimum
+still length, the failed-revision list, and the mode, round and operation limits plus the rounds already applied. Unchanged inputs make no request: the stage is a cache hit, or (after a `report` is wanted again) the gateway's response cache answers.
 """
 
 from __future__ import annotations
@@ -91,16 +99,60 @@ def _save_state(ctx: Any, **kw: Any) -> dict[str, Any]:
     return st
 
 
+def applied_rounds(state: dict[str, Any]) -> list[dict[str, Any]]:
+    return [r for r in state.get("rounds", []) if r.get("status") == "applied"]
+
+
 def lineage(state: dict[str, Any], plan_hash: str) -> list[dict[str, Any]]:
-    """The applied rounds that led to ``plan_hash``, oldest first (empty for a plan no round produced)."""
-    by_hash = {r["plan_hash"]: r for r in state.get("rounds", []) if r.get("status") == "applied"}
+    """The applied rounds that led to ``plan_hash``, oldest first (empty for a plan no round produced). Walks the append-only round list backwards,
+    so a plan that returned to an earlier hash (A -> B -> A) still counts every round."""
     out: list[dict[str, Any]] = []
-    h, seen = plan_hash, set()
-    while h in by_hash and h not in seen:
-        seen.add(h)
-        out.append(by_hash[h])
-        h = by_hash[h]["parent_plan_hash"]
+    expect = plan_hash
+    for r in reversed(applied_rounds(state)):
+        if r.get("plan_hash") != expect:
+            break
+        out.append(r)
+        expect = r.get("parent_plan_hash")
     return list(reversed(out))
+
+
+def seen_hashes(state: dict[str, Any]) -> set[str]:
+    """Every plan hash an applied round started from or produced."""
+    return {h for r in applied_rounds(state) for h in (r.get("parent_plan_hash"), r.get("plan_hash")) if h}
+
+
+def pending_approved(ctx: Any) -> bool:
+    """A critic revision was approved (`trip-vlog approve --critic`) for the plan that is on disk now."""
+    pend = state_of(ctx).get("pending") or {}
+    if pend.get("status") != "approved":
+        return False
+    try:
+        return ds.plan_file_hash(ds._pp(ctx).edit_plan) == pend.get("parent_plan_hash")
+    except (OSError, ValueError):
+        return False
+
+
+def effective_mode(ctx: Any) -> str:
+    """qc.critic, except that an approved revision is applied whatever the configuration says now (it was approved to be applied)."""
+    return "apply" if pending_approved(ctx) else ctx.config.qc.critic
+
+
+def critic_wanted(ctx: Any) -> bool:
+    """Whether the draft pipeline registers the critic stage: qc.critic is not off, or an approved revision waits to be applied."""
+    return effective_mode(ctx) != "off"
+
+
+def halt_text(rec: dict[str, Any]) -> str | None:
+    """Why no further round ran after this round (None when nothing stopped them)."""
+    halt, tag = rec.get("halt"), f"critic_r{int(rec.get('round') or 0):02d}"
+    if halt == "preview_failed":
+        return f"the preview of the new version could not be rendered after {tag}; no further critic rounds ran (nothing was reverted)"
+    if halt == "qc_failed":
+        return f"QC could not be re-run on the new version after {tag}; no further critic rounds ran (nothing was reverted)"
+    if halt == "qc_regression":
+        return (f"QC got worse after {tag}: new failing check(s) {', '.join(rec.get('qc_new_failures') or [])}; no further critic rounds ran. The change was not "
+                f"reverted: the earlier plan is plans/revisions/{tag}.parent_edit_plan.json")
+    return None
 
 
 def next_revision_number(ctx: Any) -> int:
@@ -203,8 +255,10 @@ def _llm_key(cfg: Any, profile: str, ep: Any) -> dict[str, Any]:
 def critic_inputs(ctx: Any) -> Any:
     cfg = ctx.config
     q = cfg.qc
-    base: dict[str, Any] = {"mode": q.critic, "limits": [q.critic_max_rounds, q.critic_max_ops_per_round, q.critic_apply_min_severity],
-                            "plan_review": cfg.workflow.plan_review}
+    base: dict[str, Any] = {"mode": effective_mode(ctx), "limits": [q.critic_max_rounds, q.critic_max_ops_per_round, q.critic_apply_min_severity],
+                            "plan_review": cfg.workflow.plan_review, "validation": stable_hash(ValidationSettings.from_config(cfg).__dict__),
+                            "planning": stable_hash(PlanSettings.from_config(cfg).__dict__), "min_still_seconds": float(q.min_still_seconds),
+                            "failed": sorted(state_of(ctx).get("failed", []))}
     try:
         inp, aux = build_inputs(ctx)
     except RuntimeError as e:
@@ -212,10 +266,11 @@ def critic_inputs(ctx: Any) -> Any:
     shown = cr.shown_sheets(inp)
     st = state_of(ctx)
     pend = st.get("pending") or {}
+    done = lineage(st, inp.plan.plan_hash)
     return {**base, "plan": inp.plan.plan_hash, "qc": cr.qc_digest(inp.qc), "index": cr.index_digest(inp.index), "images": shown,
             "request": stable_hash(cr.user_text(inp, len(shown))), "prompt": cr.prompt_info(), "schema": stable_hash(cr.response_schema()),
             "max_tokens": aux.max_tokens, "llm": _llm_key(cfg, aux.profile, aux.endpoint), "project": ds._project_sha(ctx),
-            "rounds_done": len(lineage(st, inp.plan.plan_hash)), "pending": [pend.get("status"), pend.get("revision_hash")] if pend else None}
+            "rounds_done": len(done), "halted": (done[-1].get("halt") if done else None), "pending": [pend.get("status"), pend.get("revision_hash")] if pend else None}
 
 
 def critic_verify(ctx: Any) -> bool:
@@ -267,7 +322,8 @@ def _assess(ctx: Any, rv: Review, mode: str) -> tuple[list[cr.Finding], ApplyRes
     q = ctx.config.qc
     policy = cr.ProposalPolicy(mode, q.critic_apply_min_severity, q.critic_max_ops_per_round)
     try:
-        selected, res = cr.assess_proposals(rv.findings, rv.inp.plan, rv.aux.plan_ctx, policy, base_selection=rv.aux.base_selection)
+        selected, res = cr.assess_proposals(rv.findings, rv.inp.plan, rv.aux.plan_ctx, policy, base_selection=rv.aux.base_selection,
+                                            space=cr.EvidenceSpace.from_inputs(rv.inp))
     except PlanBaseError as e:
         for f in rv.findings:
             if f.op is not None:
@@ -381,78 +437,158 @@ def _safely(fn: Callable[[Any], StageResult], ctx: Any) -> StageResult:
         return StageResult(Status.FAILED, {}, f"{type(e).__name__}: {e}")
 
 
+_PARENT_NAMES = {"edit_plan": "parent_edit_plan.json", "selection_plan": "parent_selection_plan.json", "summary": "parent_plan_summary.md",
+                 "validation": "parent_validation_report.json", "qc_report": "parent_qc_report.json", "mapping_report": "parent_mapping_report.json"}
+
+
+def _targets(ctx: Any) -> dict[str, Path]:
+    """The live files a round replaces, by the key their saved parent copy goes by."""
+    pp = ds._pp(ctx)
+    return {"edit_plan": pp.edit_plan, "selection_plan": pp.selection_plan, "summary": pp.summary, "validation": pp.validation_report,
+            "qc_report": ds._qc_paths(ctx)[0], "mapping_report": ctx.workspace.root / "filmcraft" / "mapping_report.json", "preview": ds._preview_path(ctx)}
+
+
+def _rollback(ctx: Any, saved: dict[str, Path | None], approval: Any) -> None:
+    """Put the parent files back. A saved copy of None means the file did not exist before the round: the new one is deleted."""
+    for key, target in _targets(ctx).items():
+        if key not in saved:
+            continue
+        src = saved[key]
+        if src is None:
+            target.unlink(missing_ok=True)
+        elif src.is_file():
+            shutil.copyfile(src, target)
+    if approval is not None:
+        ctx.manifest.set(approval=approval)
+    ctx.manifest.save()
+    ctx.data.pop("prepared", None)
+
+
+def recover_interrupted(ctx: Any) -> str | None:
+    """A round that was started and never finished (crash, Ctrl-C, power loss) left `critic.applying`: put the saved parent files back, mark the
+    revision `rolled_back` and clear the marker. Returns a sentence about it, or None when there was nothing to recover."""
+    mk = state_of(ctx).get("applying")
+    if not isinstance(mk, dict):
+        return None
+    root = ctx.workspace.root
+    tag = str(mk.get("tag") or f"critic_r{int(mk.get('number') or 0):02d}")
+    _rollback(ctx, {k: (root / v if v else None) for k, v in (mk.get("saved") or {}).items()}, mk.get("parent_approval"))
+    note = f"critic round {tag} was interrupted before it finished; the previous plan (hash {str(mk.get('parent_plan_hash'))[:12]}) was put back"
+    d = revisions_dir(ctx)
+    try:
+        doc = json.loads((d / f"{tag}.json").read_text(encoding="utf-8"))
+        doc.update(status="rolled_back", note=note)
+        atomic_write_json(d / f"{tag}.json", doc)
+        md = d / f"{tag}.md"
+        atomic_write_text(md, md.read_text(encoding="utf-8").replace(f"{tag}: applying", f"{tag}: rolled_back", 1) + "\n" + note + "\n")
+    except (OSError, ValueError):
+        pass
+    _save_state(ctx, applying=None)
+    ctx.logger.event("critic", Status.PARTIAL, message=note)
+    return note
+
+
+def _failed_names(qc: dict[str, Any]) -> set[str]:
+    return {str(c.get("name")) for c in qc.get("checks", []) if c.get("status") == "fail"}
+
+
 def _apply_round(ctx: Any, rv: Review, selected: list[cr.Finding], res: ApplyResult, report_doc: dict[str, Any], authorization: str,
                  number: int | None = None) -> dict[str, Any]:
     """Write the new plan, approve it as `critic_fix`, rebuild a NEW FilmCraft project, re-render the preview and re-run QC. Returns the round record
-    (status `applied`, or `failed` after the previous plan was put back)."""
+    (status `applied`, or `failed` after the previous plan was put back). QC is never reverted automatically; the record says when it got worse
+    (`halt`), which stops further rounds."""
     cfg = ctx.config
     pp = ds._pp(ctx)
     parent = rv.inp.plan
     n = number or next_revision_number(ctx)       # an approved proposal keeps the number it was proposed under
     tag = f"critic_r{n:02d}"
+    rec: dict[str, Any] = {"round": n, "status": "failed", "revision": None, "parent_plan_hash": parent.plan_hash, "plan_hash": res.edit.plan_hash,
+                           "authorization": authorization, "findings": [f.id for f in selected], "at": utc_now_iso()}
+    try:
+        on_disk = ds.plan_file_hash(pp.edit_plan)
+    except (OSError, ValueError) as e:
+        on_disk = f"unreadable ({type(e).__name__})"
+    if on_disk != parent.plan_hash:     # somebody edited the plan after it was reviewed: change nothing
+        rec["error"] = "the edit plan on disk is not the one that was reviewed (it changed meanwhile); nothing was changed, run the critic again"
+        return rec
     d = revisions_dir(ctx)
     d.mkdir(parents=True, exist_ok=True)
     snap = _qc_dir(ctx) / f"critic_report.r{n:02d}.json"
     atomic_write_json(snap, report_doc)                                   # the review that motivated this round, kept as it was
     snap_rel, snap_sha = _rel(ctx, snap), sha256_file(snap)
-    # keep the parent: plan files, QC report, preview
-    saved = {"edit_plan": _copy(pp.edit_plan, d / f"{tag}.parent_edit_plan.json"), "selection_plan": _copy(pp.selection_plan, d / f"{tag}.parent_selection_plan.json"),
-             "summary": _copy(pp.summary, d / f"{tag}.parent_plan_summary.md"), "validation": _copy(pp.validation_report, d / f"{tag}.parent_validation_report.json"),
-             "qc_report": _copy(ds._qc_paths(ctx)[0], d / f"{tag}.parent_qc_report.json")}
-    prev_preview = ds._preview_path(ctx)
-    kept_preview = _copy(prev_preview, prev_preview.with_name(f"{prev_preview.stem}.before_{tag}{prev_preview.suffix}"))
+    # keep the parent: plan files, QC report, mapping report, preview (None: the file did not exist)
+    targets = _targets(ctx)
+    prev_preview = targets["preview"]
+    saved: dict[str, Path | None] = {k: (Path(v) if (v := _copy(targets[k], d / f"{tag}.{name}")) else None) for k, name in _PARENT_NAMES.items()}
+    kept = _copy(prev_preview, prev_preview.with_name(f"{prev_preview.stem}.before_{tag}{prev_preview.suffix}"))
+    saved["preview"] = Path(kept) if kept else None
     prev_approval = copy.deepcopy(ds.approval_record(ctx.manifest))
     prev_run = ds.latest_run(ctx)
-    rec: dict[str, Any] = {"round": n, "status": "failed", "revision": None, "parent_plan_hash": parent.plan_hash, "plan_hash": res.edit.plan_hash,
-                           "report": snap_rel, "report_sha256": snap_sha, "authorization": authorization, "ops": [a.op.to_dict() for a in res.applied],
-                           "ops_text": render_ops_markdown(res.applied, res.refused), "diff_lines": res.diff.lines() if res.diff else [],
-                           "findings": [f.id for f in selected], "at": utc_now_iso(), "qc_before": rv.inp.qc.get("status"),
-                           "parent_project": prev_run["project_path"] if prev_run else None, "preview_before": _rel(ctx, Path(kept_preview)) if kept_preview else None}
-    rdoc = _revision_doc(ctx, n, "applied", parent, res, selected, snap_rel, authorization,
-                         {"saved_parent_files": {k: (_rel(ctx, Path(v)) if v else None) for k, v in saved.items()}})
+    # the marker comes before the first change to a live file: if this process dies from here on, the next run puts the parent back
+    _save_state(ctx, applying={"number": n, "tag": tag, "new_plan_hash": res.edit.plan_hash, "parent_plan_hash": parent.plan_hash, "started_at": utc_now_iso(),
+                               "saved": {k: (_rel(ctx, v) if v else None) for k, v in saved.items()}, "parent_approval": prev_approval})
+    rec.update(report=snap_rel, report_sha256=snap_sha, ops=[a.op.to_dict() for a in res.applied], ops_text=render_ops_markdown(res.applied, res.refused),
+               diff_lines=res.diff.lines() if res.diff else [], qc_before=rv.inp.qc.get("status"),
+               parent_project=prev_run["project_path"] if prev_run else None, preview_before=_rel(ctx, saved["preview"]) if saved["preview"] else None)
+    rdoc = _revision_doc(ctx, n, "applying", parent, res, selected, snap_rel, authorization,
+                         {"saved_parent_files": {k: (_rel(ctx, v) if v else None) for k, v in saved.items()}})
     rec["revision"] = _write_revision(ctx, n, rdoc, res)
     atomic_write_json(d / f"{tag}.edit_plan.json", to_json_dict(res.edit))
     atomic_write_json(d / f"{tag}.selection_plan.json", to_json_dict(res.selection))
 
-    def restore(why: str) -> dict[str, Any]:
-        for key, target in (("edit_plan", pp.edit_plan), ("selection_plan", pp.selection_plan), ("summary", pp.summary), ("validation", pp.validation_report)):
-            if saved.get(key):
-                shutil.copyfile(saved[key], target)
-        if prev_approval is not None:
-            ctx.manifest.set(approval=prev_approval)
-        ctx.manifest.save()
-        ctx.data.pop("prepared", None)
+    def restore(why: str, *, remember: bool) -> dict[str, Any]:
+        """Put the previous state back. ``remember``: the revision itself is at fault (the plan is rejected), so `resume` must not build it again;
+        a failure of the environment is retried by the next run."""
+        _rollback(ctx, saved, prev_approval)
         rec.update(status="failed", error=why)
-        _save_state(ctx, failed=[*state_of(ctx).get("failed", []), _revision_hash(parent.plan_hash, selected)])   # `resume` does not rebuild the same failing revision again
+        upd: dict[str, Any] = {"applying": None}
+        if remember:
+            upd["failed"] = [*state_of(ctx).get("failed", []), _revision_hash(parent.plan_hash, selected)]
+        _save_state(ctx, **upd)
         rdoc.update(status="failed", error=why, note=f"the previous plan was put back; the proposed new plan is kept in this folder as {tag}.edit_plan.json")
         _write_revision(ctx, n, rdoc, res)
         return rec
 
     try:
-        view = PlanningCatalog.from_catalog(ctx.catalog)
-        vrep = validate_edit_plan(res.edit, view, ValidationSettings.from_config(cfg))
-        _write_all(ctx.workspace, cfg, dict(ctx.paths.outputs), res.selection, res.edit, vrep, view,
-                   approval_note=f"critic_fix {tag} (parent plan {parent.plan_hash[:12]}): localized changes from the critic, see plans/revisions/{tag}.md")
-        ds.approve_current_plan(ctx.manifest, res.edit.plan_hash, "critic_fix", parent_plan_hash=parent.plan_hash, revision=rec["revision"], critic_report=snap_rel,
-                                critic_report_sha256=snap_sha, authorization=authorization, parent_approval=prev_approval)
-        ctx.data.pop("prepared", None)
-        asm = ds.assemble_stage(ctx)
-    except Exception as e:  # noqa: BLE001
-        return restore(f"the new plan could not be written or built ({type(e).__name__}: {e}); the previous plan was put back")
-    if asm.status == Status.FAILED:
-        return restore(f"the new FilmCraft project could not be built; the previous plan was put back: {asm.error}")
-    _mark(ctx, "assemble", asm, ds._assemble_inputs)
-    prv = _safely(ds.preview_stage, ctx)
-    _mark(ctx, "preview", prv, ds._preview_inputs)
-    qc = _safely(ds.qc_stage, ctx)
-    _mark(ctx, "qc", qc, ds._qc_inputs)
+        try:
+            view = PlanningCatalog.from_catalog(ctx.catalog)
+            vrep = validate_edit_plan(res.edit, view, ValidationSettings.from_config(cfg))
+            if vrep.errors:
+                return restore(f"the new plan does not validate ({vrep.errors[0].message}); the previous plan was put back", remember=True)
+            _write_all(ctx.workspace, cfg, dict(ctx.paths.outputs), res.selection, res.edit, vrep, view,
+                       approval_note=f"critic_fix {tag} (parent plan {parent.plan_hash[:12]}): localized changes from the critic, see plans/revisions/{tag}.md")
+            ds.approve_current_plan(ctx.manifest, res.edit.plan_hash, "critic_fix", parent_plan_hash=parent.plan_hash, revision=rec["revision"], critic_report=snap_rel,
+                                    critic_report_sha256=snap_sha, authorization=authorization, parent_approval=prev_approval)
+            ctx.data.pop("prepared", None)
+            asm = ds.assemble_stage(ctx)
+        except ds.PlanRejected as e:
+            return restore(f"the new plan was rejected ({e}); the previous plan was put back", remember=True)
+        except Exception as e:  # noqa: BLE001
+            return restore(f"the new plan could not be written or built ({type(e).__name__}: {e}); the previous plan was put back", remember=False)
+        if asm.status == Status.FAILED:
+            return restore(f"the new FilmCraft project could not be built; the previous plan was put back: {asm.error}", remember="errors" in asm.summary)
+        _mark(ctx, "assemble", asm, ds._assemble_inputs)
+        prv = _safely(ds.preview_stage, ctx)
+        _mark(ctx, "preview", prv, ds._preview_inputs)
+        qc: StageResult | None = None
+        if prv.status == Status.SUCCEEDED:      # QC only runs on a preview that was rendered
+            qc = _safely(ds.qc_stage, ctx)
+            _mark(ctx, "qc", qc, ds._qc_inputs)
+    except BaseException:   # Ctrl-C, SystemExit: leave the previous plan in place, then let it go on
+        restore("the round was interrupted; the previous plan was put back", remember=False)
+        raise
+    qc_ok = qc is not None and qc.status != Status.FAILED and "status" in qc.summary
+    after = [str(x) for x in (qc.summary.get("failed_checks") or [])] if qc is not None and qc_ok else []
+    new_failures = sorted(set(after) - _failed_names(rv.inp.qc))
+    halt = "preview_failed" if qc is None else "qc_failed" if not qc_ok else "qc_regression" if new_failures else None
     rec.update(status="applied", project=asm.summary.get("project"), project_version=asm.summary.get("version"), preview_status=str(prv.status),
-               qc_after=qc.summary.get("status"), qc_failed_after=qc.summary.get("failed_checks", []))
-    rec["qc_regressed"] = bool(qc.summary.get("failed_checks")) and rv.inp.qc.get("status") != "fail"
-    rdoc.update(project=rec["project"], project_version=rec["project_version"], qc_before=rec["qc_before"], qc_after=rec["qc_after"], preview_before=rec["preview_before"],
-                qc_regressed=rec["qc_regressed"])
+               qc_after=qc.summary.get("status") if qc is not None else None, qc_failed_after=after, qc_new_failures=new_failures,
+               qc_regressed=halt in ("qc_failed", "qc_regression"), halt=halt)
+    rec["halt_note"] = halt_text(rec)
+    rdoc.update(status="applied", project=rec["project"], project_version=rec["project_version"], qc_before=rec["qc_before"], qc_after=rec["qc_after"],
+                preview_before=rec["preview_before"], qc_regressed=rec["qc_regressed"], qc_new_failures=new_failures, halt=halt, halt_note=rec["halt_note"])
     _write_revision(ctx, n, rdoc, res)
-    _save_state(ctx, rounds=[*state_of(ctx).get("rounds", []), rec], pending=None)
+    _save_state(ctx, rounds=[*state_of(ctx).get("rounds", []), rec], pending=None, applying=None)
     return rec
 
 
@@ -460,12 +596,14 @@ def _apply_round(ctx: Any, rv: Review, selected: list[cr.Finding], res: ApplyRes
 
 def _summary(ctx: Any, doc: dict[str, Any], rel: str) -> dict[str, Any]:
     run = ds.latest_run(ctx)
+    last = next((r for r in reversed(doc["rounds"]) if r.get("status") == "applied"), {})
     return {"mode": doc["mode"], "status": doc["status"], "findings": len(doc["findings"]), "by_severity": doc["by_severity"], "dropped_findings": len(doc["dropped_findings"]),
             "proposals_valid": doc["proposals_valid"], "changes_applied": doc["changes_applied"], "rounds": len(doc["rounds"]),
             "images_sent": doc["images"]["sent"], "images_reason": doc["images"]["reason"], "endpoint": doc["endpoint"], "local": doc["local"], "model": doc["model"],
             "requests": doc["requests"], "response_cache_hits": doc["cache_hits"], "input_tokens": (doc["usage"] or {}).get("input_tokens", 0),
             "output_tokens": (doc["usage"] or {}).get("output_tokens", 0), "report": rel, "plan_hash": doc["plan_hash"],
-            "project": run["project_path"] if run else None, "project_version": run["version"] if run else None, "reason": doc["reason"], "error": doc.get("error")}
+            "project": run["project_path"] if run else None, "project_version": run["version"] if run else None, "reason": doc["reason"], "error": doc.get("error"),
+            "halt": last.get("halt"), "halt_note": last.get("halt_note"), "qc_new_failures": last.get("qc_new_failures") or []}
 
 
 def _write_report_safely(ctx: Any, doc: dict[str, Any]) -> str:
@@ -513,16 +651,17 @@ def critic_stage(ctx: Any) -> StageResult:
         return _critic_stage(ctx)
     except Exception as e:  # noqa: BLE001 - the critic is advisory: whatever goes wrong, the draft stands
         ctx.logger.event("critic", Status.FAILED, error=f"{type(e).__name__}: {e}")
-        return StageResult(Status.PARTIAL, {"mode": ctx.config.qc.critic, "status": "error", "error": f"{type(e).__name__}: {e}"}, f"{type(e).__name__}: {e}")
+        return StageResult(Status.PARTIAL, {"mode": effective_mode(ctx), "status": "error", "error": f"{type(e).__name__}: {e}"}, f"{type(e).__name__}: {e}")
 
 
 def _critic_stage(ctx: Any) -> StageResult:
     cfg = ctx.config
     q = cfg.qc
-    mode = q.critic
+    recovered = recover_interrupted(ctx)      # before anything else looks at the plan files
+    mode = effective_mode(ctx)
     if mode == "off":
         return StageResult(Status.SKIPPED, {"skipped": True, "reason": "qc.critic is off"})
-    requests = hits = 0
+    requests = hits = applied_now = 0
     while True:
         st = state_of(ctx)
         try:
@@ -542,11 +681,16 @@ def _critic_stage(ctx: Any) -> StageResult:
         requests += 0 if rv.resp.cached else 1
         hits += int(rv.resp.cached)
         done = lineage(st, rv.inp.plan.plan_hash)
-        rounds_left = len(done) < q.critic_max_rounds
+        halted = done[-1].get("halt") if done else None      # the latest round made QC worse or left no preview: no more rounds on this lineage
+        rounds_left = len(done) < q.critic_max_rounds and applied_now < q.critic_max_rounds and not halted
         selected, res = _assess(ctx, rv, mode)
         if selected and _revision_hash(rv.inp.plan.plan_hash, selected) in state_of(ctx).get("failed", []):
             for f in selected:
                 f.change_status, f.change_note = "refused", "building this exact revision failed earlier (see plans/revisions/); it is not tried again"
+            selected, res = [], None
+        elif selected and res is not None and res.edit.plan_hash in seen_hashes(state_of(ctx)) | {rv.inp.plan.plan_hash}:
+            for f in selected:
+                f.change_status, f.change_note = "refused", "this would return the plan to a version an earlier round already started from or produced; it is not applied again"
             selected, res = [], None
         if mode == "apply" and rounds_left and selected and res is not None and res.changed:
             authorization, number, stop = _authorize(ctx, rv, selected, res, mode, done)
@@ -555,6 +699,11 @@ def _critic_stage(ctx: Any) -> StageResult:
             snapshot = _report_doc(ctx, rv, mode=mode, status="ok", reason=f"review that motivated critic round {len(done) + 1}", selected=selected, res=res, rounds=done)
             rec = _apply_round(ctx, rv, selected, res, snapshot, authorization or "automatic", number)
             if rec["status"] == "applied":
+                applied_now += 1
+                if rec.get("halt") in ("preview_failed", "qc_failed"):     # there is nothing current to review: the preview or QC of this version is missing
+                    doc = _report_doc(ctx, rv, mode=mode, status="ok", reason=rec["halt_note"], selected=[], res=None, rounds=[*done, rec])
+                    doc["requests"], doc["cache_hits"] = requests, hits
+                    return StageResult(Status.PARTIAL, _summary(ctx, doc, _write_report_safely(ctx, doc)), rec["halt_note"])
                 continue      # review the new version; the response cache answers a repeat of the same request on the next run
             for f in selected:
                 f.change_status, f.change_note = "refused", rec.get("error", "the rebuild failed")
@@ -564,8 +713,11 @@ def _critic_stage(ctx: Any) -> StageResult:
         for f in selected:
             if f.change_status == "valid":
                 f.change_note = (f.change_note + "; " if f.change_note else "") + ("would be applied with qc.critic: apply" if mode == "report" else "no round left")
-        reason = ("the round limit (qc.critic_max_rounds) is reached; this is the review of the final version and changes nothing" if mode == "apply" and not rounds_left else None)
+        reason = (done[-1].get("halt_note") if halted else
+                  "the round limit (qc.critic_max_rounds) is reached; this is the review of the final version and changes nothing" if mode == "apply" and not rounds_left else None)
         doc = _report_doc(ctx, rv, mode=mode, status="ok", reason=reason, selected=selected, res=res, rounds=done)
+        if recovered:
+            doc["notes"].append(recovered)
         doc["requests"], doc["cache_hits"] = requests, hits
         rel = _write_report_safely(ctx, doc)
         _settle_input_hash(ctx)

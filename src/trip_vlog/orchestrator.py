@@ -350,6 +350,14 @@ def run_critic(output: Path | str, config_path: Path | str | None = None, overri
     if mode not in ("report", "apply"):
         raise ConfigError(f"critic mode must be report or apply, got {mode!r}")
     ov["qc.critic"] = mode
+    # asking for a review is a fresh start: revisions remembered as failed are tried again, and a stop after a QC regression is lifted
+    st = dict(manifest.get("critic") or {})
+    if st.get("failed") or (st.get("rounds") and st["rounds"][-1].get("halt")):
+        st.pop("failed", None)
+        if st.get("rounds") and st["rounds"][-1].get("halt"):
+            st["rounds"] = [*st["rounds"][:-1], {**st["rounds"][-1], "halt_lifted": st["rounds"][-1]["halt"], "halt": None}]
+        manifest.set(critic=st)
+        manifest.save()
     return _execute(None, output, config_path, ov, echo=echo, command=command, pipeline="draft", persist_config=False)
 
 

@@ -42,8 +42,8 @@ def proposals(call):
         finding(severity="major", category="pacing", summary="The opening clip drags.", scenes=["scene_001"], clips=["c1"],
                 evidence=[{"kind": "plan", "ref": "c1", "note": "5 s"}, {"kind": "tile", "ref": call.tiles[0][0], "note": "first frame"}],
                 proposed=change("trim_clip", clip_instance_id="c1", duration_seconds=4.0)),
-        finding(severity="minor", category="story_clarity", summary="Mark the change of place.", clips=["c2"],
-                evidence=[{"kind": "qc_check", "ref": "orientation", "note": ""}],
+        finding(severity="major", category="story_clarity", summary="Mark the change of place.", clips=["c2"],
+                evidence=[{"kind": "qc_check", "ref": "orientation", "note": ""}, {"kind": "plan", "ref": "c2", "note": "hard cut"}],
                 proposed=change("set_transition", clip_instance_id="c2", transition_type="dissolve", transition_seconds=0.5))]}
 
 
@@ -60,7 +60,7 @@ def test_report_mode_writes_the_report_fills_the_qc_block_and_changes_nothing(se
     assert len(t.calls) == 1 and t.calls[0].images >= 1
     rep = rj(ctx.workspace.root / "qc" / "critic_report.json")
     assert rep["status"] == "ok" and rep["mode"] == "report" and rep["plan_hash"] == plan.plan_hash and rep["images"]["sent"] is True
-    assert [f["id"] for f in rep["findings"]] == ["finding_01", "finding_02"] and rep["by_severity"] == {"info": 0, "minor": 1, "major": 1}
+    assert [f["id"] for f in rep["findings"]] == ["finding_01", "finding_02"] and rep["by_severity"] == {"info": 0, "minor": 0, "major": 2}
     assert [f["change"]["status"] for f in rep["findings"]] == ["valid", "valid"] and "would be applied with qc.critic: apply" in rep["findings"][0]["change"]["note"]
     assert rep["would_change"]["diff"]["total_delta_seconds"] == -1.0 and "c1: 5.00 s -> 4.00 s" in "\n".join(rep["would_change"]["lines"])
     assert rep["model"] == "test-model-resolved" and rep["requests"] == 1 and rep["usage"]["input_tokens"] == 2000
@@ -128,7 +128,7 @@ def test_off_does_nothing(setup):
 
 
 def test_swap_is_unavailable_without_an_approved_outline(setup):
-    t = CriticTransport(lambda call: {"summary": "", "findings": [finding(clips=["c2"], proposed=change("swap_moment", clip_instance_id="c2", moment_id=A2))]})
+    t = CriticTransport(lambda call: {"summary": "", "findings": [finding(severity="major", clips=["c2"], proposed=change("swap_moment", clip_instance_id="c2", moment_id=A2))]})
     ctx, plan, _ = setup(transport=t)
     cs.critic_stage(ctx)
     f = rj(ctx.workspace.root / "qc" / "critic_report.json")["findings"][0]
@@ -164,7 +164,7 @@ def test_a_hand_edited_plan_is_reviewed_but_no_change_is_proposed_for_it(setup):
 def test_cache_key_covers_plan_qc_sheets_prompt_model_and_limits_and_nothing_else(setup, monkeypatch):
     ctx, plan, t = setup()
     k0 = cs.critic_inputs(ctx)
-    assert cs.critic_inputs(ctx) == k0 and k0["prompt"]["system"]["version"] == 1 and k0["prompt"]["response_schema"] == "1" and k0["llm"]["model"] == "test-model"
+    assert cs.critic_inputs(ctx) == k0 and k0["prompt"]["system"]["version"] == 2 and k0["prompt"]["response_schema"] == "1" and k0["llm"]["model"] == "test-model"
     assert {"plan", "qc", "index", "request", "schema", "images", "llm", "limits", "mode", "max_tokens"} <= set(k0)
 
     def changed(mutate):
@@ -297,7 +297,7 @@ def test_max_rounds_and_ops_are_respected(setup, monkeypatch):
 
 
 def test_apply_with_nothing_valid_changes_nothing(setup, monkeypatch):
-    t = CriticTransport(lambda call: {"summary": "", "findings": [finding(clips=["c1"], proposed=change("trim_clip", clip_instance_id="c1", duration_seconds=99))]})
+    t = CriticTransport(lambda call: {"summary": "", "findings": [finding(severity="major", clips=["c1"], proposed=change("trim_clip", clip_instance_id="c1", duration_seconds=99))]})
     ctx, plan, _ = setup(qc={"critic": "apply"}, transport=t)
     rebuild = stub_rebuild(monkeypatch)
     before = plan_files(ctx)
@@ -309,7 +309,7 @@ def test_apply_with_nothing_valid_changes_nothing(setup, monkeypatch):
 def test_a_failed_rebuild_puts_the_previous_plan_back_and_keeps_the_proposed_one(setup, monkeypatch):
     t = CriticTransport(proposals)
     ctx, plan, _ = setup(qc={"critic": "apply"}, transport=t)
-    stub_rebuild(monkeypatch, fail_assemble="FilmCraft exploded")
+    stub_rebuild(monkeypatch, fail_assemble="FilmCraft exploded", reject_plan=True)
     before = plan_files(ctx)
     summary_before = (ctx.workspace.root / "plans" / "plan_summary.md").read_bytes() if (ctx.workspace.root / "plans" / "plan_summary.md").exists() else None
     res = cs.critic_stage(ctx)

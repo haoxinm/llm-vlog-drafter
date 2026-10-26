@@ -193,7 +193,8 @@ def make_draft_ctx(tmp_path: Path, monkeypatch, cfg, *, approval_mode: str = "ma
     return ctx, sel, plan
 
 
-def stub_rebuild(monkeypatch, *, fail_assemble: str | None = None):
+def stub_rebuild(monkeypatch, *, fail_assemble: str | None = None, reject_plan: bool = False, preview_status=None, qc_failed: list[str] | None = None,
+                 qc_raises: bool = False, preview_raises: BaseException | None = None):
     """Replace the FilmCraft-facing stages the critic calls after a fix. Returns the list of calls (plan hash on disk at the time, in order)."""
     from trip_vlog import draft_stages as ds
     from trip_vlog.logging_utils import Status
@@ -203,22 +204,35 @@ def stub_rebuild(monkeypatch, *, fail_assemble: str | None = None):
 
     def assemble(ctx):
         calls.append(("assemble", ds.plan_file_hash(ds._pp(ctx).edit_plan)))
-        if fail_assemble:
-            return StageResult(Status.FAILED, {}, fail_assemble)
+        mp = ctx.workspace.root / "filmcraft" / "mapping_report.json"      # the real stage writes it before it builds
+        mp.parent.mkdir(parents=True, exist_ok=True)
+        mp.write_text(json.dumps({"plan_hash": ds.plan_file_hash(ds._pp(ctx).edit_plan)}), encoding="utf-8")
+        if fail_assemble:     # a plan rejection says why in `errors`, like the real stage; a failure of the environment does not
+            return StageResult(Status.FAILED, {"errors": [{"code": "plan_rejected"}]} if reject_plan else {}, fail_assemble)
         return StageResult(Status.SUCCEEDED, {"project": f"filmcraft/Trip Vlog Draft_v{len([c for c in calls if c[0] == 'assemble']) + 1:03d}.fcproj",
                                               "version": len([c for c in calls if c[0] == "assemble"]) + 1})
 
     def preview(ctx):
         calls.append(("preview", ds.plan_file_hash(ds._pp(ctx).edit_plan)))
+        if preview_raises is not None:
+            raise preview_raises
         ds._preview_path(ctx).write_bytes(b"new preview")
-        return StageResult(Status.SUCCEEDED, {"preview": "preview/draft.mp4"})
+        return StageResult(preview_status or Status.SUCCEEDED, {"preview": "preview/draft.mp4"})
 
     def qc(ctx):
         h = ds.plan_file_hash(ds._pp(ctx).edit_plan)
         calls.append(("qc", h))
+        if qc_raises:
+            raise RuntimeError("qc crashed")
         plan = ds._prepare(ctx).plan
-        write_qc(ctx.workspace.root, plan, "warn")
-        return StageResult(Status.SUCCEEDED, {"status": "warn", "failed_checks": [], "warned_checks": ["orientation"]})
+        write_qc(ctx.workspace.root, plan, "fail" if qc_failed else "warn")
+        if qc_failed:      # the report names the failing checks too, as the real stage's does (the critic's next review reads it)
+            qp = ctx.workspace.root / "preview" / "qc_report.json"
+            doc = json.loads(qp.read_text(encoding="utf-8"))
+            doc["checks"] = [{**c, "status": "fail" if c["name"] in qc_failed else c["status"]} for c in doc["checks"]]
+            doc["checks"] += [{"name": n, "status": "fail", "detail": "x"} for n in qc_failed if n not in {c["name"] for c in doc["checks"]}]
+            atomic_write_json(qp, doc)
+        return StageResult(Status.SUCCEEDED, {"status": "fail" if qc_failed else "warn", "failed_checks": list(qc_failed or []), "warned_checks": ["orientation"]})
 
     monkeypatch.setattr(ds, "assemble_stage", assemble)
     monkeypatch.setattr(ds, "preview_stage", preview)

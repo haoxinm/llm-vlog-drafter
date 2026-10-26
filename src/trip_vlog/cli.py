@@ -250,7 +250,9 @@ def _print_draft_result(res: IndexResult) -> None:
         if cs.get("rounds") or cs.get("changes_applied"):
             print(f"  the critic changed the plan in {cs.get('rounds', 0)} round(s); FilmCraft project now {cs.get('project')} (v{cs.get('project_version')}), "
                   "earlier versions are kept")
-        if cs.get("error"):
+        if cs.get("halt_note"):
+            print(f"  WARNING: {cs['halt_note']}")
+        if cs.get("error") and cs.get("error") != cs.get("halt_note"):
             print(f"  critic problem (the draft is unaffected): {str(cs['error']).splitlines()[0]}")
         if cs.get("report"):
             print(f"  report: {ws / str(cs['report'])[:-5]}.md")
@@ -506,6 +508,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
         pend = cst.get("pending") or {}
         print(f"critic    : {len(cst.get('rounds', []))} round(s) applied" + (f"; latest {cst['rounds'][-1].get('revision')}" if cst.get("rounds") else "")
               + (f"; revision {pend.get('revision')} {pend.get('status')}" if pend else "") + "; report qc/critic_report.md")
+        if cst.get("rounds") and cst["rounds"][-1].get("halt_note"):
+            print(f"            WARNING: {cst['rounds'][-1]['halt_note']}")
     oap = m.get("outline_approval")
     if oap:
         print(f"outline   : {oap.get('status')}" + (f" ({oap.get('mode')})" if oap.get("mode") else "") + f" outline {str(oap.get('outline_hash', ''))[:12]}")
@@ -541,6 +545,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
     if stages.get("outline_approval", {}).get("status") == "awaiting_approval":
         print(f"next: review plans/story_outline.md (edit plans/story_outline.json if needed), then `trip-vlog approve --output {info['workspace']}` "
               f"and `trip-vlog resume --output {info['workspace']}`")
+    elif stages.get("critic", {}).get("status") == "awaiting_approval" and (m.get("critic") or {}).get("pending", {}).get("status") == "approved":
+        print(f"next: the critic revision is approved; `trip-vlog resume --output {info['workspace']}` applies it")
     elif stages.get("critic", {}).get("status") == "awaiting_approval":
         print(f"next: review plans/revisions/ and qc/critic_report.md, then `trip-vlog approve --critic --output {info['workspace']}` and "
               f"`trip-vlog resume --output {info['workspace']}`")
