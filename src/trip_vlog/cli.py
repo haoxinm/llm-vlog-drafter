@@ -1,11 +1,11 @@
-"""Command line interface: index / analyze / transcribe / outline / llm-check / draft / approve / status / resume.
+"""Command line interface: index / analyze / transcribe / outline / llm-check / draft / critic / approve / status / resume.
 
 Exit codes
   0    success (pipeline finished; QC findings are reported, not errors)
   1    a stage failed (details in `status`, logs/errors.jsonl)
   2    usage or configuration error (bad flag, unusable paths)
-  3    stopped at the approval gate: review plans/story_outline.md (`outline`) or plans/plan_summary.md (`draft`), then `approve` and
-       `resume` (or `--auto-approve`)
+  3    stopped at the approval gate: review plans/story_outline.md (`outline`) or plans/plan_summary.md (`draft`), or the critic revision under
+       plans/revisions/ (qc.critic: apply with workflow.plan_review), then `approve` and `resume` (or `--auto-approve`)
   4    `approve` refused: the outline/plan is missing, failed validation, or its stage did not succeed
        (`resolve-finish`: 0 finished, 1 required checks failed, 2 preconditions/arguments, 3 Resolve scripting unavailable)
   130  interrupted (Ctrl-C); `resume` continues
@@ -24,8 +24,8 @@ import yaml
 from trip_vlog import __version__
 from trip_vlog.config import ConfigError
 from trip_vlog.draft_stages import DRAFT_STAGES
-from trip_vlog.orchestrator import (ApprovalRefused, IndexResult, approve_pending, read_status, run_analyze, run_draft, run_index, run_outline,
-                                    run_transcribe)
+from trip_vlog.orchestrator import (ApprovalRefused, IndexResult, approve_pending, read_status, run_analyze, run_critic, run_draft, run_index,
+                                    run_outline, run_transcribe)
 
 
 def _common(p: argparse.ArgumentParser, *, media_required: bool) -> None:
@@ -107,12 +107,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--auto-approve", action="store_true", default=None,
                    help="skip the approval stop; approval is recorded as automatic (workflow.approval=auto_approve)")
 
-    p = sub.add_parser("approve", help="approve what is waiting at the approval gate: the story outline (plans/story_outline.json) or "
-                                       "the edit plan (plans/edit_plan.json); it says which")
+    p = sub.add_parser("critic", help="run the optional LLM critic on a finished draft: report (default) writes qc/critic_report.md; apply also applies its "
+                                      "validated, local fixes as a new plan version and FilmCraft project (this run only; project.yaml is not changed)")
+    p.add_argument("--output", type=Path, required=True, help="the draft workspace")
+    p.add_argument("--config", type=Path)
+    p.add_argument("--set", dest="sets", action="append", default=[], metavar="SECTION.FIELD=VALUE")
+    p.add_argument("--mode", choices=["report", "apply"], help="default: qc.critic from the config, or report when that is off")
+    p.add_argument("--filmcraft", help="path to filmcraft-cli (filmcraft.executable; else $FILMCRAFT_CLI, PATH)")
+
+    p = sub.add_parser("approve", help="approve what is waiting at the approval gate: the story outline (plans/story_outline.json), "
+                                       "the edit plan (plans/edit_plan.json) or a critic revision; it says which")
     p.add_argument("--output", type=Path, required=True)
     g = p.add_mutually_exclusive_group()
     g.add_argument("--outline", dest="which", action="store_const", const="outline", help="approve the story outline explicitly")
     g.add_argument("--plan", dest="which", action="store_const", const="plan", help="approve the edit plan explicitly")
+    g.add_argument("--critic", dest="which", action="store_const", const="critic",
+                   help="approve the critic revision plans/revisions/critic_rNN.* (workflow.plan_review: true); `resume` then applies it")
 
     p = sub.add_parser("resolve-finish", help="optional: finish the handoff inside DaVinci Resolve Studio "
                                               "(new project, import, relink stills, markers, experimental titles, report)")
@@ -195,7 +205,13 @@ def _print_draft_result(res: IndexResult) -> None:
         print(f"  edit  : {ws / ap.get('outline', 'plans/story_outline.json')} (optional)")
         print(f"  then  : trip-vlog approve --output {ws}  &&  trip-vlog resume --output {ws}")
         return
-    if res.awaiting_approval:
+    if res.awaiting_approval and m.stage("critic").get("status") == "awaiting_approval":
+        cs = m.stage("critic").get("summary", {})
+        print(f"\nAWAITING APPROVAL of a critic revision: the draft and its preview are unchanged; {cs.get('proposals_valid', 0)} proposed change(s) wait for you.")
+        print(f"  review: {ws / cs.get('revision_summary', 'plans/revisions')}")
+        print(f"  report: {ws / str(cs.get('report', 'qc/critic_report.json'))[:-5]}.md")
+        print(f"  then  : trip-vlog approve --critic --output {ws}  &&  trip-vlog resume --output {ws}")
+    elif res.awaiting_approval:
         ap = m.stage("approval").get("summary", {})
         print("\nAWAITING APPROVAL: nothing has been created in FilmCraft yet.")
         if ap.get("invalidated"):
@@ -222,6 +238,22 @@ def _print_draft_result(res: IndexResult) -> None:
               + (f", {qc['skipped']} skipped" if qc.get("skipped") else "") + ")"
               + (f"; warnings: {', '.join(qc['warned_checks'])}" if qc.get("warned_checks") else "")
               + (f"; FAILED: {', '.join(qc['failed_checks'])}" if qc.get("failed_checks") else ""))
+    cs = m.stage("critic").get("summary", {})
+    if cs.get("mode"):
+        sev = cs.get("by_severity") or {}
+        print(f"critic ({cs['mode']}): {cs.get('status')}; {cs.get('findings', 0)} finding(s)"
+              + (f" ({', '.join(f'{n} {k}' for k, n in sev.items() if n)})" if cs.get("findings") else "")
+              + (f", {cs['changes_applied']} change(s) applied" if cs.get("changes_applied") else "")
+              + f"; {cs.get('requests', 0)} request(s) to '{cs.get('endpoint')}' ({'local' if cs.get('local') else 'remote'}), "
+              f"{cs.get('input_tokens', 0)} input / {cs.get('output_tokens', 0)} output tokens; "
+              + ("preview sheets sent as images" if cs.get("images_sent") else f"TEXT ONLY, no images ({cs.get('images_reason')})"))
+        if cs.get("rounds") or cs.get("changes_applied"):
+            print(f"  the critic changed the plan in {cs.get('rounds', 0)} round(s); FilmCraft project now {cs.get('project')} (v{cs.get('project_version')}), "
+                  "earlier versions are kept")
+        if cs.get("error"):
+            print(f"  critic problem (the draft is unaffected): {str(cs['error']).splitlines()[0]}")
+        if cs.get("report"):
+            print(f"  report: {ws / str(cs['report'])[:-5]}.md")
     pv = m.stage("preview").get("summary", {})
     if pv.get("preview"):
         print(f"preview: {ws / pv['preview']} ({pv.get('duration_seconds')} s)")
@@ -244,6 +276,12 @@ def _compat_line(summary: dict, ws: Path) -> str:
 
 def _cmd_draft(args: argparse.Namespace, command: str = "draft") -> int:
     res = run_draft(args.media, args.output, args.config, _overrides(args), command=command)
+    _print_draft_result(res)
+    return res.exit_code
+
+
+def _cmd_critic(args: argparse.Namespace) -> int:
+    res = run_critic(args.output, args.config, _overrides(args), mode=args.mode, command="critic")
     _print_draft_result(res)
     return res.exit_code
 
@@ -420,7 +458,9 @@ def _cmd_approve(args: argparse.Namespace) -> int:
     except ApprovalRefused as e:
         print(f"error: {e}", file=sys.stderr)
         return 4
-    if kind == "outline":
+    if kind == "critic":
+        print(f"approved critic revision {ap.get('revision')} (recorded in manifest.json). Continue with: trip-vlog resume --output {args.output}")
+    elif kind == "outline":
         print(f"approved story outline {ap['outline_hash'][:12]} (recorded in manifest.json). Continue with: trip-vlog resume --output {args.output}")
     else:
         print(f"approved plan {ap['plan_hash'][:12]} (recorded in manifest.json). Continue with: trip-vlog resume --output {args.output}")
@@ -448,7 +488,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
     stages = m.get("stages", {})
     canonical = ("scan", "probe", "catalog", "thumbnails", "segment", "audio", "transcribe", "analyze", "outline", "outline_approval", *DRAFT_STAGES[5:])
     llm_draft = m.get("pipeline") == "draft" and m.get("planner") == "llm"
-    order = ([n for n in canonical if n in stages or (m.get("pipeline") == "draft"
+    order = ([n for n in canonical if n in stages or (m.get("pipeline") == "draft" and n != "critic"
                                                       and (llm_draft or n not in ("analyze", "audio", "transcribe", "outline", "outline_approval")))]
              + [n for n in stages if n not in canonical])
     for name in order:
@@ -459,7 +499,13 @@ def _cmd_status(args: argparse.Namespace) -> int:
             print(f"      error: {st['error']}")
     ap = m.get("approval")
     if ap:
-        print(f"approval  : {ap.get('status')}" + (f" ({ap.get('mode')})" if ap.get("mode") else "") + f" plan {str(ap.get('plan_hash', ''))[:12]}")
+        print(f"approval  : {ap.get('status')}" + (f" ({ap.get('mode')})" if ap.get("mode") else "") + f" plan {str(ap.get('plan_hash', ''))[:12]}"
+              + (f" (critic fix of {str(ap.get('parent_plan_hash', ''))[:12]}, {ap.get('revision')})" if ap.get("mode") == "critic_fix" else ""))
+    cst = m.get("critic")
+    if cst and (cst.get("rounds") or cst.get("pending")):
+        pend = cst.get("pending") or {}
+        print(f"critic    : {len(cst.get('rounds', []))} round(s) applied" + (f"; latest {cst['rounds'][-1].get('revision')}" if cst.get("rounds") else "")
+              + (f"; revision {pend.get('revision')} {pend.get('status')}" if pend else "") + "; report qc/critic_report.md")
     oap = m.get("outline_approval")
     if oap:
         print(f"outline   : {oap.get('status')}" + (f" ({oap.get('mode')})" if oap.get("mode") else "") + f" outline {str(oap.get('outline_hash', ''))[:12]}")
@@ -495,6 +541,9 @@ def _cmd_status(args: argparse.Namespace) -> int:
     if stages.get("outline_approval", {}).get("status") == "awaiting_approval":
         print(f"next: review plans/story_outline.md (edit plans/story_outline.json if needed), then `trip-vlog approve --output {info['workspace']}` "
               f"and `trip-vlog resume --output {info['workspace']}`")
+    elif stages.get("critic", {}).get("status") == "awaiting_approval":
+        print(f"next: review plans/revisions/ and qc/critic_report.md, then `trip-vlog approve --critic --output {info['workspace']}` and "
+              f"`trip-vlog resume --output {info['workspace']}`")
     elif stages.get("approval", {}).get("status") == "awaiting_approval":
         print(f"next: review plans/plan_summary.md, then `trip-vlog approve --output {info['workspace']}` and `trip-vlog resume --output {info['workspace']}`")
     elif unfinished:
@@ -511,7 +560,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return {"index": _cmd_index, "status": _cmd_status, "resume": _cmd_resume, "draft": _cmd_draft,
-                "approve": _cmd_approve, "outline": _cmd_outline, "resolve-finish": _cmd_resolve_finish, "analyze": _cmd_analyze, "transcribe": _cmd_transcribe,
+                "approve": _cmd_approve, "critic": _cmd_critic, "outline": _cmd_outline, "resolve-finish": _cmd_resolve_finish, "analyze": _cmd_analyze, "transcribe": _cmd_transcribe,
                 "llm-check": _cmd_llm_check}[args.command](args)
     except ConfigError as e:
         print(f"error: {e}", file=sys.stderr)
