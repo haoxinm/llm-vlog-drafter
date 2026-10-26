@@ -585,6 +585,16 @@ class OutputsConfig(_Model):
         return "/".join(parts)
 
 
+class CaptionsConfig(_Model):
+    """Optional captions from the speech transcript (DESIGN §13.4): an SRT next to the timeline in the handoff folder. The text is the transcript's own
+    words, never rewritten; these options only decide where a transcript segment is split into cues and how long a cue stays up."""
+
+    enabled: bool = False                 # off by default. project.include_subtitles (the older name) turns it on too
+    max_chars_per_line: int = Field(42, ge=10, le=100)
+    max_lines: int = Field(2, ge=1, le=4)
+    min_duration_seconds: float = Field(1.0, ge=0, le=10)     # a cue shorter than this is shown longer when the clip has room (text unchanged)
+
+
 class Config(_Model):
     project: ProjectConfig = ProjectConfig()
     editorial: EditorialConfig = EditorialConfig()
@@ -595,6 +605,7 @@ class Config(_Model):
     workflow: WorkflowConfig = WorkflowConfig()
     filmcraft: FilmCraftConfig = FilmCraftConfig()
     qc: QcConfig = QcConfig()
+    captions: CaptionsConfig = CaptionsConfig()
     revise: ReviseConfig = ReviseConfig()
     outputs: OutputsConfig = OutputsConfig()
 
@@ -628,6 +639,15 @@ class Config(_Model):
             self.speech.__dict__["enabled"] = alias
             self.speech.__dict__["__pydantic_fields_set__"] = self.speech.model_fields_set | {"enabled"}
             self.media.__dict__["transcribe_speech"] = None
+        return self
+
+    @model_validator(mode="after")
+    def _captions_alias(self) -> "Config":
+        """`project.include_subtitles` (the name in DESIGN §4.1) turns captions on; `captions.enabled: false` next to it is a contradiction."""
+        if self.project.include_subtitles and not self.captions.enabled:
+            if "enabled" in self.captions.model_fields_set:
+                raise ValueError("project.include_subtitles is true but captions.enabled is false: remove one of them (captions.enabled is the setting to use)")
+            self.captions.__dict__["enabled"] = True
         return self
 
     @model_validator(mode="after")

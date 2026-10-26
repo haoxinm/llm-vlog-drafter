@@ -27,6 +27,7 @@ from trip_vlog.filmcraft.plan_mapping import MappingError, MappingResult, Mappin
 from trip_vlog.filmcraft.timeline_spec import TimelineSpec, downgrade_dissolves
 from trip_vlog.handoff.compatibility import (REPORT_JSON as COMPAT_JSON, REPORT_MD as COMPAT_MD, CompatInputs, build_compatibility_report,
                                              load_finish_report, render_compatibility_markdown, summary_of)
+from trip_vlog.handoff.captions import REPORT_NAME as CAPTIONS_REPORT, SRT_NAME, CaptionSettings, build_captions, write_srt
 from trip_vlog.handoff.interchange import export_handoff
 from trip_vlog.handoff.media_manifest import manifest_rows, missing_used_media, write_media_manifest
 from trip_vlog.handoff.report import HandoffReportInputs, read_resolve_verification, render_handoff_report
@@ -523,6 +524,39 @@ def _qc_paths_critic(ctx: Any) -> Path:
     return Path(ctx.paths.outputs["qc_dir"]) / "critic_report.md"
 
 
+def _captions_inputs(ctx: Any) -> Any:
+    """Captions come from the plan and the current transcripts; the options shape them. Off: None (a file left from an earlier run is set aside)."""
+    if not ctx.config.captions.enabled:
+        return {"off": True}
+    return {"options": ctx.config.captions.model_dump(),
+            "transcripts": stable_hash({a: [(t.start, t.end, t.text, t.coarse) for t in ts] for a, ts in sorted(_qc_transcripts(ctx).items())})}
+
+
+def _write_captions(ctx: Any, prep: Prepared, out: Path, notes: list[str]) -> dict[str, Any] | None:
+    """The optional SRT of the handoff (config `captions.enabled`). Returns what the handoff report says about it."""
+    srt = out / SRT_NAME
+    prev = (ctx.manifest.get("captions") or {}).get("sha256")
+    if not ctx.config.captions.enabled:
+        if srt.is_file():       # captions were turned off since: the old file does not belong to this handoff any more
+            write_srt(srt, [], prev)
+            ctx.manifest.set(captions=None)
+            ctx.manifest.save()
+            notes.append(f"captions are off (captions.enabled): the earlier {SRT_NAME} was set aside as {srt.stem}.stale{srt.suffix}")
+        return None
+    res = build_captions(prep.plan, _qc_transcripts(ctx), CaptionSettings.from_config(ctx.config))
+    w = write_srt(srt, res.cues, prev)
+    info = {**res.to_dict(), "file": SRT_NAME if res.cues else None, "sha256": w["sha256"], "backup_of_edited_file": w["backup"],
+            "encoding": "UTF-8 without BOM, CRLF line endings", "generated_at": utc_now_iso()}
+    atomic_write_json(out / CAPTIONS_REPORT, info)
+    ctx.manifest.set(captions={"sha256": w["sha256"], "file": info["file"], "cues": len(res.cues)})
+    ctx.manifest.save()
+    if w["backup"]:
+        notes.append(f"{SRT_NAME} had been edited since it was written; that version was kept as {w['backup']}")
+    if not res.cues:
+        notes.append("captions are on but no clip has usable transcript text (see captions_report.json); no SRT was written. Transcribe first with `trip-vlog transcribe`")
+    return info
+
+
 def _handoff_inputs(ctx: Any) -> Any:
     out = _handoff_dir(ctx)
     return {"project": _project_sha(ctx), **({"critic_report": c} if (c := _file_sha(_qc_paths_critic(ctx))) else {}), "plan": plan_file_hash(_pp(ctx).edit_plan),
@@ -530,7 +564,7 @@ def _handoff_inputs(ctx: Any) -> Any:
             "resolve_verification": _file_sha(out / "resolve_verification.json"),
             "resolve_finish_report": _file_sha(out / COMPAT_FINISH),
             "filmcraft_version": (ctx.manifest.get("filmcraft") or {}).get("version"),
-            "failed_builds": [f["version"] for f in failed_versions(ctx)],
+            "failed_builds": [f["version"] for f in failed_versions(ctx)], "captions": _captions_inputs(ctx),
             "assets": [(a["asset_id"], a["content_version"]) for a in ctx.catalog.list_assets()]}
 
 
@@ -576,6 +610,7 @@ def handoff_stage(ctx: Any) -> StageResult:
     export = export_handoff(get_adapter(ctx), eff, cfg.filmcraft.interchange_formats, out, proj)
     if export.error:
         notes.append(f"interchange export failed: {export.error}")
+    captions = _write_captions(ctx, prep, out, notes)
     rows = manifest_rows(ctx.catalog.list_assets(), ctx.paths.media_root, prep.mapping.used_asset_ids)
     write_media_manifest(out / "media_manifest.csv", rows)
     atomic_write_json(out / "edit_plan.json", to_json_dict(prep.plan))
@@ -610,14 +645,15 @@ def handoff_stage(ctx: Any) -> StageResult:
         out_dir=out, export=export, project_ref=ref, preview_path=str(preview) if preview.is_file() else None,
         plan_hash=prep.plan.plan_hash, qc_status=qc_status, media_rows=rows, missing_media=missing,
         mapping_warnings=[w.to_dict() for w in prep.mapping.warnings],
-        verification=read_resolve_verification(out / "resolve_verification.json"), stage_notes=notes, compatibility=compat_summary))
+        verification=read_resolve_verification(out / "resolve_verification.json"), stage_notes=notes, compatibility=compat_summary, captions=captions))
     atomic_write_text(out / "handoff_report.md", text)
     atomic_write_json(out / "handoff_summary.json", {**export.to_dict(), "missing_media": missing, "generated_at": utc_now_iso(),
                                                       "compatibility": compat_summary})
     ok = export.report is not None and export.report.ok and not missing and compat_summary["xml_roundtrip_ok"] is not False
     summary = {"formats": export.exported_files and [Path(f).name for f in export.exported_files], "files": sorted(p.name for p in out.iterdir()),
                "missing_media": len(missing), "export_error": export.error, "otio_reload": (export.otio_reload or {}).get("status"),
-               "compatibility": compat_summary, "compatibility_report": _rel(ctx, out / COMPAT_JSON)}
+               "compatibility": compat_summary, "compatibility_report": _rel(ctx, out / COMPAT_JSON),
+               **({"captions": {k: captions[k] for k in ("file", "cues", "clips_captioned")}} if captions else {})}
     return StageResult(Status.SUCCEEDED if ok else Status.PARTIAL, summary)
 
 
@@ -656,5 +692,6 @@ def build_draft_runner(ctx: Any) -> StageRunner:
         # Also registered (in apply mode) when a revision was approved with `approve --critic`, whatever qc.critic says now.
         runner.register("critic", critic_stage, deps=("qc",), inputs=critic_inputs, verify=critic_verify)
     runner.register("handoff", handoff_stage, deps=("assemble",), inputs=_handoff_inputs,
-                    verify=lambda c: (_handoff_dir(c) / "handoff_report.md").is_file() and (_handoff_dir(c) / COMPAT_JSON).is_file())
+                    verify=lambda c: (_handoff_dir(c) / "handoff_report.md").is_file() and (_handoff_dir(c) / COMPAT_JSON).is_file()
+                    and (not c.config.captions.enabled or (_handoff_dir(c) / CAPTIONS_REPORT).is_file()))
     return runner

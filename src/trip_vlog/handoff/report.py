@@ -58,6 +58,7 @@ class HandoffReportInputs:
     verification: tuple[str, str] = ("absent", "")
     stage_notes: list[str] = field(default_factory=list)  # e.g. "preview failed: ..."
     compatibility: dict[str, Any] | None = None           # handoff.compatibility.summary_of(...)
+    captions: dict[str, Any] | None = None                # handoff.captions: what the optional SRT holds (None: captions are off)
 
 
 def _esc(s: Any) -> str:
@@ -129,6 +130,15 @@ def render_handoff_report(i: HandoffReportInputs) -> str:
             first = rep.formats[0].format
             L += [f"Import the **{first}** file first"
                   + (" (verified to import in Resolve 21.1 with the Phase 0 fixture)." if first == "fcp7_xml" else "."), ""]
+    cap = i.captions
+    if cap:
+        if cap.get("file"):
+            L += [f"Captions: **`{cap['file']}`** ({cap['cues']} cue(s) from {cap['clips_captioned']} clip(s); {cap['encoding']}). The words are the speech transcript's own, "
+                  f"never rewritten; timing is mapped through the edit plan, and where a transcript segment is cut by a clip or split into cues the position of words "
+                  f"inside the segment is an estimate (the transcript has segment timing only). {len(cap['clips_skipped'])} clip(s) have none (reasons in `captions_report.json`). "
+                  "Check them against the speech before publishing.", ""]
+        else:
+            L += ["Captions were requested (`captions.enabled`) but no clip has usable transcript text, so there is no SRT (see `captions_report.json`).", ""]
     L += ["Also in this folder: `media_manifest.csv`, `edit_plan.json` (validated plan), `project_reference.json` "
           "(path and hash of the FilmCraft `.fcproj`; the project is not copied) and this report.",
           f"Draft preview (reference only, not copied): `{i.preview_path or 'not rendered'}`.", ""]
@@ -139,6 +149,9 @@ def render_handoff_report(i: HandoffReportInputs) -> str:
           "3. File > Import > Timeline..., choose `timeline.xml` (FCP7 XML) first; use `timeline.otio` if your Resolve version supports OTIO import.",
           "4. If clips show offline, use Media Pool > Relink Selected Clips and point Resolve at the original media folder.",
           "5. Recreate titles from the list below (they are not carried), then check cuts, transitions and audio.",
+          *([f"6. Captions are a MANUAL step: import `{cap['file']}` yourself (in Resolve: File > Import > Subtitle..., menu wording varies by version) and check that it "
+             "lines up with the speech; if it is offset, compare with the timeline's start timecode. trip-vlog does not import subtitles, and importing this file "
+             "has not been verified in Resolve (see the runbook in DESIGN.md)."] if cap and cap.get("file") else []),
           "", "## Verification", "",
           "`python tools/resolve_verify.py --handoff <this folder>` imports these files into a scratch Resolve project and writes "
           "`resolve_verification.json` here. See `docs/resolve-verification.md` for setup (Resolve scripting must be enabled); if the scripting API "
