@@ -206,8 +206,9 @@ def test_exported_fcp7_xml_round_trips_the_spec_exactly(built):
     assert rt.matched["stills"] == 1 and rt.matched["overlays_v2"] == 1 and rt.matched["audio_gain"] == 1
 
 
+@pytest.mark.parametrize("fps", [Fraction(30), Fraction(30000, 1001), Fraction(24000, 1001), Fraction(25)], ids=["30", "29.97", "23.976", "25"])
 @pytest.mark.parametrize("frames", [16, 3])
-def test_exported_dissolve_span_and_half_frame_source_match_exactly(tmp_path, ffmpeg_tools, generated_media, frames):
+def test_exported_dissolve_span_and_half_frame_source_match_exactly(tmp_path, ffmpeg_tools, generated_media, frames, fps):
     """Real FilmCraft: even and odd dissolve lengths are written where ``centred_transition_span`` says (tolerance 0), and a source point
     on an exact half frame (0.25 s at 30 fps) is accepted with either rounding but nothing else."""
     from dataclasses import replace
@@ -217,9 +218,10 @@ def test_exported_dissolve_span_and_half_frame_source_match_exactly(tmp_path, ff
 
     media = tmp_path / "media"
     shutil.copytree(generated_media, media)
-    spec = make_spec(media)
+    spec = make_spec(media, fps=fps)
     pl = list(spec.placements)
-    pl[0] = replace(pl[0], source_in_seconds=0.25, source_out_seconds=3.75)
+    half = float(Fraction(15, 2) / fps)                      # source in point on exactly 7.5 frames
+    pl[0] = replace(pl[0], source_in_seconds=half, source_out_seconds=half + float(Fraction(105) / fps))
     pl[1] = replace(pl[1], transition_in=TransitionIn("dissolve", frames))
     spec = replace(spec, placements=tuple(pl))
     adapter = new_adapter(tmp_path / "ws", media)

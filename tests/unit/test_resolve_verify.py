@@ -312,9 +312,21 @@ def test_paths_equal_case_insensitive(a, b):
 
 def test_posix_paths_are_never_case_folded_and_unicode_is_nfc_compared():
     import unicodedata
-    assert not rv.paths_equal("file:///Users/me/My%20Clips/a.mp4", "/Users/Me/my clips/a.mp4", fold_case=True)
-    assert not rv.paths_equal("/a/B.mp4", "/a/b.mp4") and not rv.paths_equal("/a/B.mp4", "/a/b.mp4", fold_case=True)
-    assert not rv.paths_equal("C:/a/B.mp4", "/a/b.mp4", fold_case=True)                                     # Windows-style vs POSIX
+    import sys
+    from unittest import mock
+    a, b = "file:///Users/me/My%20Clips/a.mp4", "/Users/Me/my clips/a.mp4"
+    with mock.patch.object(sys, "platform", "linux"):                       # Linux: POSIX paths are case-sensitive unless asked
+        assert not rv.paths_equal(a, b) and not rv.paths_equal("/a/B.mp4", "/a/b.mp4") and not rv.paths_equal(a, b, fold_case=False)
+        assert rv.paths_equal(a, b, fold_case=True)                         # an explicit request is honoured for POSIX paths
+        assert rv.paths_equal("C:/a/B.mp4", "c:/a/b.mp4")                   # Windows-style folds on every host
+        assert not rv.paths_equal("C:/a/B.mp4", "/a/b.mp4", fold_case=False) and not rv.paths_equal("C:/a/B.mp4", "/a/b.mp4")
+    with mock.patch.object(sys, "platform", "darwin"):                      # macOS volumes are case-insensitive by default
+        assert rv.paths_equal(a, b) and rv.paths_equal("/a/B.mp4", "/a/b.mp4") and rv.paths_equal("C:/a/B.mp4", "c:/a/b.mp4")
+        assert not rv.paths_equal(a, b, fold_case=False)                    # False never folds
+        assert not rv.paths_equal("/a/b.mp4", "/a/c.mp4")
+    with mock.patch.object(sys, "platform", "win32"):
+        assert rv.paths_equal("C:\\A\\x.mp4", "c:/a/X.mp4") and not rv.paths_equal("C:\\A\\x.mp4", "c:/a/X.mp4", fold_case=False)
+        assert not rv.paths_equal("/a/B.mp4", "/a/b.mp4")                   # a POSIX path on a Windows host: only Windows-style paths fold by default
     nfd, nfc_ = unicodedata.normalize("NFD", "/Users/me/Caf\u00e9/clip.mov"), unicodedata.normalize("NFC", "/Users/me/Caf\u00e9/clip.mov")
     assert nfd != nfc_ and rv.paths_equal(nfd, nfc_, fold_case=False) and rv.paths_equal(nfd, nfc_)
     assert rv.paths_equal(unicodedata.normalize("NFD", "C:\\Users\\Me\\Caf\u00e9.mp4"), "c:/users/me/caf\u00e9.mp4")

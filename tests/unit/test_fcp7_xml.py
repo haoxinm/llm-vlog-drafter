@@ -82,6 +82,26 @@ def test_minus_one_next_to_a_transition_is_derived_from_its_cut():
     assert (alone.start, alone.end, alone.start_derived) == (None, None, False)
 
 
+def test_minus_one_next_to_a_one_sided_or_edge_aligned_transition_stays_unknown():
+    """A fade in / fade out (a transition with a clip on one side only) or a non-centred one does not say where the cut is."""
+    def parse(video, alignment="center"):
+        text = xmeml(duration=195, video=[video])
+        if alignment != "center":
+            text = text.replace("<alignment>center</alignment>", f"<alignment>{alignment}</alignment>")
+        return sorted(parse_fcp7_xml(text).track_clips("video", 1), key=lambda c: c.name)     # by name: an unknown start sorts first
+
+    fade_in = parse([transitionitem(0, 15), clipitem(1, "a.mp4", -1, 105, 0, 105, path=MAC, file_id="f1")])
+    assert (fade_in[0].start, fade_in[0].start_derived) == (None, False)
+    fade_out = parse([clipitem(1, "a.mp4", 0, -1, 0, 105, path=MAC, file_id="f1"), transitionitem(97, 112)])
+    assert (fade_out[0].end, fade_out[0].end_derived) == (None, False)
+    edge = parse([clipitem(1, "a.mp4", 0, -1, 0, 105, path=MAC, file_id="f1"), transitionitem(97, 112),
+                  clipitem(2, "b.mov", -1, 195, 0, 90, path=WIN2, file_id="f2")], alignment="start-black")
+    assert (edge[0].end, edge[1].start) == (None, None)
+    both = parse([clipitem(1, "a.mp4", 0, -1, 0, 105, path=MAC, file_id="f1"), transitionitem(97, 112),
+                  clipitem(2, "b.mov", -1, 195, 0, 90, path=WIN2, file_id="f2")], alignment="center")
+    assert (both[0].end, both[1].start) == (105, 105)
+
+
 def test_parse_errors():
     with pytest.raises(XmlReadError):
         parse_fcp7_xml("<xmeml><sequence>")
@@ -195,29 +215,48 @@ def test_audio_of_a_muted_clip_one_frame_off_is_not_waved_through_as_muted_bookk
     assert [m.feature for m in rt(xml_for_spec(spec(), mutate=add(1))).mismatches] == ["audio_clips"]
 
 
-@pytest.mark.parametrize("fps,secs,tb", [(Fraction(30), 0.25, 30), (Fraction(25), 0.3, 25)])
+NTSC_RATES = [Fraction(30), Fraction(30000, 1001), Fraction(24000, 1001), Fraction(25)]
+
+
+@pytest.mark.parametrize("fps", NTSC_RATES, ids=["30", "29.97", "23.976", "25"])
+@pytest.mark.parametrize("frames", [2, 3, 15, 16])
+def test_transition_span_is_exact_at_every_rate(fps, frames):
+    from dataclasses import replace
+
+    sp = spec(fps)
+    pl = list(sp.placements)
+    pl[1] = replace(pl[1], transition_in=TransitionIn("dissolve", frames))
+    sp = replace(sp, placements=tuple(pl))
+    xml = xml_for_spec(sp)
+    assert ("<ntsc>TRUE</ntsc>" in xml) == (fps.denominator == 1001) and rt(xml, sp).ok
+    s, e = X.centred_transition_span(105, frames)
+    assert (s, e) == (105 - (frames + 1) // 2, 105 - (frames + 1) // 2 + frames)
+    for ds, de in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        def moved(doc, ds=ds, de=de):
+            doc["transitions"][0]["start"] += ds
+            doc["transitions"][0]["end"] += de
+        assert not rt(xml_for_spec(sp, mutate=moved), sp).ok
+
+
+@pytest.mark.parametrize("fps,secs,tb", [(Fraction(30), 0.25, 30), (Fraction(25), 0.3, 25),
+                                         (Fraction(30000, 1001), float(Fraction(15, 2) / Fraction(30000, 1001)), 30),
+                                         (Fraction(24000, 1001), float(Fraction(15, 2) / Fraction(24000, 1001)), 24)],
+                         ids=["30", "25", "29.97", "23.976"])
 def test_exact_half_frame_source_points_accept_either_rounding_and_nothing_else(fps, secs, tb):
+    ntsc = fps.denominator == 1001
+    xml_ = lambda i, n, a=0, b=60: xmeml(duration=60, tb=tb, ntsc=ntsc, video=[[clipitem(1, "clip #1.mov", a, b, i, i + n, path=MAC, file_id="f", tb=tb, ntsc=ntsc)]], audio=[[]])
     sp = TimelineSpec("S", 1920, 1080, fps, ("V1", "V2", "A1", "A2"),
-                      placements=(Placement("c1", MAC, "video", "V1", 0, 60, secs, secs + 2.0, False),))
-    exact = Fraction(secs).limit_denominator(10 ** 6) * fps
+                      placements=(Placement("c1", MAC, "video", "V1", 0, 60, secs, secs + float(Fraction(60) / fps), False),))
+    exact = Fraction(secs).limit_denominator(10 ** 9) * fps
     assert exact.denominator == 2
-    lo, hi = int(exact - Fraction(1, 2)), int(exact + Fraction(1, 2))
-    n = int(2 * fps)
-
-    def xml(i):
-        return xmeml(duration=60, tb=tb, video=[[clipitem(1, "clip #1.mov", 0, 60, i, i + n, path=MAC, file_id="f", tb=tb)]], audio=[[]])
-
-    assert (lo, hi) == (int(exact), int(exact) + 1)
-    assert rt(xml(lo), sp).ok and rt(xml(hi), sp).ok                          # both roundings of an exact half pass
-    assert [m.kind for m in rt(xml(lo - 1), sp).mismatches] == ["source"]     # one frame further does not
-    assert [m.kind for m in rt(xml(hi + 1), sp).mismatches] == ["source"]
-    # a non-half position still has only one acceptable frame
+    lo, hi = int(exact), int(exact) + 1
+    assert rt(xml_(lo, 60), sp).ok and rt(xml_(hi, 60), sp).ok                      # both roundings of an exact half pass
+    assert [m.kind for m in rt(xml_(lo - 1, 60), sp).mismatches] == ["source"]      # one frame further does not
+    assert [m.kind for m in rt(xml_(hi + 1, 60), sp).mismatches] == ["source"]
+    # a position on a whole frame still has only one acceptable frame
     sp2 = TimelineSpec("S", 1920, 1080, fps, ("V1", "V2", "A1", "A2"),
-                       placements=(Placement("c1", MAC, "video", "V1", 0, 60, 1.0, 3.0, False),))
-    k = int(fps)
-    ok = xmeml(duration=60, tb=tb, video=[[clipitem(1, "clip #1.mov", 0, 60, k, k + n, path=MAC, file_id="f", tb=tb)]], audio=[[]])
-    off = xmeml(duration=60, tb=tb, video=[[clipitem(1, "clip #1.mov", 0, 60, k + 1, k + 1 + n, path=MAC, file_id="f", tb=tb)]], audio=[[]])
-    assert rt(ok, sp2).ok and not rt(off, sp2).ok
+                       placements=(Placement("c1", MAC, "video", "V1", 0, 60, float(Fraction(30) / fps), float(Fraction(90) / fps), False),))
+    assert rt(xml_(30, 60), sp2).ok and not rt(xml_(31, 60), sp2).ok and not rt(xml_(29, 60), sp2).ok
 
 
 def test_missing_and_unexpected_items_and_wrong_track():

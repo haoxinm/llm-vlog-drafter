@@ -190,7 +190,9 @@ def _filters(item: ET.Element) -> tuple[str | None, float | None, bool]:
 
 def _resolve_unspecified(tl: "Fcp7Timeline", order: list[tuple[str, int]]) -> None:
     """A clip item next to a transition may say ``<start>-1</start>`` / ``<end>-1</end>``: the transition defines that edge. Fill it with the
-    transition's cut (flagged ``*_derived``); without such a neighbour the edge stays unknown (None) and is reported, not guessed."""
+    transition's cut (flagged ``*_derived``) only when the transition sits BETWEEN two clip items and is centred (alignment missing or
+    ``center``). A one-sided transition (fade in / fade out) or an edge-aligned one does not say where the cut is, so the edge stays
+    unknown (None) and is reported, not guessed."""
     from dataclasses import replace
 
     for pos, (kind, idx) in enumerate(order):
@@ -198,14 +200,19 @@ def _resolve_unspecified(tl: "Fcp7Timeline", order: list[tuple[str, int]]) -> No
             continue
         c = tl.clips[idx]
         changes: dict[str, Any] = {}
-        if c.start is None and pos > 0 and order[pos - 1][0] == "transition":
-            cut = tl.transitions[order[pos - 1][1]].cut_frame
-            if cut is not None:
-                changes.update(start=cut, start_derived=True)
-        if c.end is None and pos + 1 < len(order) and order[pos + 1][0] == "transition":
-            cut = tl.transitions[order[pos + 1][1]].cut_frame
-            if cut is not None:
-                changes.update(end=cut, end_derived=True)
+        kinds = [k for k, _ in order]
+
+        def between(t_pos: int, other_pos: int) -> int | None:
+            """Cut of the transition at ``t_pos`` when a clip item lies on its far side and it is centred."""
+            if not (0 <= t_pos < len(order) and 0 <= other_pos < len(order)) or kinds[t_pos] != "transition" or kinds[other_pos] != "clip":
+                return None
+            t = tl.transitions[order[t_pos][1]]
+            return t.cut_frame if t.alignment in (None, "center") else None
+
+        if c.start is None and (cut := between(pos - 1, pos - 2)) is not None:
+            changes.update(start=cut, start_derived=True)
+        if c.end is None and (cut := between(pos + 1, pos + 2)) is not None:
+            changes.update(end=cut, end_derived=True)
         if changes:
             tl.clips[idx] = replace(c, **changes)
 
