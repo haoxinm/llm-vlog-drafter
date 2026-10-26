@@ -107,8 +107,9 @@ vlog-project/
   media_index/    catalog.sqlite (authoritative), assets.jsonl, moments.jsonl, transcripts.jsonl, inventory_report.json, thumbnails/, contact_sheets/, analysis/ (sampled frames + per-segment sheets)
   plans/          edit_plan.json, plan_summary.md, selection_plan.json, *.schema.json, validation_report.json
   filmcraft/      Trip Vlog Draft_v001.fcproj ..., capability_snapshot.json, command_log.jsonl, execution_journal.json, mapping_report.json
-  preview/        draft.mp4, qc_report.json, contact_sheet_timeline.jpg, render_report.json
-  resolve_handoff/  timeline.xml, timeline.otio, media_manifest.csv, edit_plan.json, project_reference.json, handoff_report.md,
+  preview/        draft.mp4, qc_report.json/.md, contact_sheet_timeline.jpg (+ _02, _03 ... for many cuts), render_report.json
+  qc/             preview_sheet.json (index of the preview sheets: tile -> record time, clip, scene, side)
+  resolve_handoff/  timeline.xml, timeline.otio, media_manifest.csv, edit_plan.json, project_reference.json, handoff_report.md, compatibility_report.json/.md,
                     resolve_finish_report.json/.md (only after `resolve-finish`)
   logs/           run.jsonl, errors.jsonl
 ```
@@ -123,6 +124,26 @@ centre-aligned only: a dissolve the resolver aligned to the cut start/end is pla
 duplicate scenes, still durations, total duration within tolerance (`project.duration_tolerance_pct` / `_seconds`), preview playable (ffprobe), black frames
 (ffmpeg `blackdetect`), and portrait-in-landscape (flagged for manual review). `contact_sheet_timeline.jpg` shows frames just before and after every cut,
 taken from the rendered preview.
+
+Further deterministic checks (Phase 5a, `qc:` in `project.yaml`; they only ever **warn**, a draft fails only for objective defects such as offline media,
+a render or decode failure, gaps, or a duration out of tolerance):
+
+- `preview_decodes`: ffmpeg decodes the whole preview (video and audio) without error.
+- `speech_truncation`: when transcripts exist, a clip's source in/out point falls inside a transcript segment by more than `qc.speech_cut_tolerance_seconds`
+  (0.25). Names the clip and the (estimated, segment-level) words cut; muted clips and edges that continue the same take are ignored.
+- `audio_discontinuity`: at a cut between two clips that keep their source audio, both audibly active (`qc.audio_active_ratio_min`, 0.5) and whose mean levels
+  (per-moment measurement, plus the constant `ambient_low` gain) differ by at least `qc.audio_jump_db` (12 dB).
+- `music_vs_speech`: a music clip over a clip with speech (transcript) or active natural sound, unless the plan's own gains put the music at least
+  `-qc.music_max_gain_db` (6 dB) below it. No ducking is generated, so `duck_music_under_speech` does not count.
+- `scene_order`: the plan's scenes follow the approved story outline's order (LLM planner only; skipped otherwise).
+- Checks that cannot run (no transcripts, no audio measurements, no music, no outline) report `pass` with `data.skipped: true` and the reason.
+
+**Preview sheets.** `preview/contact_sheet_timeline.jpg` shows, for every cut, one frame just before (`qc.cut_sample_offset_seconds`, 0.15 s, clamped inside the
+clip) and one just after it, plus the first and last frame; every tile is labelled with record time, scene ID and clip_instance_id. `qc.contact_sheet_max_frames`
+(48) is the number of tiles per sheet: more cuts make further sheets (`..._02.jpg`), at most `qc.contact_sheet_max_sheets` (8), beyond which cuts are sampled
+evenly and the index says so. `qc/preview_sheet.json` (`outputs.qc_dir`) maps every tile id to `record_seconds`, `clip_instance_id`, `scene_id`, `side`
+(`start|before|after|end`) and its place on its sheet, and lists the cuts with their two tiles (read it with `trip_vlog.qc.preview.load_preview_sheet_index`).
+`qc_report.json` also has a `critic` block (`not_run`): the seam for a later LLM reviewer, which would read the index and the checks.
 
 ### Resolve handoff
 
@@ -601,3 +622,16 @@ with Python 3.11 and 3.13. Only Linux has been exercised locally so far; treat W
 - Failed probes and failed thumbnails are retried on every run; they are not cached.
 - Probing is sequential and single-threaded.
 - Not yet verified on real phone footage (rotation, QuickTime location, VFR) beyond canned ffprobe JSON samples in `tests/fixtures/ffprobe/`.
+
+### Handoff compatibility report
+
+`resolve_handoff/compatibility_report.json` / `.md` (written by the `handoff` stage; `status` and `handoff_report.md` point to it) has one row per feature the plan
+actually uses (frame rate/size, hard cuts, dissolves, stills, overlays on V2, titles, markers, clip gain, muted clips, music track, mixed source frame rate, mixed
+size/orientation, speed changes if any XML item has them): the count in the plan; whether FilmCraft supports it (capability snapshot of the workspace and the
+read-back after reopening); whether the exported `timeline.xml` really contains it (the XML is parsed and every clip's record and source in/out, track, path,
+gain, title, transition and marker is compared with the timeline sent to FilmCraft **at frame precision**, any mismatch is listed); and the **recorded** Resolve
+result. Verdict per feature: `verified` (FilmCraft + XML ok and Resolve recorded/measured to import it), `expected` (Resolve unverified or partly recorded),
+`manual` (a step in Resolve is needed; the instruction is given) or `unsupported` (FilmCraft cannot, or the XML does not carry it as planned; the handoff stage then
+ends `partial`). The recorded results are a static, versioned table (`trip_vlog/handoff/resolve_evidence.py`) holding only what DESIGN §15.5/§15.6 record on
+Resolve Studio 21.1.1.10 (Windows); everything else is `unverified`. If a real `resolve_finish_report.json` of this very `timeline.xml` exists, its per-check
+results replace the table for the features those checks cover; run `trip-vlog resume` after `resolve-finish` to refresh the report.

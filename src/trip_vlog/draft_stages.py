@@ -24,6 +24,8 @@ from trip_vlog.filmcraft.execution import latest_complete_project, load_journal,
 from trip_vlog.filmcraft.mappings import MediaMap
 from trip_vlog.filmcraft.plan_mapping import MappingError, MappingResult, MappingSettings, edit_plan_to_spec
 from trip_vlog.filmcraft.timeline_spec import TimelineSpec, downgrade_dissolves
+from trip_vlog.handoff.compatibility import (REPORT_JSON as COMPAT_JSON, REPORT_MD as COMPAT_MD, CompatInputs, build_compatibility_report,
+                                             load_finish_report, render_compatibility_markdown, summary_of)
 from trip_vlog.handoff.interchange import export_handoff
 from trip_vlog.handoff.media_manifest import manifest_rows, missing_used_media, write_media_manifest
 from trip_vlog.handoff.report import HandoffReportInputs, read_resolve_verification, render_handoff_report
@@ -33,6 +35,7 @@ from trip_vlog.planning.catalog_view import PlanningCatalog
 from trip_vlog.planning.models import EditPlan, edit_plan_hash, to_json_dict
 from trip_vlog.planning.pipeline import PlanPaths, plan_baseline_stage, plan_inputs, plan_paths
 from trip_vlog.planning.validate import ValidationReport, ValidationSettings, validate_edit_plan
+from trip_vlog.qc.checks import TranscriptSpan
 from trip_vlog.qc.report import QcInputs, run_qc
 from trip_vlog.state import StageResult, StageRunner, atomic_write_json, atomic_write_text, stable_hash
 
@@ -304,13 +307,67 @@ def _qc_paths(ctx: Any) -> tuple[Path, Path]:
     return d / "qc_report.json", d / "contact_sheet_timeline.jpg"
 
 
+def _qc_index_path(ctx: Any) -> Path:
+    return Path(ctx.paths.outputs["qc_dir"]) / "preview_sheet.json"
+
+
 def _file_sha(p: Path) -> str | None:
     return sha256_file(p) if p.is_file() else None
 
 
+def _qc_transcripts(ctx: Any) -> dict[str, list[TranscriptSpan]]:
+    """asset_id -> transcript segments of the CURRENT content of the asset (empty when transcription did not run)."""
+    cur = {a["asset_id"]: a["content_version"] for a in ctx.catalog.list_assets()}
+    out: dict[str, list[TranscriptSpan]] = {}
+    for r in ctx.catalog.list_transcripts():
+        if r["content_version"] != cur.get(r["asset_id"]):
+            continue
+        try:
+            coarse = json.loads(r["data_json"] or "{}").get("timestamps") == "coarse"
+        except ValueError:
+            coarse = False
+        out.setdefault(r["asset_id"], []).append(TranscriptSpan(float(r["start_seconds"] or 0.0), float(r["end_seconds"] or 0.0), r["text"] or "",
+                                                                coarse, r["transcript_id"]))
+    return out
+
+
+def _qc_outline_scene_ids(ctx: Any) -> list[str] | None:
+    """Scenes of the approved outline the plan was made from, in order; None for a baseline plan or an outline edited since."""
+    from trip_vlog.outline_stages import outline_paths
+    from trip_vlog.planning.outline import outline_file_hash, read_outline_doc
+
+    rec = ctx.manifest.get("plan") or {}
+    h = rec.get("outline_hash")
+    if not h or rec.get("planner") != "llm":
+        return None
+    path = outline_paths(ctx).outline
+    if not path.is_file() or outline_file_hash(path) != h:
+        return None
+    try:
+        return [str(sc["scene_id"]) for sc in read_outline_doc(path)["scenes"]]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def _qc_inputs(ctx: Any) -> Any:
+    audio = [(m.moment_id, (m.features or {}).get("audio")) for m in PlanningCatalog.from_catalog(ctx.catalog).moments.values()]
     return {"project": _project_sha(ctx), "preview": _file_sha(_preview_path(ctx)), "plan": plan_file_hash(_pp(ctx).edit_plan),
-            "qc": ctx.config.qc.model_dump(), "tol": [ctx.config.project.duration_tolerance_pct, ctx.config.project.duration_tolerance_seconds]}
+            "qc": ctx.config.qc.model_dump(), "tol": [ctx.config.project.duration_tolerance_pct, ctx.config.project.duration_tolerance_seconds],
+            "ambient_db": ctx.config.filmcraft.ambient_low_gain_db, "ffmpeg": ctx.ffmpeg is not None,
+            "evidence": stable_hash({"audio": sorted(audio, key=lambda x: x[0]),
+                                     "transcripts": {a: [(t.start, t.end, t.text, t.coarse) for t in ts] for a, ts in _qc_transcripts(ctx).items()}}),
+            "outline": _qc_outline_scene_ids(ctx)}
+
+
+def _qc_verify(ctx: Any) -> bool:
+    rp = _qc_paths(ctx)[0]
+    if not rp.is_file() or not rp.with_suffix(".md").is_file():
+        return False
+    try:
+        idx = (load_plan_json(rp).get("contact_sheet") or {}).get("index")
+    except (OSError, ValueError):
+        return False
+    return not idx or _qc_index_path(ctx).is_file()
 
 
 def qc_stage(ctx: Any) -> StageResult:
@@ -339,12 +396,29 @@ def qc_stage(ctx: Any) -> StageResult:
     doc = run_qc(QcInputs(
         plan=prep.plan, catalog=PlanningCatalog.from_catalog(ctx.catalog), source_paths=prep.spec.asset_paths, sequence=seq,
         project=project, reopen_error=err, mismatches=mism, preview=_preview_path(ctx), report_path=report_path, contact_sheet=sheet,
-        ffmpeg=ctx.ffmpeg, ffprobe=str(ctx.ffprobe) if ctx.ffprobe else None, config=ctx.config))
+        ffmpeg=ctx.ffmpeg, ffprobe=str(ctx.ffprobe) if ctx.ffprobe else None, config=ctx.config,
+        transcripts=_qc_transcripts(ctx), outline_scene_ids=_qc_outline_scene_ids(ctx), index_path=_qc_index_path(ctx),
+        workspace_root=ctx.workspace.root))
+    cs = doc["contact_sheet"]
     summary = {"status": doc["status"], **doc["counts"], "report": _rel(ctx, report_path),
-               "contact_sheet": _rel(ctx, sheet) if doc["contact_sheet"]["path"] else None,
+               "contact_sheet": _rel(ctx, sheet) if cs["path"] else None, "preview_sheets": len(cs.get("sheets") or []),
+               "preview_sheet_index": cs.get("index"),
                "failed_checks": [c["name"] for c in doc["checks"] if c["status"] == "fail"],
                "warned_checks": [c["name"] for c in doc["checks"] if c["status"] == "warn"]}
     return StageResult(Status.SUCCEEDED, summary)  # QC findings are reported in the summary, they do not fail the stage
+
+
+COMPAT_FINISH = "resolve_finish_report.json"
+
+
+def _capabilities(ctx: Any) -> dict[str, bool] | None:
+    """FilmCraft capability name -> usable, from this workspace's capability snapshot (None when there is none)."""
+    p = ctx.workspace.root / "filmcraft" / "capability_snapshot.json"
+    try:
+        caps = json.loads(p.read_text(encoding="utf-8"))["capabilities"]
+        return {name: bool(c.get("usable")) for name, c in caps.items()}
+    except (OSError, ValueError, KeyError, AttributeError):
+        return None
 
 
 def _handoff_dir(ctx: Any) -> Path:
@@ -356,6 +430,8 @@ def _handoff_inputs(ctx: Any) -> Any:
     return {"project": _project_sha(ctx), "plan": plan_file_hash(_pp(ctx).edit_plan),
             "formats": list(ctx.config.filmcraft.interchange_formats), "qc": _file_sha(_qc_paths(ctx)[0]),
             "resolve_verification": _file_sha(out / "resolve_verification.json"),
+            "resolve_finish_report": _file_sha(out / COMPAT_FINISH),
+            "capabilities": _file_sha(ctx.workspace.root / "filmcraft" / "capability_snapshot.json"),
             "assets": [(a["asset_id"], a["content_version"]) for a in ctx.catalog.list_assets()]}
 
 
@@ -392,18 +468,32 @@ def handoff_stage(ctx: Any) -> StageResult:
             qc_status = None
     preview = _preview_path(ctx)
     missing = missing_used_media(rows)
+    xml_fmt = next((f for f in (export.report.formats if export.report else []) if f.format == "fcp7_xml" and f.exported), None)
+    finish_doc, finish_note = load_finish_report(out / COMPAT_FINISH)
+    if finish_note:
+        notes.append(finish_note)
+    compat = build_compatibility_report(CompatInputs(
+        plan=prep.plan, spec=eff, catalog=PlanningCatalog.from_catalog(ctx.catalog), capabilities=_capabilities(ctx),
+        xml_path=Path(xml_fmt.path) if xml_fmt else None, filmcraft_version=run.get("filmcraft_version"),
+        verified_after_reopen=run.get("verified_after_reopen"), mapping_warnings=[w.to_dict() for w in prep.mapping.warnings],
+        finish_report=finish_doc, tool_version=__version__))
+    atomic_write_json(out / COMPAT_JSON, compat)
+    atomic_write_text(out / COMPAT_MD, render_compatibility_markdown(compat))
+    compat_summary = summary_of(compat)
     text = render_handoff_report(HandoffReportInputs(
         title=prep.plan.project.title, filmcraft_version=run.get("filmcraft_version"), tool_version=__version__,
         platform=f"{ctx.manifest.get('platform', {}).get('system', '?')} {ctx.manifest.get('platform', {}).get('machine', '')}".strip(),
         out_dir=out, export=export, project_ref=ref, preview_path=str(preview) if preview.is_file() else None,
         plan_hash=prep.plan.plan_hash, qc_status=qc_status, media_rows=rows, missing_media=missing,
         mapping_warnings=[w.to_dict() for w in prep.mapping.warnings],
-        verification=read_resolve_verification(out / "resolve_verification.json"), stage_notes=notes))
+        verification=read_resolve_verification(out / "resolve_verification.json"), stage_notes=notes, compatibility=compat_summary))
     atomic_write_text(out / "handoff_report.md", text)
-    atomic_write_json(out / "handoff_summary.json", {**export.to_dict(), "missing_media": missing, "generated_at": utc_now_iso()})
-    ok = export.report is not None and export.report.ok and not missing
+    atomic_write_json(out / "handoff_summary.json", {**export.to_dict(), "missing_media": missing, "generated_at": utc_now_iso(),
+                                                      "compatibility": compat_summary})
+    ok = export.report is not None and export.report.ok and not missing and compat_summary["xml_roundtrip_ok"] is not False
     summary = {"formats": export.exported_files and [Path(f).name for f in export.exported_files], "files": sorted(p.name for p in out.iterdir()),
-               "missing_media": len(missing), "export_error": export.error, "otio_reload": (export.otio_reload or {}).get("status")}
+               "missing_media": len(missing), "export_error": export.error, "otio_reload": (export.otio_reload or {}).get("status"),
+               "compatibility": compat_summary, "compatibility_report": _rel(ctx, out / COMPAT_JSON)}
     return StageResult(Status.SUCCEEDED if ok else Status.PARTIAL, summary)
 
 
@@ -429,7 +519,7 @@ def build_draft_runner(ctx: Any) -> StageRunner:
     runner.register("approval", approval_stage, deps=("plan",), always_run=True)
     runner.register("assemble", assemble_stage, deps=("approval",), inputs=_assemble_inputs, verify=_assemble_verify)
     runner.register("preview", preview_stage, deps=("assemble",), inputs=_preview_inputs, verify=lambda c: _preview_path(c).is_file())
-    runner.register("qc", qc_stage, deps=("assemble",), inputs=_qc_inputs, verify=lambda c: _qc_paths(c)[0].is_file())
+    runner.register("qc", qc_stage, deps=("assemble",), inputs=_qc_inputs, verify=_qc_verify)
     runner.register("handoff", handoff_stage, deps=("assemble",), inputs=_handoff_inputs,
-                    verify=lambda c: (_handoff_dir(c) / "handoff_report.md").is_file())
+                    verify=lambda c: (_handoff_dir(c) / "handoff_report.md").is_file() and (_handoff_dir(c) / COMPAT_JSON).is_file())
     return runner

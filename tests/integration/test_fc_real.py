@@ -191,3 +191,16 @@ def test_source_past_end_rejected_before_any_clip_is_placed(built, tmp_path):
         assert not [r for r in recs if r.get("command") == "timeline.place"]
     finally:
         adapter.close()
+
+
+def test_exported_fcp7_xml_round_trips_the_spec_exactly(built):
+    """Phase 5a: parse the XML FilmCraft really exports (dissolve, still, V2 overlay and title, gain, music, marker) and compare at frame precision."""
+    from trip_vlog.handoff.fcp7_xml import parse_fcp7_xml
+    from trip_vlog.handoff.xml_roundtrip import compare_timeline_xml, expected_from_spec
+
+    rep = built["adapter"].export_interchange(["fcp7_xml"], built["ws"] / "xml_roundtrip", spec=built["spec"], project_path=built["res"].project_path)
+    xml = parse_fcp7_xml(next(Path(f) for f in rep.files if f.endswith(".xml")))
+    rt = compare_timeline_xml(xml, expected_from_spec(built["spec"]))
+    assert rt.ok, [str(m) for m in rt.mismatches]
+    assert rt.matched["dissolves"] == 1 and rt.matched["titles"] == 1 and rt.matched["markers"] == 1 and rt.matched["music_track"] == 1
+    assert rt.matched["stills"] == 1 and rt.matched["overlays_v2"] == 1 and rt.matched["audio_gain"] == 1
