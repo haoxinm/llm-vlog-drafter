@@ -1,0 +1,142 @@
+{
+  "$id": "https://trip-vlog.local/schemas/photo_labels:1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Vision labels for still photos.",
+  "properties": {
+    "segments": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "confidence": {
+            "maximum": 1,
+            "minimum": 0,
+            "type": "number"
+          },
+          "description": {
+            "description": "Grounded: only what is visible.",
+            "type": "string"
+          },
+          "editorial_tags": {
+            "items": {
+              "enum": [
+                "establishing",
+                "people",
+                "food",
+                "nature",
+                "city",
+                "transport",
+                "activity",
+                "detail",
+                "reaction",
+                "transition",
+                "scenic",
+                "night",
+                "other"
+              ],
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "event": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "interest": {
+            "maximum": 1,
+            "minimum": 0,
+            "type": "number"
+          },
+          "quality": {
+            "additionalProperties": false,
+            "properties": {
+              "exposure": {
+                "enum": [
+                  "low",
+                  "ok",
+                  "good",
+                  null
+                ],
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sharpness": {
+                "enum": [
+                  "low",
+                  "ok",
+                  "good",
+                  null
+                ],
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "stability": {
+                "enum": [
+                  "low",
+                  "ok",
+                  "good",
+                  null
+                ],
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "sharpness",
+              "stability",
+              "exposure"
+            ],
+            "type": "object"
+          },
+          "segment_id": {
+            "description": "Copied exactly from the segment header.",
+            "type": "string"
+          },
+          "uncertain": {
+            "type": "boolean"
+          },
+          "uncertainty_note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "visible_entities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "segment_id",
+          "description",
+          "visible_entities",
+          "event",
+          "editorial_tags",
+          "quality",
+          "interest",
+          "confidence",
+          "uncertain",
+          "uncertainty_note"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "segments"
+  ],
+  "title": "photo_labels",
+  "type": "object"
+}
