@@ -368,8 +368,9 @@ def _cmd_revise(args: argparse.Namespace) -> int:
         if request or args.file is not None or args.apply or args.dry_run or args.again:
             raise ConfigError("--reset-overrides takes no request and no other option; it only clears the runtime rule changes of earlier revisions")
         cleared = reset_revision_overrides(args.output)
-        print("revision overrides cleared: " + _overrides_text(cleared) + "; the plan is checked against project.yaml again (run `trip-vlog resume`)"
-              if cleared else "no revision overrides are active; nothing was changed")
+        print("revision overrides cleared: " + _overrides_text(cleared) + "; the plan is checked against project.yaml again (run `trip-vlog resume`). "
+              "If the revised plan no longer fits project.yaml (e.g. its length), resume stops at plan validation: revise it back, edit the plan, "
+              "or change project.yaml and re-plan" if cleared else "no revision overrides are active; nothing was changed")
         return 0
     if args.file is not None:
         if request:

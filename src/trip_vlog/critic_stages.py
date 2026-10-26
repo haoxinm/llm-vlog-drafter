@@ -460,7 +460,9 @@ def _halting_round(ctx: Any, plan_hash: str, done: list[dict[str, Any]]) -> dict
     from trip_vlog.revise_stages import change_lineage
 
     chain = change_lineage(ctx, plan_hash)
-    return chain[-1] if chain else (done[-1] if done else None)
+    if chain and chain[-1].get("by") == "revise":
+        return chain[-1]
+    return done[-1] if done else None       # no revision on top: the critic's own lineage decides, exactly as before revisions existed
 
 
 def critic_stage(ctx: Any) -> StageResult:

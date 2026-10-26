@@ -361,6 +361,14 @@ def run_critic(output: Path | str, config_path: Path | str | None = None, overri
             st["rounds"] = [*st["rounds"][:-1], {**st["rounds"][-1], "halt_lifted": st["rounds"][-1]["halt"], "halt": None}]
         manifest.set(critic=st)
         manifest.save()
+    rv = dict(manifest.get("revise") or {})     # a revision that made QC worse stops automatic critic fixes; asking for the critic lifts that too
+    rr = list(rv.get("rounds") or [])
+    last = next((i for i in range(len(rr) - 1, -1, -1) if rr[i].get("status") == "applied"), None)
+    if last is not None and rr[last].get("halt"):
+        rr[last] = {**rr[last], "halt_lifted": rr[last]["halt"], "halt": None}
+        rv["rounds"] = rr
+        manifest.set(revise=rv)
+        manifest.save()
     return _execute(None, output, config_path, ov, echo=echo, command=command, pipeline="draft", persist_config=False)
 
 

@@ -271,3 +271,26 @@ def test_the_selection_plan_is_part_of_the_stage_inputs(setup):
     sp = ds._pp(ctx).selection_plan
     sp.write_text(json.dumps({**json.loads(sp.read_text(encoding="utf-8")), "note": "edited"}), encoding="utf-8")
     assert rs.revise_inputs(ctx)["selection_plan"] != before["selection_plan"]
+
+
+def test_without_a_revision_on_top_the_critic_uses_only_its_own_lineage(setup):
+    ctx, plan, _ = setup(transport=ReviseTransport())
+    old = {"round": 1, "status": "applied", "plan_hash": "P", "parent_plan_hash": "Q", "halt": "qc_regression", "at": "2026-01-01T00:00:00Z"}
+    ctx.manifest.set(critic={"rounds": [old]})
+    assert cs._halting_round(ctx, "P", []) is None          # a plan back on an old round's output: only the critic's own `done` counts
+    assert cs._halting_round(ctx, "P", [old]) is old
+
+
+def test_asking_for_the_critic_lifts_a_halt_left_by_a_revision(setup, monkeypatch):
+    from trip_vlog import orchestrator as orch
+
+    ctx, plan, _ = setup(transport=ReviseTransport(lambda c: answer([op("trim_clip", clip_instance_id="c1", duration_seconds=4.0)])))
+    stub_rebuild(monkeypatch, qc_failed=["total_duration"])
+    ask(ctx, "shorter")
+    assert ctx.manifest.get("revise")["rounds"][-1]["halt"] == "qc_regression"
+    ctx.manifest.save()
+    seen = {}
+    monkeypatch.setattr(orch, "_execute", lambda *a, **k: seen.setdefault("ran", True))
+    orch.run_critic(ctx.workspace.root, None, {}, mode="apply", echo=lambda *_: None)
+    rec = Manifest.load(ctx.workspace.manifest_path).get("revise")["rounds"][-1]
+    assert seen["ran"] and rec["halt"] is None and rec["halt_lifted"] == "qc_regression"
