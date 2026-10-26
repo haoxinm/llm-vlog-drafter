@@ -127,12 +127,12 @@ vlog-project/
 ### Timeline and QC
 
 Track layout: video and stills on V1, overlays V2, natural audio of V1 clips on A1 (linked), music A2, narration A3. `audio_policy` `muted` places video
-only; `ambient_low` applies a constant -12 dB (`filmcraft.ambient_low_gain_db`); no ducking or automation is generated. The adapter places dissolves
+only; `ambient_low` applies a constant -12 dB (`filmcraft.ambient_low_gain_db`); music ducking and scale-to-fit framing exist but are off by default (below). The adapter places dissolves
 centre-aligned only: a dissolve the resolver aligned to the cut start/end is placed as a hard cut and recorded in the handoff report ("Mapping warnings").
 
 `preview/qc_report.json` has a pass/warn/fail status per check: media online, project reopens in a fresh FilmCraft process and matches the plan, no gaps on V1,
 duplicate scenes, still durations, total duration within tolerance (`project.duration_tolerance_pct` / `_seconds`), preview playable (ffprobe), black frames
-(ffmpeg `blackdetect`), and portrait-in-landscape (flagged for manual review). `contact_sheet_timeline.jpg` shows frames just before and after every cut,
+(ffmpeg `blackdetect`), and portrait-in-landscape (flagged for manual review; with `filmcraft.fit_mixed_aspect` the `framing` check also reads the scale back and looks for black bars in the preview; with `filmcraft.duck_music` the `music_ducking` check measures the music in the preview). `contact_sheet_timeline.jpg` shows frames just before and after every cut,
 taken from the rendered preview.
 
 Further deterministic checks (Phase 5a, `qc:` in `project.yaml`; they only ever **warn**, a draft fails only for objective defects such as offline media,
@@ -155,6 +155,33 @@ evenly and the index says so. `qc/preview_sheet.json` (`outputs.qc_dir`) maps ev
 (`start|before|after|end`) and its place on its sheet, and lists the cuts with their two tiles (read it with `trip_vlog.qc.preview.load_preview_sheet_index`).
 `qc_report.json` also has a `critic` block (`not_run`): the seam for a later LLM reviewer, which would read the index and the checks.
 
+### Framing, ducking and the read-back fallback (Phase 7b)
+
+All three were checked against FilmCraft 0.13.0 (Linux); nothing here was run in Resolve. FilmCraft places a clip at its native size: a portrait clip in a
+landscape sequence (or a 4K clip in a 1080p one) is cropped unless it is scaled.
+
+- **`filmcraft.fit_mixed_aspect: true`** scales every video clip and still whose display size differs from the sequence to fit inside the frame
+  (`clip.fitToFrame`: no crop; black bars where the aspect differs; the reverse case, landscape in a vertical sequence, works the same). The scale is
+  read back after reopening and must equal `min(W/w, H/h) * 100`; it is in FilmCraft's FCP7 XML as the Basic Motion scale and compared there too. The
+  QC `framing` check samples a preview frame in the middle of scaled clips and requires black bars. With the option off (default) such clips stay
+  unscaled and the compatibility report keeps its manual "review the framing" step. A FilmCraft without `clip.fitToFrame` gets a mapping warning and
+  the current behaviour.
+- **`filmcraft.duck_music: true`** lowers the music (`duck_db`, default -12 dB, with `duck_ramp_seconds` ramps) under natural sound the plan keeps.
+  `duck_mode: speech` ducks under transcript segments only (a transcript without segment timing ducks its whole clip; nothing is guessed);
+  `natural_sound` also ducks under clips with measured active sound. Windows closer than `duck_merge_gap_seconds` are joined. It is written as Volume
+  level keyframes on the music clip (`effects.setParam`), added to the clip's own gain, and applies only if the plan has `audio.duck_music_under_speech`.
+  Verified by the keyframe count after reopening, by the keyframes in FilmCraft's FCP7 XML (times and levels), and in the rendered preview: QC renders the
+  music track alone (the other audio tracks are muted in a throw-away FilmCraft process that never saves; the project hash is checked afterwards) and
+  compares the level in each duck window with the music file over the same range, which must differ by the duck depth. The measurement file is deleted.
+  The `music_vs_speech` check counts ducking when it is generated. Windows and keyframes are in `compatibility_report.json` (row `music_ducking`).
+- **`filmcraft.readback_interchange: auto`** (default; `off` disables): when FilmCraft's own `timeline.xml` is missing or fails the round trip against
+  the timeline sent to it, the saved project is reopened in a fresh process, its timeline is read through FilmCraft's inspection interface and written as
+  FCP7 XML in the structure of FilmCraft's own export. The file is parsed and must round-trip exactly or it is discarded. The read-back is also compared
+  with the resolved plan; that diff, the reason and what the file cannot carry (title styling, effects other than scale and gain, and **keyframe values**:
+  the read-back only says how many there are, so a ducking envelope is not in this file and the report lists it as a manual step) are in
+  `handoff_report.md` and `resolve_handoff/readback_interchange.json`. A good native export is never replaced; a lossy one is kept as
+  `timeline.native.xml`. OTIO is not generated this way. The XML is labelled "generated from FilmCraft read-back" in the file and the report.
+
 ### Resolve handoff
 
 `resolve_handoff/` holds the interchange files exported by FilmCraft (post-processed to absolute media paths and re-validated), `media_manifest.csv`,
@@ -162,7 +189,7 @@ the validated `edit_plan.json`, `project_reference.json` (path + hash of the `.f
 FCP7 XML is the primary file (it imported cleanly in Resolve 21.1 with the Phase 0 fixture); OTIO is secondary (imports, but media linking with absolute
 paths is not yet verified). FCPXML, EDL and AAF are never exported unless you list them in `filmcraft.interchange_formats`; on Resolve 21.1 they crashed,
 froze and failed to open respectively, and the report then carries a prominent warning. If the export fails, the manifest, plan, preview and report are still
-written and the report says what failed.
+written and the report says what failed. If FilmCraft's FCP7 XML is missing or does not match the timeline sent to FilmCraft, `timeline.xml` is generated from the timeline read back from FilmCraft instead (below).
 
 **The report states that Resolve import is unverified** unless a passing `resolve_verification.json` is present. To verify, run `tools/resolve_verify.py`
 on a machine with Resolve open (see [docs/resolve-verification.md](docs/resolve-verification.md)), then `trip-vlog resume` to refresh the report.

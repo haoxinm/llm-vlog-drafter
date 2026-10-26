@@ -325,6 +325,7 @@ def run_build(adapter: "FilmCraftAdapter", spec: TimelineSpec, project_name: str
         if not post.ok:
             raise VerificationFailed("project reopened in a new process does not match the spec: " + post.summary(), post.mismatches)
         run["clip_mapping"] = post.clip_map.to_dict()
+        run["warnings"] += [f"framing: {m.message}" for m in post.warnings]
         run["sequence_id"] = adapter.sequence_id if adapter.sequence_id is not None else run["sequence_id"]
         run["project_sha256"] = sha256_file(project_path)
         run["verified_after_reopen"] = True

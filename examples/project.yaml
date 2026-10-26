@@ -103,6 +103,13 @@ filmcraft:
   preview_scale: 1.0             # 1.0 = full size; e.g. 0.5 renders a smaller draft
   handle_policy: "error"         # dissolve without source handles: error | cut (downgrade, recorded)
   ambient_low_gain_db: -12       # gain applied to clips with audio_policy "ambient_low"
+  fit_mixed_aspect: false        # true: scale clips/stills whose size differs from the sequence to fit the frame (portrait in landscape, 4K in 1080p); bars, no crop
+  duck_music: false              # true: lower the music under speech / natural sound (Volume keyframes on the music clip); needs the plan's audio.duck_music_under_speech
+  duck_mode: "speech"            # speech (transcript segments) | natural_sound (also clips with measured active sound)
+  duck_db: -12                   # music level inside a duck window, relative to the music clip's own gain
+  duck_ramp_seconds: 0.3         # fade down in front of a window and back up behind it
+  duck_merge_gap_seconds: 1.0    # windows closer than this are joined
+  readback_interchange: "auto"   # auto | off: FCP7 XML from the read-back timeline when FilmCraft's own export is missing or lossy (never replaces a good one)
 
 qc:
   min_still_seconds: 1.5

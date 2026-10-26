@@ -59,6 +59,7 @@ class HandoffReportInputs:
     stage_notes: list[str] = field(default_factory=list)  # e.g. "preview failed: ..."
     compatibility: dict[str, Any] | None = None           # handoff.compatibility.summary_of(...)
     captions: dict[str, Any] | None = None                # handoff.captions: what the optional SRT holds (None: captions are off)
+    readback: dict[str, Any] | None = None                # handoff.readback.run_fallback record, when the fallback was needed
 
 
 def _esc(s: Any) -> str:
@@ -130,6 +131,32 @@ def render_handoff_report(i: HandoffReportInputs) -> str:
             first = rep.formats[0].format
             L += [f"Import the **{first}** file first"
                   + (" (verified to import in Resolve 21.1 with the Phase 0 fixture)." if first == "fcp7_xml" else "."), ""]
+    rb = i.readback
+    if rb:
+        L += ["## Read-back interchange (DESIGN §15.3)", ""]
+        nat = rb.get("native") or {}
+        if rb["status"] == "generated":
+            L += [f"**`{rb['file']}` was generated from the FilmCraft read-back**, not by FilmCraft's exporter: {_esc(rb['reason'])}.",
+                  "The saved project was reopened in a fresh FilmCraft process, its timeline was read through FilmCraft's inspection interface, and the XML was written from "
+                  "that, never from the edit plan. The file was then parsed again and compared with the timeline sent to FilmCraft: it round-trips exactly "
+                  f"({rb.get('clips')} clip item(s)). SHA-256 `{rb.get('sha256')}`.", ""]
+            if rb.get("kept_native"):
+                L += [f"FilmCraft's own (lossy) export is kept as `{rb['kept_native']}`.", ""]
+        elif rb["status"] == "native_lossy_kept":
+            L += [f"**FilmCraft's own `{rb.get('file')}` is lossy but was kept**: {_esc(rb['reason'])}.", ""]
+            L += [f"Differences ({rb.get('diff_count')}):", ""] + [f"- {_esc(d.get('detail') or d.get('ref'))}" for d in rb.get("diff", [])] + [""]
+        else:
+            L += [f"**The read-back fallback was needed but did not produce a usable file**: {_esc(rb['reason'])}.", ""]
+        if nat.get("issues"):
+            L += [f"FilmCraft's own FCP7 XML export was **{nat.get('state')}**:", ""] + [f"- {_esc(x)}" for x in nat["issues"]] + [""]
+        cc = rb.get("crosscheck") or {}
+        L += ["Cross-check of the read-back against the resolved edit plan (clip order, source ranges, tracks, durations): "
+              + ("**no differences**." if cc.get("ok") else f"**{cc.get('count')} difference(s)**, reported, not papered over:"), ""]
+        L += [f"- {_esc(x)}" for x in cc.get("items", [])] + ([""] if cc.get("items") else [])
+        if rb.get("not_carried"):
+            L += ["Present in FilmCraft but not carried by this file:", ""] + [f"- {_esc(x)}" for x in rb["not_carried"]] + [""]
+        if rb.get("loses"):
+            L += ["What a file generated from the read-back does not carry:", ""] + [f"- {_esc(x)}" for x in rb["loses"]] + [""]
     cap = i.captions
     if cap:
         if cap.get("file"):
