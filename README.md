@@ -87,6 +87,9 @@ trip-vlog critic --output /path/to/vlog-project [--mode report|apply]
 trip-vlog revise --output /path/to/vlog-project "make the beach scene shorter and drop the blurry sunset clip" [--dry-run] [--file request.txt]
 trip-vlog approve --output /path/to/vlog-project --revision    # when revise stopped with exit code 3 (ambiguous or destructive): then `resume` or `revise --apply`
 
+# Accepted a hand edit of plans/edit_plan.json and/or plans/story_outline.json? Re-validate and re-seal it explicitly (see "Hand-editing a plan or outline")
+trip-vlog reseal --output /path/to/vlog-project [--plan | --outline]
+
 # Optional, Resolve Studio only: finish the handoff inside Resolve (see "Finish in Resolve" below)
 trip-vlog resolve-finish --output /path/to/vlog-project [--dry-run] [--project-name NAME] [--keep-on-failure]
 ```
@@ -94,10 +97,10 @@ trip-vlog resolve-finish --output /path/to/vlog-project [--dry-run] [--project-n
 - `--auto-approve` (or `workflow.approval: auto_approve`) skips the stop and records `approval.mode = "automatic"` in `manifest.json`.
 - Approval is bound to the SHA-256 of the plan content. Changing `--duration`, the media, or the plan file invalidates it and the run stops again.
 - `plans/edit_plan.json` is what gets executed. It is re-validated (schema, IDs, source ranges, durations, transitions) at assemble time, so a plan that
-  was edited into an invalid state is rejected before FilmCraft is started. If you hand-edit it, `plan_hash` must be updated too or validation reports a mismatch.
+  was edited into an invalid state is rejected before FilmCraft is started. If you hand-edit it, run `trip-vlog reseal` (below): it re-validates the edit and recomputes `plan_hash`, which otherwise fails the hash check.
 - Re-running on unchanged inputs does nothing: every stage is cached (inputs hash plus a check that its artifact still exists) and `assemble` is a no-op.
   Changing `--duration` re-plans and builds a **new versioned project** (`filmcraft/Trip Vlog Draft_v002.fcproj`); probing and segmentation come from the cache.
-  A failed or interrupted assembly leaves its numbered `.fcproj` behind, never reused; `resume` builds the next version, so clips are never appended twice.
+  A failed or interrupted assembly leaves its numbered `.fcproj` behind, marked failed (see "Failed builds"), never reused; `resume` builds the next version, so clips are never appended twice.
 - `resume` continues the pipeline recorded in `manifest.json`; the media folder is taken from there. Settings persist in `<output>/project.yaml`.
 
 Exit codes: `0` finished (QC warnings and unprobeable files are reported, not fatal), `1` a stage failed, `2` bad configuration/arguments, `3` stopped at the approval gate, `4` `approve` refused (nothing to approve yet, or the plan/outline is invalid), `5` `revise` needs an answer first (nothing was proposed, so there is nothing to approve: ask again with the answer in the request), `130` interrupted.
@@ -117,7 +120,7 @@ vlog-project/
   preview/        draft.mp4, qc_report.json/.md, contact_sheet_timeline.jpg (+ _02, _03 ... for many cuts), render_report.json
   qc/             preview_sheet.json (index of the preview sheets: tile -> record time, clip, scene, side); critic_report.json/.md (only with qc.critic on)
   resolve_handoff/  timeline.xml, timeline.otio, media_manifest.csv, edit_plan.json, project_reference.json, handoff_report.md, compatibility_report.json/.md,
-                    resolve_finish_report.json/.md (only after `resolve-finish`)
+                    timeline.srt + captions_report.json (only with captions.enabled), resolve_finish_report.json/.md (only after `resolve-finish`)
   logs/           run.jsonl, errors.jsonl
 ```
 
@@ -164,6 +167,38 @@ written and the report says what failed.
 **The report states that Resolve import is unverified** unless a passing `resolve_verification.json` is present. To verify, run `tools/resolve_verify.py`
 on a machine with Resolve open (see [docs/resolve-verification.md](docs/resolve-verification.md)), then `trip-vlog resume` to refresh the report.
 Media references are absolute: moving the package or the media to another machine breaks the links until they are relinked.
+
+### Hand-editing a plan or outline (`reseal`)
+
+`plans/edit_plan.json` and `plans/story_outline.json` are meant to be edited by hand. The edit plan carries a `plan_hash` that must match its content, and `approve` and the
+assemble step re-check it, so an edited plan is refused (`plan_hash_mismatch`) until it is **re-sealed**:
+
+```
+trip-vlog reseal --output /path/to/vlog-project            # whichever of the outline and the plan exist
+trip-vlog reseal --output /path/to/vlog-project --plan     # or --outline
+trip-vlog approve --output /path/to/vlog-project --plan    # reseal never approves anything
+trip-vlog resume  --output /path/to/vlog-project
+```
+
+- **It runs the full validators on the file as it is**: for the plan, the same ones that run before assembly (schema, asset and moment references, source ranges, transitions and handles, titles,
+  `must_include` / `must_exclude`, the duration tolerance against the current target, with the target and waived references of accepted revisions applied); for the outline, the outline validator (moments, durations, coverage).
+  Any error refuses the seal with the findings (exit code 4), and **nothing is changed**. Frame-boundary repairs the validators make (a source time that is not on a frame) are applied and listed.
+- **It keeps a backup** of the file as it was, `plans/edit_plan.<hash>.bak.json` / `plans/story_outline.<hash>.bak.json` (the names the plan and outline stages use when they replace an edited file; an existing backup with other bytes is never overwritten).
+- **It writes the sealed file**: the plan with `plan_hash` recomputed (UTF-8, no byte order mark; files saved with a BOM by Windows editors are read fine), the outline in its canonical form. It refreshes what is derived from it
+  (`plan_summary.md` and `validation_report.json`, or `story_outline.md`) and records the seal in `manifest.json` (`reseal`) and in `plans/reseal_report.json` (`reseal_outline_report.json`). Running it again on a sealed file does nothing.
+- **Approval is not touched in your favour.** Approval is bound to the hash of the content, exactly as for any hand edit: if the content changed, an earlier approval is marked `invalidated` (what the approval stage would do on the next run) and you approve again with
+  `trip-vlog approve`; if only the `plan_hash` field was stale, the content hash did not change and an existing approval still applies. A sealed plan never qualifies for the automatic approval "derived from the approved outline" (a hand edit needs its own approval), and `workflow.approval: auto_approve` still approves whatever is on disk, as it always did.
+- **Plans from critic and revision rounds** are ordinary plans and are re-sealed the same way; the round's record stays as it was, and the handoff report says the plan was re-sealed. Their pending proposals become stale because the plan changed. `reseal` refuses while a critic or revision round is half-applied (run `resume` first).
+- **After resealing an outline**, the plan made from the old outline is not kept in step: once you approve the outline `resume` makes a new plan from it (an edited plan is first copied to `edit_plan.<hash>.bak.json`).
+- It never touches media, FilmCraft projects or Resolve projects. A build from the earlier plan is kept; after approval `resume` builds a new project version (or reuses the current one when the timeline is identical).
+
+### Failed builds
+
+When a FilmCraft build fails midway (a command error, a failed read-back or reopen check) or is cut off (the process was killed), its numbered `filmcraft/<Name>_vNNN.fcproj` is **kept** and marked in `filmcraft/execution_journal.json`
+(`status: failed`; a run found still `running` by the next build is marked `failed` and `abandoned`). `manifest.json` lists them under `filmcraft.failed_versions`, `trip-vlog status` prints them, and the handoff report names them.
+A failed version is never used: `resume`, preview, QC, the critic, revisions and the handoff only work on the newest build that completed and was verified after reopening. The next successful build always takes a **new** version number:
+numbers are reserved by the journal and by the files on disk (the `.fcproj` and its `.timeline_spec.json`), so a failed version is never overwritten or reused, even if the journal is lost. Nothing is deleted: failed projects
+are left for you to inspect or remove by hand. Original media and Resolve projects are never touched.
 
 ### Finish in Resolve (`resolve-finish`, optional, Studio only)
 
@@ -577,11 +612,34 @@ Titles are simple, editable text on track V2 (DESIGN §13.4). They live in the p
   (default 3) is the on-screen time of the opening and closing titles, `editorial.max_titles` (default 6) the cap. The baseline planner supports the opening and closing titles too.
 - **Rules**: one line, at most 60 characters (FilmCraft names a text clip after its first line, so a two-line title would fail the read-back), 1 to 10 seconds, inside the sequence, no two titles overlapping,
   none overlapping an overlay clip on V2. A title whose text equals a folder name of its clips is accepted but flagged "from folder name" in the plan's uncertainties. In `edit_plan.json` you may type your own title text (`text_source: "user"`); it is
-  checked for structure, not origin; remember to update `plan_hash`.
+  checked for structure, not origin; run `trip-vlog reseal` after editing.
 - **Position/size**: lower-left, sized from the sequence height (the adapter's defaults); change them in FilmCraft.
 - **Resolve**: no interchange format carries titles, so `handoff_report.md` lists them. `trip-vlog resolve-finish` recreates them from the same timeline spec as editable Text+ titles on V2 at the same frames
   (experimental, Studio only), verified by read-back, and lists any it cannot place. Run `resolve-finish --dry-run` first to see what it would do.
 - **Older plans** (schema 1.0) still load; they simply have no titles.
+
+## Captions (optional)
+
+Captions are **off by default** (DESIGN §13.4). With `captions.enabled: true` (or the older `project.include_subtitles: true`) the handoff step writes `resolve_handoff/timeline.srt` next to `timeline.xml`,
+plus `captions_report.json`, and `handoff_report.md` and the Resolve import notes describe it. Run `trip-vlog transcribe` first (a speech backend, see below): captions come from transcripts only.
+
+```yaml
+captions:
+  enabled: true
+  max_chars_per_line: 42      # lines are broken between words; a word longer than this stays whole
+  max_lines: 2                # more text becomes more cues
+  min_duration_seconds: 1.0   # a shorter cue stays up longer when its clip has room
+```
+
+- **Only the transcript's words.** Nothing is paraphrased, corrected, translated or completed. The options only decide where a segment is split into cues (at word boundaries, by line length and number of lines) and how long a cue stays up.
+  Text without spaces (for example Japanese) is not broken. Words are never invented from filenames, metadata or the model.
+- **Time is mapped through the edit plan**: record time = clip start + (source time - clip `source_in`), and a cue is clipped to the clip's used source range. A segment a clip cuts through keeps only the words whose estimated position lies inside the clip.
+  The transcript has segment timing only, so inside a segment the position of a word, and therefore where a long segment is split, is **estimated from its place in the text**; check the captions against the speech.
+- **Skipped, with a reason in `captions_report.json`**: stills, clips that are muted or `ambient_low` (the speech is not played at full level), tracks that carry no speech (music), clips not at normal speed (the plan has no speed changes, so this guards against a plan edited to have one), assets without a transcript of their current content, and
+  transcript segments with `timestamps: coarse` (one block for the whole file, no real timing). Overlapping cues are cut back so none overlaps the next.
+- **File format**: UTF-8 **without** a byte order mark, CRLF line endings (the SRT convention), `HH:MM:SS,mmm` timestamps. If you polish `timeline.srt` by hand, the next handoff keeps your version as `timeline.<hash>.bak.srt` before writing a new one; with captions turned off, or no usable text, an earlier file is set aside as `timeline.stale.srt`. Nothing is deleted.
+- **Resolve**: importing the SRT is a **manual step** (File > Import > Subtitle..., wording varies by version); trip-vlog does not import it and `resolve-finish` does not touch it. Whether it lines up in Resolve (including against the timeline's start timecode) is **not verified live** yet.
+- A remote speech endpoint is not involved here: captions are made from transcripts already in the catalog, with no network access. Cache key of the handoff stage includes the caption options and the current transcripts.
 
 ## Speech transcription (optional)
 
@@ -731,8 +789,8 @@ with Python 3.11 and 3.13. Only Linux has been exercised locally so far; treat W
 - Titles are one line only; their size and position are fixed defaults; `resolve-finish` titles are still experimental.
 - Resolve import is unverified by this tool (see above). Titles are not carried by any interchange format; audio fades appear as dissolves in OTIO;
   FCPXML drops non-V1 transitions; EDL carries one video track. Only the FilmCraft 0.13.0 / Linux combination has been run; Windows and macOS are unverified until CI has run.
-- Hand-editing `edit_plan.json` requires updating `plan_hash` yourself; there is no helper yet.
-- Interrupted assemblies leave their numbered `.fcproj` in `filmcraft/`; it is not cleaned up automatically.
+- Failed or interrupted assemblies leave their numbered `.fcproj` in `filmcraft/` (marked failed, never used, listed by `status`); it is not deleted automatically.
+- Captions (`captions.enabled`) have not been imported in Resolve yet; word positions inside a transcript segment are estimates (segment timing only).
 - Black-frame detection runs on the preview only and is reported as a warning; subjective judgments (does a cut feel abrupt, is the story clear) need the optional QC critic (`qc.critic`).
 - HEIC/HEIF photos need ffprobe support for those formats (Pillow has no HEIC decoder here); without it they are listed as failed, and no thumbnail is made.
 - Fast fingerprints include mtime, so a plain copy that does not preserve mtime is not detected as a duplicate (use `--fingerprint sha256`).

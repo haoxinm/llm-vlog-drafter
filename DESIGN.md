@@ -1406,10 +1406,11 @@ ships with tests like any other phase. Deliver:
 -   **Plan re-seal helper:** a command that re-validates a hand-edited
     `edit_plan.json` / outline and recomputes its seal (hash), so
     manual edits are accepted explicitly instead of failing the hash
-    check.
+    check. *Status: done (Phase 7a), see the note below.*
 -   **Failed-assembly cleanup:** when a FilmCraft build fails midway,
     mark the partial `_vNNN.fcproj` as failed in the journal and keep
-    it out of `resume`/handoff, without deleting user data.
+    it out of `resume`/handoff, without deleting user data. *Status:
+    done (Phase 7a).*
 -   **Portrait and mixed-aspect framing:** scale-to-fit portrait clips
     and stills in a landscape sequence (and the reverse), if FilmCraft
     supports it and the result is verified.
@@ -1423,7 +1424,70 @@ ships with tests like any other phase. Deliver:
 -   **Captions and subtitles from transcripts (§13.4):** captions only
     from transcript text, never paraphrased, exported in a form the
     handoff can carry (e.g. an SRT alongside the timeline) and verified
-    in Resolve.
+    in Resolve. *Status: the SRT export is done (Phase 7a); the
+    Resolve import is a manual step and is not verified live.*
+
+**Phase 7a status (plan re-seal, failed-assembly cleanup, captions).**
+Built and covered by tests with the fake and the real FilmCraft CLI;
+nothing here was run in Resolve.
+
+-   *Re-seal* (`trip-vlog reseal --output WS [--plan|--outline]`,
+    `reseal.py`). It runs the full plan validators (the assemble-time
+    ones, with the effective target and waived references of accepted
+    revisions) or the outline validator on the file as the person left
+    it, with only the `plan_hash` comparison skipped; any error refuses
+    the seal (exit 4) and changes nothing. A valid file is copied to
+    `<stem>.<hash12>.bak.json` (the naming of the plan and outline
+    stages), then written back sealed (plan: recomputed `plan_hash` and
+    the validators' frame repairs; outline: canonical form), the
+    derived summaries are refreshed, and `manifest.reseal` records it.
+    Approval semantics are those of any hand edit: approvals are bound
+    to the content hash, a changed content invalidates an earlier
+    approval (the record the approval stage would write), nothing is
+    approved by reseal, a sealed plan is not eligible for the
+    outline-derived automatic approval, and the manifest's recorded
+    hash of the generated plan/outline is left alone so that a later
+    re-plan still backs the edit up. Refused while a critic/revision
+    round is half-applied. Decision to confirm: reseal applies the
+    validators' frame-boundary repairs to the person's file (listed in
+    the output) rather than refusing it.
+-   *Failed assembly*. The journal already recorded `failed` runs; now a
+    run left `running` by a killed process is marked `failed` +
+    `abandoned` by the next build, failed/interrupted builds are listed
+    in `manifest.filmcraft.failed_versions`, `status` and the handoff
+    report, `latest_run` documents that only completed builds are
+    returned (so `resume`, preview, QC, critic, revisions and handoff
+    never use a failed one), and version numbers are reserved by the
+    journal, the `.fcproj` and the `.timeline_spec.json` so a number is
+    never reused even if the journal is lost. Failed `.fcproj` files are
+    kept; nothing is deleted.
+-   *Captions* (`captions.*`, `handoff/captions.py`). Off by default
+    (`project.include_subtitles` is its older alias). `timeline.srt`
+    beside `timeline.xml`, built from catalog transcripts of the current
+    asset content only; verbatim words; source time mapped to record
+    time through the edit plan and clipped to the clip's used range;
+    only `natural_sound` clips on speech tracks at normal speed (the
+    plan has no speed field, so this is a source-length-versus-clip-
+    length guard); coarse-timestamp segments are skipped. Word positions
+    inside a segment are estimated from character position (the
+    transcript has segment timing only) and are used for splitting into
+    cues and for cutting a segment at a clip boundary. UTF-8 without
+    BOM, CRLF line endings. A hand-edited SRT is backed up before being
+    replaced; a stale one is set aside (`timeline.stale.srt`). The
+    handoff report and its import notes say that importing the SRT in
+    Resolve is a manual step; `resolve-finish` does not import it.
+
+Runbook items for the first live run (not automated): (1) open
+`timeline.xml` and import `timeline.srt` in Resolve (File > Import >
+Subtitle...) and check that the cues line up with the speech, in
+particular against the timeline's start timecode (an offset of one hour
+means the SRT is read relative to timecode zero); (2) check the CRLF /
+no-BOM file with non-ASCII text (accents, CJK) on Windows and macOS
+Resolve; (3) compare a few captions with the audio where a clip cuts
+through a transcript segment (the estimated word positions); (4) hand
+edit a plan on Windows with Notepad (BOM) and `reseal` it; (5) kill a
+`resume` during a FilmCraft build and confirm the next run builds the
+next version and `status` lists the failed one.
 
 ## 21. Suggested repository structure
 

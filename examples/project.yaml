@@ -9,7 +9,7 @@ project:
   style: "personal, cinematic, authentic"
   audience: "friends and family"
   include_narration: false
-  include_subtitles: false
+  include_subtitles: false       # older name of captions.enabled (below); true turns captions on
   music_policy: "user_supplied_only"   # none | user_supplied_only
   preserve_natural_audio: true
   target_loudness_lufs: null
@@ -131,6 +131,13 @@ revise:
   confirm_removed_clips: 3       # removing more clips than this needs confirmation (a removed scene counts all its clips)
   confirm_scene_removal: true    # removing a whole scene always needs confirmation
   max_duration_change_pct: 50.0  # hard bound: operations that change the length by more than this are refused
+
+captions:                        # optional SRT from the speech transcript, next to the timeline in the handoff (README "Captions"); run `trip-vlog transcribe` first
+  enabled: false                 # off by default. Words are the transcript's own, never rewritten
+  max_chars_per_line: 42         # lines break between words only
+  max_lines: 2                   # more text becomes more cues
+  min_duration_seconds: 1.0      # a shorter cue stays up longer when its clip has room
+  # importing timeline.srt is a manual step in Resolve (File > Import > Subtitle...)
 
 outputs:                         # relative to the output workspace
   project_file: "filmcraft/TripVlog.fcproj"
