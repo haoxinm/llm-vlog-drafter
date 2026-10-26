@@ -118,7 +118,42 @@ def test_write_srt_keeps_an_edited_file_and_sets_a_stale_one_aside(tmp_path):
     w3 = write_srt(f, [Cue(0, 1, ("two",), "c")], w2["sha256"])
     assert w3["backup"] and (tmp_path / w3["backup"]).read_bytes().endswith(b"hand polished\r\n\r\n") and b"two" in f.read_bytes()
     w4 = write_srt(f, [], w3["sha256"])
-    assert w4["sha256"] is None and not f.exists() and (tmp_path / "timeline.stale.srt").read_bytes().count(b"two") == 1
+    (stale,) = tmp_path.glob("timeline.*.stale.srt")
+    assert w4["sha256"] is None and not f.exists() and stale.read_bytes().count(b"two") == 1 and w4["stale"] == stale.name
+
+
+def test_stale_set_aside_only_for_a_file_the_tool_wrote_never_overwrites_and_survives_a_locked_file(tmp_path, monkeypatch):
+    f = tmp_path / "timeline.srt"
+    f.write_bytes(b"not ours\r\n")
+    assert write_srt(f, [], None)["stale"] is None and f.read_bytes() == b"not ours\r\n" and list(tmp_path.glob("*.stale.srt")) == []
+    cues = [Cue(0, 1, ("one",), "c")]
+    sha = write_srt(f, cues, None)["sha256"]            # the person's file was backed up, ours written
+    first = write_srt(f, [], sha)["stale"]
+    write_srt(f, [Cue(0, 1, ("different",), "c")], None)
+    sha2 = __import__("hashlib").sha256(f.read_bytes()).hexdigest()
+    second = write_srt(f, [], sha2)["stale"]
+    assert first != second and (tmp_path / first).read_bytes().count(b"one") == 1 and (tmp_path / second).read_bytes().count(b"different") == 1
+    write_srt(f, cues, None)
+    sha3 = __import__("hashlib").sha256(f.read_bytes()).hexdigest()
+
+    from pathlib import Path
+    monkeypatch.setattr(Path, "replace", lambda self, target: (_ for _ in ()).throw(PermissionError("in use")))
+    w = write_srt(f, [], sha3)
+    assert f.is_file() and w["stale"] is None and "could not be set aside" in w["warnings"][0]
+
+
+def test_overlay_audio_is_not_in_the_timeline_so_it_is_not_captioned():
+    p = plan(clip(1, A1, 0, 60, 0.0), clip(2, A2, 30, 60, 0.0, role="overlay"))
+    r = build_captions(p, {A1: [span(0.0, 1.0, "main")], A2: [span(0.0, 1.0, "overlay words")]}, S)
+    assert [c.text for c in r.cues] == ["main"]
+    assert r.clips_skipped == [{"clip_instance_id": "clip_002", "reason": "overlay audio is not in the timeline"}]
+
+
+def test_overlapping_cues_are_all_kept_in_start_order_never_dropped():
+    p = plan(clip(1, A1, 0, 90, 0.0))
+    r = build_captions(p, {A1: [span(1.0, 2.0, "second"), span(0.0, 1.5, "first"), span(1.2, 1.2005, "blink")]}, S)
+    assert [c.text for c in r.cues] == ["first", "second", "blink"]
+    assert r.cues[2].end - r.cues[2].start == pytest.approx(0.001) and r.cues_overlapping == 2
 
 
 def test_captions_config_defaults_alias_and_conflict():

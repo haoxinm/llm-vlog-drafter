@@ -537,11 +537,17 @@ def _write_captions(ctx: Any, prep: Prepared, out: Path, notes: list[str]) -> di
     srt = out / SRT_NAME
     prev = (ctx.manifest.get("captions") or {}).get("sha256")
     if not ctx.config.captions.enabled:
-        if srt.is_file():       # captions were turned off since: the old file does not belong to this handoff any more
-            write_srt(srt, [], prev)
+        if srt.is_file():       # captions were turned off since
+            if prev:            # the file is the one this tool wrote: it does not belong to this handoff any more
+                w = write_srt(srt, [], prev)
+                notes.extend(w["warnings"])
+                if w["stale"]:
+                    notes.append(f"captions are off (captions.enabled): the earlier {SRT_NAME} was set aside as {w['stale']}")
+            else:
+                notes.append(f"captions are off (captions.enabled): {SRT_NAME} in the handoff folder was not written by this tool and was left alone")
+        if prev:
             ctx.manifest.set(captions=None)
             ctx.manifest.save()
-            notes.append(f"captions are off (captions.enabled): the earlier {SRT_NAME} was set aside as {srt.stem}.stale{srt.suffix}")
         return None
     res = build_captions(prep.plan, _qc_transcripts(ctx), CaptionSettings.from_config(ctx.config))
     w = write_srt(srt, res.cues, prev)
@@ -550,6 +556,7 @@ def _write_captions(ctx: Any, prep: Prepared, out: Path, notes: list[str]) -> di
     atomic_write_json(out / CAPTIONS_REPORT, info)
     ctx.manifest.set(captions={"sha256": w["sha256"], "file": info["file"], "cues": len(res.cues)})
     ctx.manifest.save()
+    notes.extend(w["warnings"])
     if w["backup"]:
         notes.append(f"{SRT_NAME} had been edited since it was written; that version was kept as {w['backup']}")
     if not res.cues:

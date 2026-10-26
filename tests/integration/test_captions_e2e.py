@@ -77,6 +77,6 @@ def test_captions_are_written_next_to_the_timeline_and_reported(media_dir, works
     run_draft(media_dir, workspace, None, {**ov, "captions.enabled": True, "captions.max_lines": 1}, echo=lambda *_: None)
     assert any(b"my own edit" in p.read_bytes() for p in hd.glob("timeline.*.bak.srt")) and b"my own edit" not in (hd / "timeline.srt").read_bytes()
     run_draft(media_dir, workspace, None, {**ov, "captions.enabled": False}, echo=lambda *_: None)      # overrides are saved in the workspace's project.yaml
-    assert not (hd / "timeline.srt").exists() and (hd / "timeline.stale.srt").is_file()
+    assert not (hd / "timeline.srt").exists() and len(list(hd.glob("timeline.*.stale.srt"))) == 1
     assert "captions" not in rj(workspace / "manifest.json") or rj(workspace / "manifest.json")["captions"] is None
     assert cli.main(["status", "--output", str(workspace)]) == 0

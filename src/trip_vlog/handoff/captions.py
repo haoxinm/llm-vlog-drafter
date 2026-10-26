@@ -6,7 +6,8 @@ Rules
     through, keeping the words that fall inside the clip's used range.
   * Timing is mapped from source time to record time through the edit plan: record = clip start + (source time - clip source_in). A cue is clipped
     to the clip's used source range, so nothing is shown that the clip does not play.
-  * Only clips whose speech is heard (audio_policy natural_sound), at normal speed (the clip's source range and its length on the timeline agree
+  * Only clips whose speech is heard (audio_policy natural_sound; on the primary track or as a standalone natural_audio clip: an overlay is placed
+    without its audio, so it is skipped), at normal speed (the clip's source range and its length on the timeline agree
     to a frame), whose asset has a transcript of its CURRENT content. Everything else is skipped and listed with the reason. A transcript segment
     with coarse timestamps (one block for the whole file, no real timing) is skipped: its time cannot be mapped honestly.
   * Estimates: the transcript has segment timing only, so inside a segment the time of a word is estimated from its position in the text. That is
@@ -66,9 +67,14 @@ class CaptionResult:
     segments_cut_by_clip: int = 0                                            # a clip began or ended inside the segment: words kept by position
     segments_skipped_coarse: int = 0
 
+    @property
+    def cues_overlapping(self) -> int:
+        return count_overlaps(self.cues)
+
     def to_dict(self) -> dict[str, Any]:
         return {"cues": len(self.cues), "clips_captioned": self.clips_captioned, "clips_skipped": self.clips_skipped, "segments_used": self.segments_used,
-                "segments_cut_by_clip": self.segments_cut_by_clip, "segments_skipped_coarse": self.segments_skipped_coarse}
+                "segments_cut_by_clip": self.segments_cut_by_clip, "segments_skipped_coarse": self.segments_skipped_coarse,
+                "cues_overlapping": self.cues_overlapping}
 
 
 # ---- text ---------------------------------------------------------------------------------------------------------
@@ -134,6 +140,8 @@ def _skip_reason(c: EditClip, fps: Fraction, have_transcript: bool) -> str | Non
     src = Fraction(c.source_out_seconds).limit_denominator(100000) - Fraction(c.source_in_seconds).limit_denominator(100000)
     if abs(src - Fraction(c.duration_frames) / fps) > Fraction(3, 2) / fps:
         return "the source range and the clip length differ (speed changes are not supported for captions)"
+    if c.track_role == "overlay":
+        return "overlay audio is not in the timeline"      # plan_mapping places overlays without their audio: nothing is heard, so nothing is captioned
     if not have_transcript:
         return "no transcript for this asset"
     return None
@@ -196,12 +204,17 @@ def _lengthen_short(cues: list[Cue], clip_id: str, minimum: float, clip_end: flo
 
 
 def _tidy(cues: list[Cue]) -> list[Cue]:
-    """In time order, no overlap (an end is pulled back to the next start), and nothing shorter than a millisecond."""
+    """In time order. Text is never dropped: overlapping cues are both kept (SRT allows overlap; players show both) and a cue shorter than a
+    millisecond is given a millisecond."""
     cues = sorted(cues, key=lambda q: (q.start, q.end))
-    for a, b in zip(cues, cues[1:]):
-        if a.end > b.start:
-            a.end = b.start
-    return [q for q in cues if q.end - q.start >= 0.001]
+    for q in cues:
+        if q.end - q.start < 0.001:
+            q.end = q.start + 0.001
+    return cues
+
+
+def count_overlaps(cues: Sequence[Cue]) -> int:
+    return sum(1 for a, b in zip(cues, cues[1:]) if a.end > b.start)
 
 
 # ---- SRT ----------------------------------------------------------------------------------------------------------
@@ -228,20 +241,27 @@ def sha256_bytes(data: bytes) -> str:
 
 def write_srt(path: Path, cues: Sequence[Cue], recorded_sha: str | None) -> dict[str, Any]:
     """Write `timeline.srt` atomically. An existing file that is not the one this tool wrote last (`recorded_sha`) was edited by the person: it is kept as
-    `timeline.<hash>.bak.srt` before the new one replaces it. Returns {"sha256", "backup"}. With no cues nothing is written and an earlier file is set
-    aside as `timeline.stale.srt` (an old caption file must not sit next to a timeline it no longer matches)."""
-    backup = None
+    `timeline.<hash>.bak.srt` before the new one replaces it. Returns {"sha256", "backup", "stale", "warnings"}. With no cues nothing is written and an
+    earlier file that THIS TOOL wrote (`recorded_sha` is set) is set aside as `timeline.<hash12>.stale.srt` (named by its content, so nothing is ever
+    overwritten); a file the tool never wrote is left where it is. A file that cannot be moved (locked on Windows) is left and reported in "warnings"."""
+    backup, stale, warnings = None, None, []
     if path.is_file():
-        cur = sha256_bytes(path.read_bytes())
-        if cur != recorded_sha:
+        data_now = path.read_bytes()
+        cur = sha256_bytes(data_now)
+        if cues and cur != recorded_sha:
             bak = path.with_name(f"{path.stem}.{cur[:12]}.bak{path.suffix}")
             if not bak.exists():
-                bak.write_bytes(path.read_bytes())
+                bak.write_bytes(data_now)
             backup = bak.name
-        if not cues:
-            path.replace(path.with_name(f"{path.stem}.stale{path.suffix}"))
+        if not cues and recorded_sha:
+            target = path.with_name(f"{path.stem}.{cur[:12]}.stale{path.suffix}")
+            try:
+                path.replace(target)
+                stale = target.name
+            except OSError as e:        # PermissionError: another program holds the file (Windows)
+                warnings.append(f"{path.name} could not be set aside ({e}); it was left in place")
     if not cues:
-        return {"sha256": None, "backup": backup}
+        return {"sha256": None, "backup": backup, "stale": stale, "warnings": warnings}
     data = render_srt(cues)
     atomic_write_bytes(path, data)
-    return {"sha256": sha256_bytes(data), "backup": backup}
+    return {"sha256": sha256_bytes(data), "backup": backup, "stale": stale, "warnings": warnings}
