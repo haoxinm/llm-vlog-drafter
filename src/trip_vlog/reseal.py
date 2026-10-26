@@ -49,11 +49,44 @@ class SealResult:
     warnings: list[str] = field(default_factory=list)
     repairs: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
-    approval: str | None = None                 # what happened to the approval record: "kept" | "invalidated" | "none"
+    approval: str | None = None                 # the approval record: "none" | "kept" | "invalidated" | "for another plan" / "for another outline"
+    critic_blocked: str | None = None           # plan only: why critic / revise will refuse this plan until it is re-planned (None: they can work on it)
 
     @property
     def ok(self) -> bool:
         return self.outcome != "refused"
+
+
+def _approval_state(ap: Any, key: str, lineage: set[Any], new: str | None, what: str) -> str:
+    """What the approval record says about this content: none (no approved record), kept (bound to the new hash), invalidated (bound to the hash the
+    file had before the edit (`lineage`: its own recorded plan_hash / the hash the stage recorded), so the edit voids it), or for another plan/outline (bound to some other hash: this seal neither made nor voids it)."""
+    if not isinstance(ap, dict) or ap.get("status") != "approved":
+        return "none"
+    held = ap.get(key)
+    if held == new:
+        return "kept"
+    return "invalidated" if held in lineage else f"for another {what}"
+
+
+def _roundtrip_block(ctx: Any, sealed: Any, selection: Any) -> str | None:
+    """Critic and revise only work on a plan that its selection plan resolves to exactly (plan_diff.check_roundtrip). Returns the reason it does not, or None."""
+    try:
+        from trip_vlog.planning.catalog_view import PlanningCatalog
+        from trip_vlog.planning.plan_diff import PlanBaseError, PlanContext, check_roundtrip, selection_from_edit
+        from trip_vlog.planning.validate import ValidationSettings
+        from trip_vlog.planning.resolve_plan import effective_plan_settings
+        from trip_vlog.revision_common import outline_alternatives
+
+        alts, _ = outline_alternatives(ctx)
+        pc = PlanContext(PlanningCatalog.from_catalog(ctx.catalog), ValidationSettings.effective(ctx.config), effective_plan_settings(ctx.config), alts,
+                         float(ctx.config.qc.min_still_seconds))
+        try:
+            check_roundtrip(sealed, selection_from_edit(sealed, selection), pc)
+        except PlanBaseError as e:
+            return str(e)
+    except Exception:       # noqa: BLE001 - advice only; never fail a seal over it
+        return None
+    return None
 
 
 def _rel(root: Path, p: Path) -> str:
@@ -97,6 +130,7 @@ def _seal_plan(ctx: Any, root: Path) -> SealResult:
         res.errors.append(f"{pp.edit_plan.name} is not readable JSON: {e}")
         return res
     res.previous_hash = plan_file_hash(pp.edit_plan)
+    lineage = {res.previous_hash, doc.get("plan_hash") if isinstance(doc, dict) else None, (ctx.manifest.get("plan") or {}).get("plan_hash")} - {None}
     view = PlanningCatalog.from_catalog(ctx.catalog)
     settings = ValidationSettings.effective(ctx.config)
     # the plan_hash field is exactly what is being re-computed, so it is the one check that is skipped here (and made again on the sealed result)
@@ -115,7 +149,8 @@ def _seal_plan(ctx: Any, root: Path) -> SealResult:
     res.new_hash = sealed.plan_hash
     new_doc = to_json_dict(sealed)
     if new_doc == doc and not pp.edit_plan.read_bytes().startswith(b"\xef\xbb\xbf"):
-        res.outcome, res.approval = "unchanged", "kept"
+        res.outcome = "unchanged"
+        res.approval = _approval_state(ctx.manifest.get("approval"), "plan_hash", lineage, res.new_hash, "plan")
         res.notes.append("the plan is already sealed: its plan_hash matches its content and it passed every check; nothing was written")
         return res
     res.backup = backup_file(pp.edit_plan, res.previous_hash)
@@ -132,12 +167,13 @@ def _seal_plan(ctx: Any, root: Path) -> SealResult:
                                                             "backup": res.backup, "repairs": res.repairs, **again.to_dict()})
     res.outcome = "sealed"
     ap = ctx.manifest.get("approval")
-    if isinstance(ap, dict) and ap.get("status") == "approved" and ap.get("plan_hash") != res.new_hash:
+    res.approval = _approval_state(ap, "plan_hash", lineage, res.new_hash, "plan")
+    if res.approval == "invalidated":
         # the same record the approval stage writes when it finds a changed plan
         ctx.manifest.set(approval={"status": "invalidated", "previous_plan_hash": ap.get("plan_hash"), "plan_hash": res.new_hash, "at": utc_now_iso()})
-        res.approval = "invalidated"
-    else:
-        res.approval = "kept" if isinstance(ap, dict) and ap.get("status") == "approved" else "none"
+    res.critic_blocked = _roundtrip_block(ctx, sealed, selection)
+    if res.critic_blocked:
+        res.notes.append("`trip-vlog critic` and `trip-vlog revise` will refuse this plan until it is re-planned, because it no longer matches its selection plan: " + res.critic_blocked)
     if res.approval == "kept":
         res.notes.append("the content hash did not change, so the existing approval of this plan still applies")
     if res.approval == "invalidated" and "assemble" in ctx.manifest.stages:
@@ -169,8 +205,10 @@ def _seal_outline(ctx: Any, root: Path) -> SealResult:
     rec = ctx.manifest.get("outline") or {}
     in_sync = on_disk == text.encode("utf-8") and rec.get("md_hash") == res.new_hash and op.summary.is_file()
     ap = outline_approval_record(ctx.manifest)
+    lineage = {res.previous_hash, rec.get("md_hash"), rec.get("outline_hash")} - {None}
     if in_sync:
-        res.outcome, res.approval = "unchanged", "kept"
+        res.outcome = "unchanged"
+        res.approval = _approval_state(ap, "outline_hash", lineage, res.new_hash, "outline")
         res.notes.append("the outline is already in canonical form and its summary is current; nothing was written")
         return res
     if on_disk != text.encode("utf-8"):
@@ -181,11 +219,9 @@ def _seal_outline(ctx: Any, root: Path) -> SealResult:
     atomic_write_json(op.plans_dir / "reseal_outline_report.json", {"ok": True, "at": utc_now_iso(), "previous_hash": res.previous_hash,
                                                                     "outline_hash": res.new_hash, "backup": res.backup, **report.to_dict()})
     res.outcome = "sealed"
-    if ap and ap.get("status") == "approved" and ap.get("outline_hash") != res.new_hash:
+    res.approval = _approval_state(ap, "outline_hash", lineage, res.new_hash, "outline")
+    if res.approval == "invalidated":
         ctx.manifest.set(outline_approval={"status": "invalidated", "previous_outline_hash": ap.get("outline_hash"), "outline_hash": res.new_hash, "at": utc_now_iso()})
-        res.approval = "invalidated"
-    else:
-        res.approval = "kept" if ap and ap.get("status") == "approved" else "none"
     made_from = (ctx.manifest.get("plan") or {}).get("outline_hash")
     if made_from and made_from != res.new_hash:
         res.notes.append("the edit plan was made from a different outline: after you approve this outline, `resume` makes a NEW plan from it "

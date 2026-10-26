@@ -205,3 +205,31 @@ def test_a_plan_from_a_revision_round_can_be_edited_and_resealed(media_dir, tmp_
     assert code == 0, out + err
     assert rj(ws / "manifest.json")["filmcraft"]["project_version"] == 2, "a note does not change the timeline, so the build is a no-op; the handoff is still refreshed"
     assert "re-sealed with `trip-vlog reseal`" in (ws / "resolve_handoff" / "handoff_report.md").read_text(encoding="utf-8")
+
+
+def test_reseal_reports_the_approval_accurately_and_warns_when_critic_and_revise_will_refuse(drafted, capsys):
+    ws = drafted
+    edit_rationale(ws)                                                      # a note: no approval recorded, the timeline is unchanged
+    code, out, err = run(capsys, "reseal", "--output", ws)
+    assert code == 0 and rj(ws / "manifest.json")["reseal"][-1]["approval"] == "none" and "critic/revise" not in out
+    assert "approval: none recorded yet" in out and "approval: kept" not in out
+
+    assert run(capsys, "approve", "--output", ws)[0] == 0
+    code, out, _ = run(capsys, "reseal", "--output", ws)                    # sealed and approved: unchanged -> the approval is the plan's own
+    assert "unchanged" in out and "still applies" in out
+
+    m = rj(ws / "manifest.json")                                            # an approval of some other plan is not "kept" and is not claimed as invalidated by this seal
+    m["approval"]["plan_hash"] = "f" * 64
+    (ws / "manifest.json").write_text(json.dumps(m), encoding="utf-8")
+    edit_rationale(ws, "again")
+    code, out, _ = run(capsys, "reseal", "--output", ws)
+    assert code == 0 and rj(ws / "manifest.json")["reseal"][-1]["approval"] == "for another plan" and "for another plan" in out
+    assert rj(ws / "manifest.json")["approval"]["plan_hash"] == "f" * 64
+
+    doc = rj(ws / "plans" / "edit_plan.json")                               # a change to the clips: critic and revise cannot take the plan as their base
+    first = doc["scenes"][0]["clips"][0]
+    first["audio_policy"] = "muted" if first["audio_policy"] != "muted" else "natural_sound"
+    (ws / "plans" / "edit_plan.json").write_text(json.dumps(doc, indent=2), encoding="utf-8")
+    code, out, err = run(capsys, "reseal", "--output", ws)
+    assert code == 0, out + err
+    assert "critic/revise: they will refuse this plan until it is re-planned" in out and "`trip-vlog critic` and `trip-vlog revise` will refuse" in out

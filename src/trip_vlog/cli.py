@@ -604,8 +604,15 @@ def _cmd_reseal(args: argparse.Namespace) -> int:
         if r.approval == "invalidated":
             print(f"  approval: the earlier approval no longer matches and is invalidated; review, then `trip-vlog approve --{r.what} --output {args.output}` "
                   f"and `trip-vlog resume --output {args.output}` (nothing was approved)")
-        elif r.outcome == "sealed" and r.approval == "none":
+        elif r.approval == "none":
             print(f"  approval: none recorded yet; `trip-vlog approve --{r.what} --output {args.output}` when you are happy with it (nothing was approved)")
+        elif r.approval == "kept":
+            print("  approval: the existing approval is bound to this content and still applies")
+        elif str(r.approval).startswith("for another"):
+            print(f"  approval: the recorded approval is {r.approval}, not this one; `trip-vlog approve --{r.what} --output {args.output}` (nothing was approved)")
+        if r.critic_blocked:
+            print(f"  critic/revise: they will refuse this plan until it is re-planned (it no longer resolves from its selection plan); a re-plan discards this edit "
+                  f"unless you keep the backup")
     return 0 if all(r.ok for r in results) else 4
 
 

@@ -1452,8 +1452,11 @@ nothing here was run in Resolve.
     validators' frame-boundary repairs to the person's file (listed in
     the output) rather than refusing it.
 -   *Failed assembly*. The journal already recorded `failed` runs; now a
-    run left `running` by a killed process is marked `failed` +
-    `abandoned` by the next build, failed/interrupted builds are listed
+    run left `running` by a dead process (pid, host and start time are
+    recorded per run) is marked `failed` + `abandoned` by the next
+    build; a live build of another process is never touched and a
+    second build is refused; the journal is updated under a short lock
+    file and reloaded before each write; failed/interrupted builds are listed
     in `manifest.filmcraft.failed_versions`, `status` and the handoff
     report, `latest_run` documents that only completed builds are
     returned (so `resume`, preview, QC, critic, revisions and handoff
@@ -1473,7 +1476,7 @@ nothing here was run in Resolve.
     transcript has segment timing only) and are used for splitting into
     cues and for cutting a segment at a clip boundary. UTF-8 without
     BOM, CRLF line endings. A hand-edited SRT is backed up before being
-    replaced; a stale one is set aside (`timeline.stale.srt`). The
+    replaced; a stale one the tool wrote is set aside (`timeline.<hash12>.stale.srt`). Overlay clips are not captioned (their audio is not in the timeline) and overlapping cues are kept. The
     handoff report and its import notes say that importing the SRT in
     Resolve is a manual step; `resolve-finish` does not import it.
 
