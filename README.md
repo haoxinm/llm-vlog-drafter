@@ -10,6 +10,8 @@ The critic and natural-language revisions are not implemented yet.
 
 Originals are never modified. Everything the tool writes goes into a separate *output workspace* that must live outside the media folder.
 
+Live tests that the automated suite cannot run (real FilmCraft, Resolve, footage, Windows/macOS paths, LLM output quality): [docs/TEST_RUNBOOK.md](docs/TEST_RUNBOOK.md).
+
 ## Install
 
 Requires Python 3.11+ and FFmpeg 4.3 or newer (`ffmpeg` and `ffprobe` on `PATH`; frame extraction uses the scale filter's `force_divisible_by`, added in 4.3).
