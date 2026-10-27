@@ -4,7 +4,7 @@ This runbook covers every test the automated suite cannot run: real adapters and
 
 Sources: [DESIGN.md](../DESIGN.md) (Phase status notes and "Runbook items"), [README.md](../README.md), [phase0-filmcraft-spike.md](phase0-filmcraft-spike.md), [resolve-verification.md](resolve-verification.md).
 
-How to read a test: each has an ID, the platforms it needs, a purpose, steps, pass criteria and what to capture if it fails. Tick the result in the table at the end. Items marked "(verify)" are things the source did not let the author confirm; check them first and note what you find.
+How to read a test: each has an ID, the platforms it needs, a purpose, steps, pass criteria and what to capture if it fails. Tick the result in the table at the end. Items marked "(verify)" are things the sources could not settle offline; check them first and note what you find.
 
 Contents: 1 Prerequisites; 2 Conventions; Phases 0, 1, 2, 3, 4, 5, 6, 7a, 7b, 7c; Results checklist; Known gaps; How to report results back.
 
@@ -21,7 +21,7 @@ Contents: 1 Prerequisites; 2 Conventions; Phases 0, 1, 2, 3, 4, 5, 6, 7a, 7b, 7c
 | Tool | What to install | Check |
 |---|---|---|
 | DaVinci Resolve Studio 21.x | Studio edition, not free. Preferences > System > General > External scripting using = Local, then restart Resolve. | Help > About (record version and edition) |
-| FilmCraft CLI | Windows: MSI or portable zip (`filmcraft-cli.exe`). macOS: the separate `filmcraft-cli` zip from the releases page, then `chmod +x filmcraft-cli` (the app bundle alone does not contain the CLI). If macOS blocks the downloaded binary, clear the quarantine flag (verify). Set `FILMCRAFT_CLI` to its full path. | `filmcraft-cli --version` (developed against 0.13.0; record yours) |
+| FilmCraft CLI | Windows: MSI or portable zip (`filmcraft-cli.exe`). macOS: the separate `filmcraft-cli` zip from the releases page, then `chmod +x filmcraft-cli` (the app bundle alone does not contain the CLI). If macOS blocks the downloaded binary, clear the quarantine flag (verify: the code does not touch it; note what worked). Set `FILMCRAFT_CLI` to its full path. | `filmcraft-cli --version` (developed against 0.13.0; record yours) |
 | ffmpeg and ffprobe | 4.3 or newer. Windows: `winget install Gyan.FFmpeg`. macOS: `brew install ffmpeg`. Open a new terminal afterwards. | `ffmpeg -version`, `ffprobe -version` |
 | LLM access | An Anthropic key and an OpenAI key (to test both providers), each as an env var only. Choose the model ids yourself and put them in `TRIP_VLOG_LLM_MODEL` (and `TRIP_VLOG_SPEECH_MODEL` for transcription). There is no built-in default model. | `trip-vlog llm-check` (P3-01) |
 | Local LLM server (optional) | Any server with an OpenAI-style API on `127.0.0.1`, one with image support if you want the local vision tests. | see README "LLM provider" |
@@ -133,9 +133,9 @@ The spike was run on Linux only. Re-verify on both target OSes (DESIGN 22.1).
 **Purpose:** confirm every external tool is found per OS and the versions are recorded.
 **Steps:**
 1. `trip-vlog --version`, `filmcraft-cli --version` (via `$FILMCRAFT_CLI`), `ffmpeg -version`, `ffprobe -version`.
-2. Unset `FILMCRAFT_CLI` and remove FilmCraft from `PATH`. Windows: run `trip-vlog draft --media "$MEDIA" --output "$WS" --duration 30` and look at the FilmCraft error/log line (standard install folder `C:\Program Files\FilmCraft\` is searched). macOS: same, with the CLI in its standard install folder (verify which folders are searched; DESIGN 22.1 names `/Applications/*.app/Contents/MacOS/` and the Homebrew prefixes).
-3. Put ffmpeg only in a non-`PATH` Homebrew prefix on macOS (or only the winget location on Windows) and run `trip-vlog index --media "$MEDIA" --output "$WS"`. Then pass `--ffmpeg` / `--ffprobe` explicitly, and set `FFMPEG` / `FFPROBE`.
-**Pass:** each tool is found by the documented lookup order (`--flag`, env var, `PATH`, standard folders). `filmcraft/capability_snapshot.json` and `manifest.json` record the FilmCraft version. A nonexistent explicit `--filmcraft PATH` is an error, not a silent fallback.
+2. Unset `FILMCRAFT_CLI` and remove FilmCraft from `PATH`. Run `trip-vlog draft --media "$MEDIA" --output "$WS" --duration 30 --auto-approve` (without `--auto-approve` the run stops at the approval gate before FilmCraft is looked for). FilmCraft is found in a standard folder (`executable_source` `standard-location` in `filmcraft/capability_snapshot.json`) or the run fails with an error that lists the folders searched. Windows folders: `%ProgramFiles%\FilmCraft\`, `%ProgramW6432%`, `%ProgramFiles(x86)%`, `%LOCALAPPDATA%\FilmCraft\`, `%LOCALAPPDATA%\Programs\FilmCraft\`, `~\.local\bin`, `~\.cargo\bin`. macOS folders: `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, `~/.cargo/bin`, `/Applications/FilmCraft.app/Contents/MacOS/`, `~/Applications/FilmCraft.app/Contents/MacOS/`. Test one folder per OS.
+3. With ffmpeg/ffprobe off `PATH`, run `trip-vlog index --media "$MEDIA" --output "$WS"`. Only these extra folders are searched: macOS `/opt/homebrew/bin`, `/usr/local/bin`, `/opt/local/bin`; Windows `C:\ProgramData\chocolatey\bin`, `C:\ffmpeg\bin`, `C:\Program Files\ffmpeg\bin`. A folder outside these (for example a winget package folder) is expected to fail with "ffprobe not found". Then pass `--ffmpeg` / `--ffprobe` explicitly, and set `FFMPEG` / `FFPROBE`.
+**Pass:** each tool is found by the documented lookup order (`--flag`, env var, `PATH`, standard folders). `filmcraft/capability_snapshot.json` and `manifest.json` record the FilmCraft version. A nonexistent explicit `--filmcraft PATH` (or `$FILMCRAFT_CLI`) is an error, not a silent fallback. (For ffmpeg/ffprobe a bad explicit path does fall through to the next lookup step; record what you see.)
 **Capture:** console output, `capability_snapshot.json`, the exact install paths.
 
 ### P0-02 Spike script on this OS
@@ -143,7 +143,7 @@ The spike was run on Linux only. Re-verify on both target OSes (DESIGN 22.1).
 **Purpose:** re-run the Phase 0 spike against the real FilmCraft CLI on each OS and compare with the Linux snapshot.
 **Steps:**
 1. `python spike/phase0_filmcraft_spike.py --filmcraft-cli "$FILMCRAFT_CLI" --out SCRATCH_DIR` (use a scratch `--out`: the script deletes and recreates it; the default is `spike/out/`). It generates fixtures with `tests/fixtures/make_fixtures.py` if missing.
-2. Open `SCRATCH_DIR/capability_snapshot.json`; compare `summary`, `command_catalog.count`, `mcp.tools` and `cli_subcommands` with `docs/phase0/capability_snapshot.json` (Linux: 710 commands, 17 MCP tools, 59 checks).
+2. Open `SCRATCH_DIR/capability_snapshot.json`; compare `summary`, `required_checks_failed`, `command_catalog.count`, `mcp.tools` and `cli_subcommands` with `docs/phase0/capability_snapshot.json` (Linux: 710 commands, 17 MCP tools, 59 checks).
 **Pass:** exit code 0 (1 = a required check failed, 2 = usage); no required check failed. Differences from Linux (command count, tools, path forms) are listed in the notes, not necessarily failures: DESIGN 22.1 says never assume a capability verified on one OS exists on another.
 **Capture:** `capability_snapshot.json`, `commands.jsonl`, `mcp_tools.json`, console output.
 
@@ -180,7 +180,7 @@ The spike was run on Linux only. Re-verify on both target OSes (DESIGN 22.1).
 **Purpose:** automate P0-05 and record the per-check table.
 **Steps:**
 1. macOS: `python3 tools/resolve_verify.py --spike-out SCRATCH_DIR`. Windows: `python tools\resolve_verify.py --spike-out SCRATCH_DIR`. If Resolve is installed in a non-default place, set `RESOLVE_SCRIPT_API` and `RESOLVE_SCRIPT_LIB` first.
-2. Read the console table and `resolve_verification.json` (written next to `--output`, default the current directory).
+2. Read the console table and `resolve_verification.json` (written to `--output`; default the `--handoff` folder, else the current directory).
 **Pass:** exit 0 for the FCP7 XML. Required checks: import, fps, duration, clip_order, record_inout, source_in, media_online, image_sequence_misdetected. Expected on 21.1.1.10: everything passes except the still (offline, `image_sequence_misdetected` fails) and OTIO is rejected by `ImportTimelineFromFile`. Exit 3 means scripting is unavailable: use the manual checklist (P0-05).
 **Capture:** `resolve_verification.json`, console table, Workspace > Console text if every import returned None, Resolve version, Python version.
 
@@ -236,10 +236,10 @@ The spike was run on Linux only. Re-verify on both target OSes (DESIGN 22.1).
 **Steps:**
 1. Index Set A (accents, CJK, spaces). Record each file's `asset_id` for its relative path.
 2. macOS: create a file whose name has a decomposed accent (type the accented letter via `printf 'e\xcc\x81'`) and confirm its `asset_id` equals the id of the composed (NFC) spelling computed on Windows (`asset_` + first 16 hex of SHA-256 of the NFC POSIX relative path).
-3. Create two files differing only in case (`Beach.mp4`, `beach.mp4`) in a folder on a case-insensitive volume (the default on both OSes). Index. The expected behaviour is detection and a report of the collision; where it is reported is not documented in the sources read (verify: check `inventory_report.json` and `logs/`).
-4. Windows: copy Set A into a folder path longer than 260 characters and index it. Expected: works via extended-length paths, no crash (verify the exact reporting).
+3. Two files differing only in case (`Beach.mp4`, `beach.mp4`) cannot exist in one folder on the default (case-insensitive) volumes, so make them on a case-sensitive one: macOS, a case-sensitive APFS disk image (`hdiutil create -size 1g -fs "Case-sensitive APFS" -volname CS cs.dmg`, then mount it); Windows, an empty NTFS folder with `fsutil.exe file setCaseSensitiveInfo <folder> enable`. Copy two small clips in under those names and index that folder. Both files are indexed with separate `asset_id`s; the pair is listed under `scan.case_collisions` in `media_index/inventory_report.json` and counted as `case_collisions` in the scan stage of `status`.
+4. Windows: copy Set A into a folder path longer than 260 characters and index it. Expected: the scan, probe, thumbnail and ffmpeg steps use `\\?\` extended-length paths for paths of 240+ characters, so files are indexed. If ffprobe/ffmpeg reject such a path, that file is a per-file failure listed in `media_index/inventory_report.json` (`failed_probes`, `scan.skipped` with reason `unreadable`) and `logs/errors.jsonl`, never a crash; record which happens.
 5. Copy the macOS media folder (accents, CJK, spaces, a trailing space or dot if you can make one) to Windows and index it there. Every file is scanned or reported, none crashes the run.
-**Pass:** identical `asset_id` for identical relative paths on both machines; collisions and unusable names are reported, never silently merged or lost.
+**Pass:** identical `asset_id` for identical relative paths on both machines; case collisions appear in `inventory_report.json`; unusable or too-long files appear as per-file failures; nothing is silently merged or lost.
 **Capture:** `assets.jsonl`, `inventory_report.json`, the file names (hex-dump if needed).
 
 ### P1-05 Fingerprints, cache and moves
@@ -331,7 +331,7 @@ The spike was run on Linux only. Re-verify on both target OSes (DESIGN 22.1).
 ### P2-08 `status`, `index`, `approve` edge behaviour
 **Platforms:** either
 **Purpose:** quick CLI checks with real output.
-**Steps:** `trip-vlog status --output "$WSB" --json`; `trip-vlog approve --output NEWEMPTYDIR` (nothing to approve; README says exit 4, a missing folder may give 2: verify); `trip-vlog draft --media "$MEDIA" --output "$MEDIA/ws"` (workspace inside the media folder).
+**Steps:** `trip-vlog status --output "$WSB" --json`; `trip-vlog approve --output NEWEMPTYDIR` (nothing to approve; a missing or empty folder also gives exit 4, because `approve` reports "not a trip-vlog workspace"); `trip-vlog draft --media "$MEDIA" --output "$MEDIA/ws"` (workspace inside the media folder).
 **Pass:** status shows all stages and the FilmCraft version; the second exits 4; the third exits 2 and creates nothing in the media folder.
 **Capture:** console output.
 
@@ -425,7 +425,7 @@ Needs live endpoints. Sub-phases: 3a gateway, 3b vision labeling, 3c speech.
 ### P3-11 Images sent are stripped and downscaled
 **Platforms:** either
 **Purpose:** confirm EXIF/GPS are not uploaded and the long side is at most `llm.image_max_side` (1568).
-**Steps:** point a profile (`api: openai_chat`, `api_key_env: null`, `structured_output: json_prompt`) at a throw-away local HTTP server of your own that logs request bodies. Run `analyze --limit 1` on a GPS-tagged photo. Decode the base64 image from the logged body and check it with `ffprobe` or an EXIF tool. (How to build the capture server is not specified in the repo; verify.)
+**Steps:** point a profile (`api: openai_chat`, `api_key_env: null`, `structured_output: json_prompt`) at a throw-away local HTTP server of your own that logs request bodies. Run `analyze --limit 1` on a GPS-tagged photo. Decode the base64 image from the logged body and check it with `ffprobe` or an EXIF tool. (How to build the capture server is up to you; the repo has none.)
 **Pass:** no EXIF/GPS in the uploaded image; long side at most 1568 px; JPEG.
 **Capture:** the decoded image's metadata dump.
 
@@ -576,7 +576,7 @@ Needs live endpoints. Sub-phases: 3a gateway, 3b vision labeling, 3c speech.
 **Platforms:** either
 **Purpose:** final film length against the target.
 **Steps:** build drafts for 60, 180 and 300 s targets (new `--duration` re-plans). Read `preview/render_report.json` / the ffprobe duration.
-**Pass:** within `project.duration_tolerance_pct` (5%) or 2 s of the target in each; every clip at least 1 s except stills as configured.
+**Pass:** within the larger of `project.duration_tolerance_pct` (5% of the target) and `project.duration_tolerance_seconds` (2 s) in each; every clip at least 1 s except stills as configured.
 **Capture:** the three durations and `validation_report.json`.
 
 ### P4-10 Titles in FilmCraft and Resolve
@@ -740,7 +740,7 @@ The DESIGN runbook for the first live run, in order (P6-01 to P6-08), plus suppo
 ### P6-05 Destructive requests are proposed, not applied
 **Platforms:** either
 **Steps:** `revise "remove the whole market scene"` and `revise "cut the film down to a third of its length"`.
-**Pass:** exit 3 for both; `plans/revisions/revise_r01.json`/`.md` has status `proposed`; the plan and project are unchanged; a request that removes `must_include` content says "required item N".
+**Pass:** the scene removal exits 3 with `plans/revisions/revise_r01.json`/`.md` status `proposed`. A film may not shrink by more than `revise.max_duration_change_pct` (50%), so "a third of its length" is expected to have its excess operations refused and listed: exit 3 (a partial proposal) or exit 1 (everything refused) is correct, an applied change is a failure. In every case the plan and project are unchanged; a request that removes `must_include` content says "required item N".
 **Capture:** the revision files.
 
 ### P6-06 Confirm and apply
@@ -770,7 +770,7 @@ The DESIGN runbook for the first live run, in order (P6-01 to P6-08), plus suppo
 
 ### P6-10 Revisions in sequence and overrides
 **Platforms:** either
-**Steps:** apply three revisions in a row, one that changes the length by more than 15%. Run `status`. Run `trip-vlog revise --output "$WSL" --reset-overrides`.
+**Steps:** apply three revisions in a row, one that changes the length by more than 15% and 10 s (it is proposed with exit 3: `approve --revision`, then `resume`). Run `status`. Run `trip-vlog revise --output "$WSL" --reset-overrides`.
 **Pass:** the history is listed; a length change beyond tolerance moves the target (recorded in `manifest.revise.overrides`, not in `project.yaml`); `--reset-overrides` clears it; QC `scene_order` may warn after `move_scene` (expected).
 **Capture:** `status`, `manifest.json`.
 
@@ -825,8 +825,8 @@ The DESIGN runbook for the first live run, in order (P6-01 to P6-08), plus suppo
 ### P7a-05 `--abandon-running`
 **Platforms:** either
 **Purpose:** the escape hatch for a build of an unreachable host (24 h rule).
-**Steps:** edit `filmcraft/execution_journal.json` to make a `running` record carry a different host name (field names: verify in the file) (copy the file first), run `trip-vlog resume --output "$WS"` (refused), then with `--abandon-running`.
-**Pass:** the first refuses naming the journal and the flag; the second marks it abandoned after asking; files are kept. (Editing the journal by hand is a test device only.)
+**Steps:** copy `filmcraft/execution_journal.json`, then edit it so that one run has `"status": "running"`, `"host"` set to another name, `"pid"` a number, and `"started_at"` within the last 24 hours (the run fields are `status`, `pid`, `host`, `started_at`). Run `trip-vlog resume --output "$WS"` (an approved plan that needs a build is required; refused), then `trip-vlog resume --output "$WS" --abandon-running` and answer `y` at the prompt.
+**Pass:** the first refuses naming the journal and the flag; the second lists the run, asks "Mark it/them as abandoned", then sets the run `failed` + abandoned and builds the next version; answering `n` (or no input) changes nothing and exits 2; files are kept. (Editing the journal by hand is a test device only.)
 **Capture:** console output, journal before/after.
 
 ### P7a-06 Captions import in Resolve
@@ -863,14 +863,14 @@ The DESIGN runbook for the first live run, in order (P6-01 to P6-08), plus suppo
 ### P7b-01 Native FCP7 XML is judged good (read-back not needed)
 **Platforms:** both
 **Purpose:** the normal case on each OS.
-**Steps:** after a draft, open `resolve_handoff/readback_interchange.json` (verify its presence and that `status` is `not_needed`) and `handoff_report.md`.
-**Pass:** status `not_needed`, `timeline.xml` is FilmCraft's own, no `timeline.native.xml`.
-**Capture:** the JSON.
+**Steps:** after a draft, open `resolve_handoff/readback_interchange.json` (it is expected to be **absent**: the file is only written when the fallback was needed or failed) and `handoff_report.md`.
+**Pass:** no `readback_interchange.json`, no `timeline.native.xml`, no "Read-back interchange" section in `handoff_report.md`, and `timeline.xml` is FilmCraft's own (check the report's XML origin line). With `--set filmcraft.readback_interchange=off` the result is the same.
+**Capture:** the folder listing and report.
 
 ### P7b-02 Generated read-back XML in Resolve
 **Platforms:** both (Resolve)
 **Purpose:** DESIGN runbook item 1. It needs a FilmCraft whose FCP7 export is missing or wrong, which the repo does not provide; the tests simulate it.
-**Steps:** (verify) there is no supported switch to force the fallback with the real CLI. If you have such a FilmCraft build, run a draft, confirm `readback_interchange.json` `status: generated` and the "generated from FilmCraft read-back" label, then import both `timeline.xml` and `timeline.native.xml` in Resolve and compare.
+**Steps:** there is no switch to force the fallback (`filmcraft.readback_interchange` is only `auto` or `off`). If you have a FilmCraft build whose FCP7 export is missing or wrong, run a draft, confirm `readback_interchange.json` `status: generated` and the "generated from FilmCraft read-back" label, then import both `timeline.xml` and `timeline.native.xml` in Resolve and compare.
 **Pass:** the generated file imports with correct order/in-out/media; the report's list of what it cannot carry (titles' styling, effects other than scale and gain, keyframe values) is accurate. If you have no such build, mark "not run".
 **Capture:** both XML files, the JSON.
 
@@ -883,9 +883,9 @@ The DESIGN runbook for the first live run, in order (P6-01 to P6-08), plus suppo
 
 ### P7b-04 Music ducking in Resolve (Fairlight)
 **Platforms:** both (Resolve)
-**Purpose:** DESIGN runbook item 3. No planner places music, so the plan must be hand-edited (verify the exact fields).
+**Purpose:** DESIGN runbook item 3. No planner places music, so the plan must be hand-edited.
 **Steps:**
-1. Use a workspace with transcribed speech clips. Add a music clip to `plans/edit_plan.json`: a clip entry with `track_role: "music"` pointing at the music asset/moment, and `audio.duck_music_under_speech: true` (check the field names in `plans/edit_plan.schema.json` and an existing clip; verify).
+1. Use a workspace with transcribed speech clips. Add a music clip to the `clips` list of a scene in `plans/edit_plan.json`: copy an existing clip and change `track_role` to `"music"` and `asset_id`, `moment_id`, the source seconds/frames, `timeline_start_frame` and `duration_frames` to the music file (every clip field in `schemas/edit_plan.schema.json` is required; `project.music_policy` must not be `none`). The top-level `audio.duck_music_under_speech` must be `true` (the default). If `reseal` rejects the clip, record the finding.
 2. `trip-vlog reseal --output "$WS" --plan`, `approve --plan`, then `trip-vlog resume --output "$WS" --set filmcraft.duck_music=true` (`duck_mode: speech`; also try `natural_sound`).
 3. Read `qc_report.json` `music_ducking`, `compatibility_report.json` row `music_ducking`, and the preview. Import `timeline.xml` in Resolve and open Fairlight.
 **Pass:** the music clip shows Audio Levels keyframes as clip volume automation; the dips line up with the speech windows (ramp `duck_ramp_seconds`, depth `duck_db`); QC reports the measured level difference at the duck depth (+-2 dB) for each window; `music_ducking` only warns. With no transcript the whole clip ducks (documented).
@@ -1064,12 +1064,12 @@ Fill in one cell per machine: `pass`, `fail`, `skip` or `n/a`. `either` means ru
 
 Deferred items for which this runbook has no complete steps:
 
-- FilmCraft desktop control bridge and UI automation (`--filmcraft-mode bridge`, `cli`): the spike did not test them (needs the GUI app and a display) and the pipeline does not need them. No test is given.
+- FilmCraft desktop control bridge and UI automation: `draft --filmcraft-mode mcp|cli|bridge` and `filmcraft.mode` are accepted, but the code never reads them (every build uses the MCP session), so `cli` and `bridge` do nothing. The spike did not test the bridge (needs the GUI app and a display). No test is given.
 - Forcing the read-back interchange fallback with the real CLI (P7b-02): the repo only simulates a broken FilmCraft export.
-- Hand-adding a music clip to a plan (P7b-04): no planner places music, so the plan fields must be checked against the schema.
+- Hand-adding a music clip to a plan (P7b-04): no planner places music; the steps give the schema fields but whether the validators accept an audio-only moment is untested.
 - Capturing the bytes sent to a provider (P3-11): the method is yours.
 - A locked-file rename on Windows (`stale_rename_failed` in the plan stage summary) and a locked `timeline.srt`: no reliable way to trigger them is documented.
-- Case-only name collisions and Windows long paths (P1-04): the documented behaviour is "detect and report"; where it is reported is unconfirmed.
+- Windows long paths (P1-04): the code uses extended-length paths, but whether ffprobe/ffmpeg accept them is unconfirmed. Case collisions are reported in `inventory_report.json`.
 - AAF, FCPXML and EDL are known to fail or crash Resolve 21.1 and are deliberately not exercised.
 
 ## How to report results back
