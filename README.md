@@ -87,6 +87,9 @@ trip-vlog critic --output /path/to/vlog-project [--mode report|apply]
 trip-vlog revise --output /path/to/vlog-project "make the beach scene shorter and drop the blurry sunset clip" [--dry-run] [--file request.txt]
 trip-vlog approve --output /path/to/vlog-project --revision    # when revise stopped with exit code 3 (ambiguous or destructive): then `resume` or `revise --apply`
 
+# Accepted a hand edit of plans/edit_plan.json and/or plans/story_outline.json? Re-validate and re-seal it explicitly (see "Hand-editing a plan or outline")
+trip-vlog reseal --output /path/to/vlog-project [--plan | --outline]
+
 # Optional, Resolve Studio only: finish the handoff inside Resolve (see "Finish in Resolve" below)
 trip-vlog resolve-finish --output /path/to/vlog-project [--dry-run] [--project-name NAME] [--keep-on-failure]
 ```
@@ -94,10 +97,10 @@ trip-vlog resolve-finish --output /path/to/vlog-project [--dry-run] [--project-n
 - `--auto-approve` (or `workflow.approval: auto_approve`) skips the stop and records `approval.mode = "automatic"` in `manifest.json`.
 - Approval is bound to the SHA-256 of the plan content. Changing `--duration`, the media, or the plan file invalidates it and the run stops again.
 - `plans/edit_plan.json` is what gets executed. It is re-validated (schema, IDs, source ranges, durations, transitions) at assemble time, so a plan that
-  was edited into an invalid state is rejected before FilmCraft is started. If you hand-edit it, `plan_hash` must be updated too or validation reports a mismatch.
+  was edited into an invalid state is rejected before FilmCraft is started. If you hand-edit it, run `trip-vlog reseal` (below): it re-validates the edit and recomputes `plan_hash`, which otherwise fails the hash check.
 - Re-running on unchanged inputs does nothing: every stage is cached (inputs hash plus a check that its artifact still exists) and `assemble` is a no-op.
   Changing `--duration` re-plans and builds a **new versioned project** (`filmcraft/Trip Vlog Draft_v002.fcproj`); probing and segmentation come from the cache.
-  A failed or interrupted assembly leaves its numbered `.fcproj` behind, never reused; `resume` builds the next version, so clips are never appended twice.
+  A failed or interrupted assembly leaves its numbered `.fcproj` behind, marked failed (see "Failed builds"), never reused; `resume` builds the next version, so clips are never appended twice.
 - `resume` continues the pipeline recorded in `manifest.json`; the media folder is taken from there. Settings persist in `<output>/project.yaml`.
 
 Exit codes: `0` finished (QC warnings and unprobeable files are reported, not fatal), `1` a stage failed, `2` bad configuration/arguments, `3` stopped at the approval gate, `4` `approve` refused (nothing to approve yet, or the plan/outline is invalid), `5` `revise` needs an answer first (nothing was proposed, so there is nothing to approve: ask again with the answer in the request), `130` interrupted.
@@ -117,19 +120,19 @@ vlog-project/
   preview/        draft.mp4, qc_report.json/.md, contact_sheet_timeline.jpg (+ _02, _03 ... for many cuts), render_report.json
   qc/             preview_sheet.json (index of the preview sheets: tile -> record time, clip, scene, side); critic_report.json/.md (only with qc.critic on)
   resolve_handoff/  timeline.xml, timeline.otio, media_manifest.csv, edit_plan.json, project_reference.json, handoff_report.md, compatibility_report.json/.md,
-                    resolve_finish_report.json/.md (only after `resolve-finish`)
+                    timeline.srt + captions_report.json (only with captions.enabled), resolve_finish_report.json/.md (only after `resolve-finish`)
   logs/           run.jsonl, errors.jsonl
 ```
 
 ### Timeline and QC
 
 Track layout: video and stills on V1, overlays V2, natural audio of V1 clips on A1 (linked), music A2, narration A3. `audio_policy` `muted` places video
-only; `ambient_low` applies a constant -12 dB (`filmcraft.ambient_low_gain_db`); no ducking or automation is generated. The adapter places dissolves
+only; `ambient_low` applies a constant -12 dB (`filmcraft.ambient_low_gain_db`); music ducking and scale-to-fit framing exist but are off by default (below). The adapter places dissolves
 centre-aligned only: a dissolve the resolver aligned to the cut start/end is placed as a hard cut and recorded in the handoff report ("Mapping warnings").
 
 `preview/qc_report.json` has a pass/warn/fail status per check: media online, project reopens in a fresh FilmCraft process and matches the plan, no gaps on V1,
 duplicate scenes, still durations, total duration within tolerance (`project.duration_tolerance_pct` / `_seconds`), preview playable (ffprobe), black frames
-(ffmpeg `blackdetect`), and portrait-in-landscape (flagged for manual review). `contact_sheet_timeline.jpg` shows frames just before and after every cut,
+(ffmpeg `blackdetect`), and portrait-in-landscape (flagged for manual review; with `filmcraft.fit_mixed_aspect` the `framing` check also reads the scale back and looks for black bars in the preview; with `filmcraft.duck_music` the `music_ducking` check measures the music in the preview). `contact_sheet_timeline.jpg` shows frames just before and after every cut,
 taken from the rendered preview.
 
 Further deterministic checks (Phase 5a, `qc:` in `project.yaml`; they only ever **warn**, a draft fails only for objective defects such as offline media,
@@ -152,6 +155,33 @@ evenly and the index says so. `qc/preview_sheet.json` (`outputs.qc_dir`) maps ev
 (`start|before|after|end`) and its place on its sheet, and lists the cuts with their two tiles (read it with `trip_vlog.qc.preview.load_preview_sheet_index`).
 `qc_report.json` also has a `critic` block (`not_run`): the seam for a later LLM reviewer, which would read the index and the checks.
 
+### Framing, ducking and the read-back fallback (Phase 7b)
+
+All three were checked against FilmCraft 0.13.0 (Linux); nothing here was run in Resolve. FilmCraft places a clip at its native size: a portrait clip in a
+landscape sequence (or a 4K clip in a 1080p one) is cropped unless it is scaled.
+
+- **`filmcraft.fit_mixed_aspect: true`** scales every video clip and still whose display size differs from the sequence to fit inside the frame
+  (`clip.fitToFrame`: no crop; black bars where the aspect differs; the reverse case, landscape in a vertical sequence, works the same). The scale is
+  read back after reopening and must equal `min(W/w, H/h) * 100`; it is in FilmCraft's FCP7 XML as the Basic Motion scale and compared there too. The
+  QC `framing` check samples a preview frame in the middle of scaled clips and requires black bars. With the option off (default) such clips stay
+  unscaled and the compatibility report keeps its manual "review the framing" step. A FilmCraft without `clip.fitToFrame` gets a mapping warning and
+  the current behaviour.
+- **`filmcraft.duck_music: true`** lowers the music (`duck_db`, default -12 dB, with `duck_ramp_seconds` ramps) under natural sound the plan keeps.
+  `duck_mode: speech` ducks under transcript segments only (a transcript without segment timing ducks its whole clip; nothing is guessed);
+  `natural_sound` also ducks under clips with measured active sound. Windows closer than `duck_merge_gap_seconds` are joined. It is written as Volume
+  level keyframes on the music clip (`effects.setParam`), added to the clip's own gain, and applies only if the plan has `audio.duck_music_under_speech`.
+  Verified by the keyframe count after reopening, by the keyframes in FilmCraft's FCP7 XML (times and levels), and in the rendered preview: QC renders the
+  music track alone (the other audio tracks are muted in a throw-away FilmCraft process that never saves; the project hash is checked afterwards) and
+  compares the level in each duck window with the music file over the same range, which must differ by the duck depth. The measurement file is deleted.
+  The `music_vs_speech` check counts ducking when it is generated. Windows and keyframes are in `compatibility_report.json` (row `music_ducking`).
+- **`filmcraft.readback_interchange: auto`** (default; `off` disables): when FilmCraft's own `timeline.xml` is missing or fails the round trip against
+  the timeline sent to it, the saved project is reopened in a fresh process, its timeline is read through FilmCraft's inspection interface and written as
+  FCP7 XML in the structure of FilmCraft's own export. The file is parsed and must round-trip exactly or it is discarded. The read-back is also compared
+  with the resolved plan; that diff, the reason and what the file cannot carry (title styling, effects other than scale and gain, and **keyframe values**:
+  the read-back only says how many there are, so a ducking envelope is not in this file and the report lists it as a manual step) are in
+  `handoff_report.md` and `resolve_handoff/readback_interchange.json`. A good native export is never replaced; a lossy one is kept as
+  `timeline.native.xml`. OTIO is not generated this way. The XML is labelled "generated from FilmCraft read-back" in the file and the report.
+
 ### Resolve handoff
 
 `resolve_handoff/` holds the interchange files exported by FilmCraft (post-processed to absolute media paths and re-validated), `media_manifest.csv`,
@@ -159,11 +189,46 @@ the validated `edit_plan.json`, `project_reference.json` (path + hash of the `.f
 FCP7 XML is the primary file (it imported cleanly in Resolve 21.1 with the Phase 0 fixture); OTIO is secondary (imports, but media linking with absolute
 paths is not yet verified). FCPXML, EDL and AAF are never exported unless you list them in `filmcraft.interchange_formats`; on Resolve 21.1 they crashed,
 froze and failed to open respectively, and the report then carries a prominent warning. If the export fails, the manifest, plan, preview and report are still
-written and the report says what failed.
+written and the report says what failed. If FilmCraft's FCP7 XML is missing or does not match the timeline sent to FilmCraft, `timeline.xml` is generated from the timeline read back from FilmCraft instead (below).
 
 **The report states that Resolve import is unverified** unless a passing `resolve_verification.json` is present. To verify, run `tools/resolve_verify.py`
 on a machine with Resolve open (see [docs/resolve-verification.md](docs/resolve-verification.md)), then `trip-vlog resume` to refresh the report.
 Media references are absolute: moving the package or the media to another machine breaks the links until they are relinked.
+
+### Hand-editing a plan or outline (`reseal`)
+
+`plans/edit_plan.json` and `plans/story_outline.json` are meant to be edited by hand. The edit plan carries a `plan_hash` that must match its content, and `approve` and the
+assemble step re-check it, so an edited plan is refused (`plan_hash_mismatch`) until it is **re-sealed**:
+
+```
+trip-vlog reseal --output /path/to/vlog-project            # whichever of the outline and the plan exist
+trip-vlog reseal --output /path/to/vlog-project --plan     # or --outline
+trip-vlog approve --output /path/to/vlog-project --plan    # reseal never approves anything
+trip-vlog resume  --output /path/to/vlog-project
+```
+
+- **It runs the full validators on the file as it is**: for the plan, the same ones that run before assembly (schema, asset and moment references, source ranges, transitions and handles, titles,
+  `must_include` / `must_exclude`, the duration tolerance against the current target, with the target and waived references of accepted revisions applied); for the outline, the outline validator (moments, durations, coverage).
+  Any error refuses the seal with the findings (exit code 4), and **nothing is changed**. Frame-boundary repairs the validators make (a source time that is not on a frame) are applied and listed.
+- **It keeps a backup** of the file as it was, `plans/edit_plan.<hash>.bak.json` / `plans/story_outline.<hash>.bak.json` (the names the plan and outline stages use when they replace an edited file; an existing backup with other bytes is never overwritten).
+- **It writes the sealed file**: the plan with `plan_hash` recomputed (UTF-8, no byte order mark; files saved with a BOM by Windows editors are read fine), the outline in its canonical form. It refreshes what is derived from it
+  (`plan_summary.md` and `validation_report.json`, or `story_outline.md`) and records the seal in `manifest.json` (`reseal`) and in `plans/reseal_report.json` (`reseal_outline_report.json`). Running it again on a sealed file does nothing.
+- **Approval is not touched in your favour.** Approval is bound to the hash of the content, exactly as for any hand edit: if the content changed, an earlier approval is marked `invalidated` (what the approval stage would do on the next run) and you approve again with
+  `trip-vlog approve`; if only the `plan_hash` field was stale, the content hash did not change and an existing approval still applies. `reseal` reports what it found: `none` (no approval recorded), `kept`, `invalidated`, or `for another plan` / `for another outline` (the recorded approval is bound to some other content; it is left as it is). A sealed plan never qualifies for the automatic approval "derived from the approved outline" (a hand edit needs its own approval), and `workflow.approval: auto_approve` still approves whatever is on disk, as it always did.
+- **Plans from critic and revision rounds** are ordinary plans and are re-sealed the same way; the round's record stays as it was, and the handoff report says the plan was re-sealed. Their pending proposals become stale because the plan changed.
+- **Critic and revise after a reseal that changes clips.** `trip-vlog critic` and `trip-vlog revise` only work on a plan that its selection plan resolves to exactly. After a reseal that changes clips (not a note or other wording), they refuse the plan ("the current plan differs from what its selection plan resolves to") until it is re-planned; `reseal` prints this when it applies, with the reason. The sealed plan itself is still approved, built and handed off as usual. `reseal` refuses while a critic or revision round is half-applied (run `resume` first).
+- **After resealing an outline**, the plan made from the old outline is not kept in step: once you approve the outline `resume` makes a new plan from it (an edited plan is first copied to `edit_plan.<hash>.bak.json`).
+- It never touches media, FilmCraft projects or Resolve projects. A build from the earlier plan is kept; after approval `resume` builds a new project version (or reuses the current one when the timeline is identical).
+
+### Failed builds
+
+When a FilmCraft build fails midway (a command error, a failed read-back or reopen check) or is cut off (the process was killed), its numbered `filmcraft/<Name>_vNNN.fcproj` is **kept** and marked in `filmcraft/execution_journal.json`
+(`status: failed`; a run found still `running` by the next build is marked `failed` and `abandoned`). `manifest.json` lists them under `filmcraft.failed_versions`, `trip-vlog status` prints them, and the handoff report names them.
+A failed version is never used: `resume`, preview, QC, the critic, revisions and the handoff only work on the newest build that completed and was verified after reopening. The next successful build always takes a **new** version number:
+numbers are reserved by the journal and by the files on disk (the `.fcproj` and its `.timeline_spec.json`), so a failed version is never overwritten or reused, even if the journal is lost. Nothing is deleted: failed projects
+are left for you to inspect or remove by hand. Original media and Resolve projects are never touched.
+
+**Two processes on one workspace.** Each run records the pid, host and start time of the process building it, and the journal is only updated under a short OS file lock (`filmcraft/execution_journal.lock`, a permanent file that is never deleted; the system drops the lock if the process dies; the journal is reloaded before every write), so concurrent processes do not overwrite each other. A run still `running` is marked abandoned only when its process is gone (same host, pid not alive), or when it was started on another host more than 24 hours ago; a build running in a live process is never touched, and a second build is refused at once with a message naming it (run the command again when it has finished). If a build crashed on another host, or under a different host name (containers, DHCP), it cannot be checked for 24 hours; the refusal names the journal and `trip-vlog resume --abandon-running` (also on `draft`) marks such builds abandoned after asking (files are kept). A re-run with the same spec and media is a no-op against the newest completed build even if a later attempt failed.
 
 ### Finish in Resolve (`resolve-finish`, optional, Studio only)
 
@@ -321,7 +386,7 @@ trip-vlog analyze --output C:\vlogs\lisbon --media D:\Trips\Lisbon --limit 3 --s
   (one process per segment, accurate seek, orientation corrected, longest side `llm.image_max_side`). More than `media.vision_max_frames_per_segment` (default 8) frames
   are thinned evenly, keeping the first and last. Frames live in `media_index/analysis/frames/<asset>/` under names derived from the content version and the sampling
   settings; per-segment contact sheets (labelled with segment ID, frame index and timestamp) in `media_index/analysis/sheets/`.
-  `media.fine_sampling_enabled` / `fine_sampling_fps` (denser resampling around the best part) are **not implemented yet** and only produce a warning.
+  `media.fine_sampling_enabled` turns on the optional boundary refinement below (off by default).
 - **What the model receives** (`media.vision_input`): `frames` (default; one image per sampled frame, each announced by a text line with segment ID, frame index and
   source time, better grounding) or `contact_sheet` (one grid image per segment, cheaper). Segments are batched up to `media.vision_batch_max_images` (default 16)
   images and the endpoint's `max_tokens`; a segment's frames are never split across requests. Photos are sent one image each, batched the same way.
@@ -331,6 +396,20 @@ trip-vlog analyze --output C:\vlogs\lisbon --media D:\Trips\Lisbon --limit 3 --s
 - **Validation and fallback**: unknown segment IDs are ignored, out-of-range or reversed `best_frames` reject that item (recorded in `logs/errors.jsonl`), the rest of the
   reply is kept. Missing or rejected items are re-asked once (fresh request, bypassing the response cache); what still fails keeps its deterministic baseline moment with
   `labeled: false` and `label_error`, and is retried by the next `analyze`. A fatal endpoint error (auth, connection, config) stops the stage; finished batches are kept.
+- **Fine sampling refinement** (`media.fine_sampling_enabled: true`, off by default; it costs one extra request per batch of moments): after labeling, each video moment with
+  `interest >= media.fine_sampling_min_score` (default 0.7; at most `fine_sampling_max_per_asset` = 3 per asset and `fine_sampling_max_moments` = 30 per run, best first)
+  is resampled at `media.fine_sampling_fps` (default 4.0, must be >= `vision_sampling_fps`) in a window of `media.fine_sampling_window_seconds` (default 1.0) either side of
+  its start and of its end. The windows are clipped to the moment's own segment and the asset and never overlap, so a refined moment never leaves its segment or reaches into
+  a neighbour. A second request (prompt `boundary_refine.v1` on top of `media_analyst.v1`, schema `schemas/boundary_refine_response.schema.json`, same `llm.vision` profile,
+  so `llm-check` already covers it) shows those frames, each announced with its time, and asks only for the first frame to keep in the start window and the last frame to
+  keep in the end window, as frame indices; `null` keeps the current boundary. The code converts indices to frame-rounded seconds, clamps them to the windows and the
+  asset and keeps the labeled range when a reply is invalid (out-of-range index, moment missing); such a reply is not cached and is asked again by
+  the next run. Indices that would leave a range under 0.5 s count as "no better boundary" (cached, `refinement.reason` says why). Selected moments with no room for the windows are
+  counted under `fine_sampling.skipped` in the summary. The refined range becomes the moment's `source_in/out_seconds` - what selection, planning and validation read, so their cache keys change with it -
+  and the labeled range, the windows, the frame artifacts (`media_index/analysis/fine/`, or `fine_sheets/` with `vision_input: contact_sheet`) and the indices stay in the
+  moment's `refinement` record. Refinements are cached per moment by labeled range, prompt/schema, model, endpoint params and the fine settings; turning the option off restores
+  the labeled ranges and keeps the cached refinements, so turning it back on re-asks nothing (stale rows are pruned only while it is on). `--dry-run` prints the settings but cannot count candidates before labeling. The summary in `manifest.json` has a `fine_sampling` block; moments that
+  could not be refined make the stage `partial`. Moments shorter than 1 s are not refined. Not verified with a real model yet (see DESIGN Phase 7c).
 - **Photos**: near-duplicates are found with a 64-bit dHash (Pillow only; `media.photo_duplicate_distance`, default 6 bits) and share a `duplicate_group` on their moments.
 - **Caching**: a label is cached per segment by asset content version, segment bounds, prompt id/version/text hash, schema hash, model, endpoint `api`/`params`, sampling
   settings (fps, frame cap, image size) and `vision_input`; the gateway's response cache sits underneath. Re-runs send nothing; changing only the target duration or
@@ -577,11 +656,34 @@ Titles are simple, editable text on track V2 (DESIGN §13.4). They live in the p
   (default 3) is the on-screen time of the opening and closing titles, `editorial.max_titles` (default 6) the cap. The baseline planner supports the opening and closing titles too.
 - **Rules**: one line, at most 60 characters (FilmCraft names a text clip after its first line, so a two-line title would fail the read-back), 1 to 10 seconds, inside the sequence, no two titles overlapping,
   none overlapping an overlay clip on V2. A title whose text equals a folder name of its clips is accepted but flagged "from folder name" in the plan's uncertainties. In `edit_plan.json` you may type your own title text (`text_source: "user"`); it is
-  checked for structure, not origin; remember to update `plan_hash`.
+  checked for structure, not origin; run `trip-vlog reseal` after editing.
 - **Position/size**: lower-left, sized from the sequence height (the adapter's defaults); change them in FilmCraft.
 - **Resolve**: no interchange format carries titles, so `handoff_report.md` lists them. `trip-vlog resolve-finish` recreates them from the same timeline spec as editable Text+ titles on V2 at the same frames
   (experimental, Studio only), verified by read-back, and lists any it cannot place. Run `resolve-finish --dry-run` first to see what it would do.
 - **Older plans** (schema 1.0) still load; they simply have no titles.
+
+## Captions (optional)
+
+Captions are **off by default** (DESIGN §13.4). With `captions.enabled: true` (or the older `project.include_subtitles: true`) the handoff step writes `resolve_handoff/timeline.srt` next to `timeline.xml`,
+plus `captions_report.json`, and `handoff_report.md` and the Resolve import notes describe it. Run `trip-vlog transcribe` first (a speech backend, see below): captions come from transcripts only.
+
+```yaml
+captions:
+  enabled: true
+  max_chars_per_line: 42      # lines are broken between words; a word longer than this stays whole
+  max_lines: 2                # more text becomes more cues
+  min_duration_seconds: 1.0   # a shorter cue stays up longer when its clip has room
+```
+
+- **Only the transcript's words.** Nothing is paraphrased, corrected, translated or completed. The options only decide where a segment is split into cues (at word boundaries, by line length and number of lines) and how long a cue stays up.
+  Text without spaces (for example Japanese) is not broken. Words are never invented from filenames, metadata or the model.
+- **Time is mapped through the edit plan**: record time = clip start + (source time - clip `source_in`), and a cue is clipped to the clip's used source range. A segment a clip cuts through keeps only the words whose estimated position lies inside the clip.
+  The transcript has segment timing only, so inside a segment the position of a word, and therefore where a long segment is split, is **estimated from its place in the text**; check the captions against the speech.
+- **Skipped, with a reason in `captions_report.json`**: stills, clips that are muted or `ambient_low` (the speech is not played at full level), tracks that carry no speech (music), **overlay clips** (reason "overlay audio is not in the timeline": overlays are placed without their audio, so nothing is heard; only the primary track and standalone natural-audio clips are captioned), clips not at normal speed (the plan has no speed changes, so this guards against a plan edited to have one), assets without a transcript of their current content, and
+  transcript segments with `timestamps: coarse` (one block for the whole file, no real timing). Text is never dropped: cues that overlap in time are all kept, in start order (SRT allows overlap; the report counts them as `cues_overlapping`).
+- **File format**: UTF-8 **without** a byte order mark, CRLF line endings (the SRT convention), `HH:MM:SS,mmm` timestamps. If you polish `timeline.srt` by hand, the next handoff keeps your version as `timeline.<hash>.bak.srt` before writing a new one; with captions turned off, or no usable text, an earlier file **that this tool wrote** is set aside as `timeline.<hash>.stale.srt` (named by its content, so an older set-aside file is never overwritten; a `timeline.srt` the tool never wrote is left alone; a file locked by another program is left in place with a warning). Nothing is deleted.
+- **Resolve**: importing the SRT is a **manual step** (File > Import > Subtitle..., wording varies by version); trip-vlog does not import it and `resolve-finish` does not touch it. Whether it lines up in Resolve (including against the timeline's start timecode) is **not verified live** yet.
+- A remote speech endpoint is not involved here: captions are made from transcripts already in the catalog, with no network access. Cache key of the handoff stage includes the caption options and the current transcripts.
 
 ## Speech transcription (optional)
 
@@ -731,8 +833,8 @@ with Python 3.11 and 3.13. Only Linux has been exercised locally so far; treat W
 - Titles are one line only; their size and position are fixed defaults; `resolve-finish` titles are still experimental.
 - Resolve import is unverified by this tool (see above). Titles are not carried by any interchange format; audio fades appear as dissolves in OTIO;
   FCPXML drops non-V1 transitions; EDL carries one video track. Only the FilmCraft 0.13.0 / Linux combination has been run; Windows and macOS are unverified until CI has run.
-- Hand-editing `edit_plan.json` requires updating `plan_hash` yourself; there is no helper yet.
-- Interrupted assemblies leave their numbered `.fcproj` in `filmcraft/`; it is not cleaned up automatically.
+- Failed or interrupted assemblies leave their numbered `.fcproj` in `filmcraft/` (marked failed, never used, listed by `status`); it is not deleted automatically.
+- Captions (`captions.enabled`) have not been imported in Resolve yet; word positions inside a transcript segment are estimates (segment timing only).
 - Black-frame detection runs on the preview only and is reported as a warning; subjective judgments (does a cut feel abrupt, is the story clear) need the optional QC critic (`qc.critic`).
 - HEIC/HEIF photos need ffprobe support for those formats (Pillow has no HEIC decoder here); without it they are listed as failed, and no thumbnail is made.
 - Fast fingerprints include mtime, so a plain copy that does not preserve mtime is not detected as a duplicate (use `--fingerprint sha256`).

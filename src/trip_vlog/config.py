@@ -110,6 +110,11 @@ class MediaConfig(_Model):
     vision_sampling_fps: float = Field(1.0, gt=0, le=30)
     fine_sampling_fps: float = Field(4.0, gt=0, le=60)
     fine_sampling_enabled: bool = False
+    # Phase 7c boundary refinement (DESIGN §7.2 step 5); only read while fine_sampling_enabled
+    fine_sampling_min_score: float = Field(0.7, ge=0, le=1)        # a labeled moment is refined when its `interest` is at least this
+    fine_sampling_window_seconds: float = Field(1.0, gt=0, le=10)  # span either side of each boundary that is resampled (clipped to the segment)
+    fine_sampling_max_per_asset: int = Field(3, ge=1, le=50)       # most moments refined per asset (highest interest first)
+    fine_sampling_max_moments: int = Field(30, ge=1, le=1000)      # most moments refined per run
     segment_window_seconds: float = Field(6.0, gt=0, le=120)
     transcribe_speech: bool | None = None  # DEPRECATED alias of speech.enabled; folded into it at load time (see Config._speech_alias)
     local_only: bool = False       # true: every LLM endpoint used for text and vision must be loopback (see `llm.endpoints`)
@@ -494,6 +499,14 @@ class FilmCraftConfig(_Model):
     preview_scale: float = Field(1.0, gt=0, le=1)                  # 1.0 = full sequence size; <1 renders a smaller draft
     handle_policy: Literal["error", "cut"] = "error"               # dissolve without source handles: fail, or downgrade to a recorded cut
     ambient_low_gain_db: float = Field(-12.0, ge=-60, le=0)        # gain of clips whose audio_policy is "ambient_low"
+    # Phase 7b. Both off by default: they change what FilmCraft is asked to build.
+    fit_mixed_aspect: bool = False      # scale clips and stills whose size differs from the sequence to fit the frame (clip.fitToFrame): no crop, bars where the aspect differs
+    duck_music: bool = False            # lower the music under speech / natural sound (Volume keyframes on the music clip); needs plan audio.duck_music_under_speech
+    duck_mode: Literal["speech", "natural_sound"] = "speech"   # speech: transcript segments only; natural_sound: also clips with active natural sound
+    duck_db: float = Field(-12.0, ge=-48, le=-1)               # music level inside a duck window, relative to the music clip's own gain
+    duck_ramp_seconds: float = Field(0.3, ge=0.05, le=3)       # fade down in front of a window and back up behind it
+    duck_merge_gap_seconds: float = Field(1.0, ge=0, le=30)    # windows closer than this are joined
+    readback_interchange: Literal["auto", "off"] = "auto"      # FCP7 XML from the read-back timeline when FilmCraft's own export is missing or lossy (never replaces a good one)
 
     @field_validator("control_host")
     @classmethod
@@ -585,6 +598,16 @@ class OutputsConfig(_Model):
         return "/".join(parts)
 
 
+class CaptionsConfig(_Model):
+    """Optional captions from the speech transcript (DESIGN §13.4): an SRT next to the timeline in the handoff folder. The text is the transcript's own
+    words, never rewritten; these options only decide where a transcript segment is split into cues and how long a cue stays up."""
+
+    enabled: bool = False                 # off by default. project.include_subtitles (the older name) turns it on too
+    max_chars_per_line: int = Field(42, ge=10, le=100)
+    max_lines: int = Field(2, ge=1, le=4)
+    min_duration_seconds: float = Field(1.0, ge=0, le=10)     # a cue shorter than this is shown longer when the clip has room (text unchanged)
+
+
 class Config(_Model):
     project: ProjectConfig = ProjectConfig()
     editorial: EditorialConfig = EditorialConfig()
@@ -595,6 +618,7 @@ class Config(_Model):
     workflow: WorkflowConfig = WorkflowConfig()
     filmcraft: FilmCraftConfig = FilmCraftConfig()
     qc: QcConfig = QcConfig()
+    captions: CaptionsConfig = CaptionsConfig()
     revise: ReviseConfig = ReviseConfig()
     outputs: OutputsConfig = OutputsConfig()
 
@@ -628,6 +652,15 @@ class Config(_Model):
             self.speech.__dict__["enabled"] = alias
             self.speech.__dict__["__pydantic_fields_set__"] = self.speech.model_fields_set | {"enabled"}
             self.media.__dict__["transcribe_speech"] = None
+        return self
+
+    @model_validator(mode="after")
+    def _captions_alias(self) -> "Config":
+        """`project.include_subtitles` (the name in DESIGN §4.1) turns captions on; `captions.enabled: false` next to it is a contradiction."""
+        if self.project.include_subtitles and not self.captions.enabled:
+            if "enabled" in self.captions.model_fields_set:
+                raise ValueError("project.include_subtitles is true but captions.enabled is false: remove one of them (captions.enabled is the setting to use)")
+            self.captions.__dict__["enabled"] = True
         return self
 
     @model_validator(mode="after")

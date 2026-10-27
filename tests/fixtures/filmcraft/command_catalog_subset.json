@@ -112,5 +112,23 @@
   "label": "Import\u2026",
   "enabled": true,
   "params": "{\"paths\":[str],\"bin\":binId?,\"imageSequence\":bool?,\"replace\":bool?}"
+ },
+ {
+  "id": "clip.fitToFrame",
+  "label": "Fit to frame",
+  "enabled": true,
+  "params": "{\"clips\":[id]?}"
+ },
+ {
+  "id": "effects.setParam",
+  "label": "Set Effect Parameter",
+  "enabled": true,
+  "params": "{\"clip\":id,\"effect\":\"motion\"|index,\"param\":str,\"mask\":n?,\"value\":num,\"time\":ticks?,\"keyframe\":bool?,\"merge\":bool|key?,\"begin\":bool?}"
+ },
+ {
+  "id": "mixer.setStrip",
+  "label": "Track Mixer Settings",
+  "enabled": true,
+  "params": "{\"strip\":\"A1\"|\"S1\"|\"Mix\"|id,\"name\":str?,\"volumeDb\":f64?,\"pan\":f64?,\"muted\":bool?,\"solo\":bool?}"
  }
 ]

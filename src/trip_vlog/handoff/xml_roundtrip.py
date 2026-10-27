@@ -15,11 +15,12 @@ from dataclasses import dataclass, field
 from fractions import Fraction
 from typing import Any
 
-from trip_vlog.filmcraft.timeline_spec import TimelineSpec
+from trip_vlog.filmcraft.timeline_spec import TimelineSpec, fit_scale_percent
 from trip_vlog.handoff.fcp7_xml import Fcp7Timeline, XmlClip
 from trip_vlog.resolve.paths import paths_equal
 
 GAIN_TOLERANCE_DB = 0.25
+SCALE_TOLERANCE = 0.5
 
 
 def centred_transition_span(cut_frame: int, frames: int) -> tuple[int, int]:
@@ -36,6 +37,8 @@ def transition_cut_frame(start: int, end: int) -> int:
 # feature ids used by the compatibility report
 F_SETTINGS, F_CUTS, F_DISSOLVES, F_STILLS, F_OVERLAYS, F_TITLES = "timeline_settings", "cuts", "dissolves", "stills", "overlays_v2", "titles"
 F_MARKERS, F_GAIN, F_MUTE, F_MUSIC, F_AUDIO, F_SPEED = "markers", "audio_gain", "audio_mute", "music_track", "audio_clips", "speed_changes"
+F_FRAMING, F_DUCKING = "framing_fit", "music_ducking"
+KEYFRAME_TOLERANCE_FRAMES = 1      # a keyframe time is a source frame rounded to the sequence rate; one frame either way is the same keyframe
 
 
 @dataclass(frozen=True)
@@ -53,6 +56,8 @@ class ExpectedClip:
     gain_db: float | None = None    # constant gain (audio items)
     source_in_exact: Fraction | None = None    # the same, unrounded: an exact half frame accepts either rounding
     source_out_exact: Fraction | None = None
+    scale: float | None = None      # expected Basic Motion scale (percent) of a video item scaled to fit the frame
+    gain_keys: tuple[tuple[int, float], ...] = ()   # expected Audio Levels keyframes: (source frame at the sequence rate, total dB)
 
     @property
     def is_title(self) -> bool:
@@ -90,6 +95,10 @@ class ExpectedTimeline:
     muted_video_paths: set[tuple[str, int]] = field(default_factory=set)   # (path, start) of video clips placed without their audio
 
 
+def _fit(spec: TimelineSpec, p: Any) -> float | None:
+    return None if p.fit_source_size is None else fit_scale_percent(spec.width, spec.height, *p.fit_source_size)
+
+
 def _track_no(track: str) -> int:
     return int(track[1:])
 
@@ -106,14 +115,17 @@ def expected_from_spec(spec: TimelineSpec) -> ExpectedTimeline:
         if p.media_kind == "video":
             feat = F_CUTS if p.track == "V1" else F_OVERLAYS
             exp.clips.append(ExpectedClip(p.clip_instance_id, feat, "video", vtrack, p.timeline_start_frame, p.end_frame, sin, sout, p.source_path,
-                                          source_in_exact=xin, source_out_exact=xout))
+                                          source_in_exact=xin, source_out_exact=xout, scale=_fit(spec, p)))
         elif p.media_kind == "image":
             feat = F_STILLS if p.track == "V1" else F_OVERLAYS
-            exp.clips.append(ExpectedClip(p.clip_instance_id, feat, "video", vtrack, p.timeline_start_frame, p.end_frame, None, None, p.source_path))
+            exp.clips.append(ExpectedClip(p.clip_instance_id, feat, "video", vtrack, p.timeline_start_frame, p.end_frame, None, None, p.source_path,
+                                          scale=_fit(spec, p)))
         else:
             feat = F_MUSIC if p.track == "A2" else F_AUDIO
             exp.clips.append(ExpectedClip(p.clip_instance_id, feat, "audio", vtrack, p.timeline_start_frame, p.end_frame, sin, sout,
-                                          p.source_path, gain_db=p.audio_gain_db or 0.0, source_in_exact=xin, source_out_exact=xout))
+                                          p.source_path, gain_db=p.audio_gain_db or 0.0, source_in_exact=xin, source_out_exact=xout,
+                                          gain_keys=tuple((int(round(Fraction(p.source_in_seconds).limit_denominator(10 ** 9) * fps)) + k.frame - p.timeline_start_frame,
+                                                           (p.audio_gain_db or 0.0) + k.db) for k in p.gain_keys)))
         if p.media_kind == "video":
             if p.include_linked_audio and p.audio_track:
                 exp.clips.append(ExpectedClip(p.clip_instance_id, F_CUTS if p.track == "V1" else F_OVERLAYS, "audio", _track_no(p.audio_track),
@@ -187,8 +199,9 @@ def _identity_ok(e: ExpectedClip, x: XmlClip, fold_case: bool | None) -> bool:
     return (not x.is_generator) and x.path is not None and e.path is not None and paths_equal(e.path, x.path, fold_case=fold_case)
 
 
-def compare_timeline_xml(xml: Fcp7Timeline, exp: ExpectedTimeline, *, tolerance_frames: int = 0, fold_case: bool | None = None) -> RoundTrip:
-    """Compare every clip, title, transition and marker of ``exp`` with ``xml``. ``tolerance_frames`` (default 0: exact) applies to every frame comparison: sequence duration, record and source frames, transition start/end, markers."""
+def compare_timeline_xml(xml: Fcp7Timeline, exp: ExpectedTimeline, *, tolerance_frames: int = 0, fold_case: bool | None = None,
+                         keyframes_carried: bool = True) -> RoundTrip:
+    """Compare every clip, title, transition and marker of ``exp`` with ``xml``. ``keyframes_carried=False`` (an XML generated from the FilmCraft read-back, which cannot read keyframe values) leaves the Audio Levels keyframes out of the comparison. ``tolerance_frames`` (default 0: exact) applies to every frame comparison: sequence duration, record and source frames, transition start/end, markers."""
     rt = RoundTrip(tolerance_frames=tolerance_frames)
     tol = tolerance_frames
     add = lambda *a, **k: rt.mismatches.append(Mismatch(*a, **k))
@@ -215,6 +228,10 @@ def compare_timeline_xml(xml: Fcp7Timeline, exp: ExpectedTimeline, *, tolerance_
         bump(rt.expected, e.feature)
         if e.kind == "audio" and e.gain_db and abs(e.gain_db) > 1e-9:
             bump(rt.expected, F_GAIN)
+        if e.scale is not None:
+            bump(rt.expected, F_FRAMING)
+        if e.gain_keys and keyframes_carried:
+            bump(rt.expected, F_DUCKING)
     used: set[int] = set()
     for (kind, trk), items in sorted(groups.items()):
         xs = xml.track_clips(kind, trk)
@@ -249,6 +266,22 @@ def compare_timeline_xml(xml: Fcp7Timeline, exp: ExpectedTimeline, *, tolerance_
                     problems += 1
                     add(F_GAIN, label, "gain", e.gain_db, _round(actual_gain),
                         f"gain {actual_gain:.2f} dB, expected {e.gain_db:.2f} dB")
+            if e.scale is not None:
+                if x.scale is None or abs(x.scale - e.scale) > SCALE_TOLERANCE:
+                    problems += 1
+                    add(F_FRAMING, label, "scale", round(e.scale, 2), x.scale, f"scale {x.scale}, expected {round(e.scale, 2)} (fit to frame)")
+                else:
+                    bump(rt.matched, F_FRAMING)
+            if e.gain_keys and keyframes_carried:
+                got = list(x.gain_keys)
+                ok = len(got) == len(e.gain_keys) and all(
+                    abs(gw - ew) <= max(tol, KEYFRAME_TOLERANCE_FRAMES) and abs(gd - ed) <= GAIN_TOLERANCE_DB for (gw, gd), (ew, ed) in zip(got, e.gain_keys))
+                if not ok:
+                    problems += 1
+                    add(F_DUCKING, label, "keyframes", [[w, round(d, 2)] for w, d in e.gain_keys], [[w, round(d, 2)] for w, d in got],
+                        f"{len(got)} volume keyframe(s) in the XML, expected {len(e.gain_keys)} (ducking envelope)")
+                else:
+                    bump(rt.matched, F_DUCKING)
             if not problems:
                 bump(rt.matched, e.feature)
                 if e.kind == "audio" and e.gain_db and abs(e.gain_db) > 1e-9:

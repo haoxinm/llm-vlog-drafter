@@ -21,12 +21,13 @@ from pydantic import ValidationError
 from trip_vlog import __version__
 from trip_vlog.config import Config
 from trip_vlog.filmcraft.adapter import FilmCraftAdapter
-from trip_vlog.filmcraft.execution import latest_complete_project, load_journal, sha256_file
+from trip_vlog.filmcraft.execution import failed_builds, latest_complete_project, load_journal, sha256_file
 from trip_vlog.filmcraft.mappings import MediaMap
-from trip_vlog.filmcraft.plan_mapping import MappingError, MappingResult, MappingSettings, edit_plan_to_spec
+from trip_vlog.filmcraft.plan_mapping import MappingError, MappingResult, MappingSettings, MappingWarning, edit_plan_to_spec
 from trip_vlog.filmcraft.timeline_spec import TimelineSpec, downgrade_dissolves
 from trip_vlog.handoff.compatibility import (REPORT_JSON as COMPAT_JSON, REPORT_MD as COMPAT_MD, CompatInputs, build_compatibility_report,
                                              load_finish_report, render_compatibility_markdown, summary_of)
+from trip_vlog.handoff.captions import REPORT_NAME as CAPTIONS_REPORT, SRT_NAME, CaptionSettings, build_captions, write_srt
 from trip_vlog.handoff.interchange import export_handoff
 from trip_vlog.handoff.media_manifest import manifest_rows, missing_used_media, write_media_manifest
 from trip_vlog.handoff.report import HandoffReportInputs, read_resolve_verification, render_handoff_report
@@ -36,7 +37,8 @@ from trip_vlog.planning.catalog_view import PlanningCatalog
 from trip_vlog.planning.models import EditPlan, edit_plan_hash, to_json_dict
 from trip_vlog.planning.pipeline import PlanPaths, plan_baseline_stage, plan_inputs, plan_paths
 from trip_vlog.planning.validate import ValidationReport, ValidationSettings, validate_edit_plan
-from trip_vlog.qc.checks import TranscriptSpan
+from trip_vlog.qc.checks import TranscriptSpan, clip_audio_features
+from trip_vlog.qc.ducking import DuckPlan, DuckSettings, build_duck_plan
 from trip_vlog.qc.report import QcInputs, run_qc
 from trip_vlog.state import StageResult, StageRunner, atomic_write_json, atomic_write_text, stable_hash
 
@@ -64,6 +66,7 @@ class Prepared:
     mapping: MappingResult
     validation: ValidationReport
     plan_hash: str
+    duck: DuckPlan | None = None
 
     @property
     def spec(self) -> TimelineSpec:
@@ -183,14 +186,40 @@ def _prepare(ctx: Any) -> Prepared:
     plan, report = validate_plan_file(ctx)
     view = PlanningCatalog.from_catalog(ctx.catalog)
     cfg = ctx.config
+    fc = cfg.filmcraft
+    fit, duck_cfg = fc.fit_mixed_aspect, DuckSettings.from_config(cfg)
+    gate: list[MappingWarning] = []
+    if fit or duck_cfg.enabled:
+        # a feature this FilmCraft cannot do is reported and left out (the current behaviour), not attempted
+        caps = _discovered_capabilities(ctx)
+        if caps is not None and fit and not caps.has("fit_to_frame"):
+            fit = False
+            gate.append(MappingWarning("fit_unsupported", None, "filmcraft.fit_mixed_aspect is on, but this FilmCraft has no clip.fitToFrame: clips keep their "
+                                       "native size in the frame (portrait clips are cropped); scale them in Resolve or update FilmCraft"))
+        if caps is not None and duck_cfg.enabled and not caps.has("clip_keyframe"):
+            duck_cfg = DuckSettings(False)
+            gate.append(MappingWarning("ducking_unsupported", None, "filmcraft.duck_music is on, but this FilmCraft cannot set Volume keyframes "
+                                       "(effects.setParam): the music is not ducked; lower it by hand in Resolve under speech"))
+    duck = build_duck_plan(plan, clip_audio_features(plan, view), _qc_transcripts(ctx), duck_cfg)
     try:
         mapping = edit_plan_to_spec(plan, view, ctx.paths.media_root,
-                                    MappingSettings(sequence_name=cfg.filmcraft.sequence_name, ambient_gain_db=cfg.filmcraft.ambient_low_gain_db))
+                                    MappingSettings(sequence_name=fc.sequence_name, ambient_gain_db=fc.ambient_low_gain_db,
+                                                    fit_mixed_aspect=fit, duck_keys=duck.keys or None))
     except MappingError as e:
         raise PlanRejected(f"edit plan cannot be mapped to a FilmCraft timeline: {e}", report) from None
-    prep = Prepared(plan, mapping, report, key)
+    mapping.warnings.extend(gate)
+    prep = Prepared(plan, mapping, report, key, duck)
     ctx.data["prepared"] = (key, prep)
     return prep
+
+
+def _discovered_capabilities(ctx: Any) -> Any:
+    """The adapter's capability map (starts a throw-away FilmCraft session once per run), or None when FilmCraft cannot be asked: the build
+    then reports the real problem."""
+    try:
+        return get_adapter(ctx).discover_capabilities()
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def get_adapter(ctx: Any) -> FilmCraftAdapter:
@@ -209,6 +238,8 @@ def get_adapter(ctx: Any) -> FilmCraftAdapter:
 
 
 def latest_run(ctx: Any) -> dict[str, Any] | None:
+    """The newest build that COMPLETED (journal status ``complete``, project file present). A failed or interrupted build is never returned, so
+    `resume`, preview, QC, the critic, revisions and the handoff only ever work on a project that was verified after reopening."""
     jp = ctx.workspace.root / "filmcraft" / "execution_journal.json"
     if not jp.is_file():
         return None
@@ -218,6 +249,23 @@ def latest_run(ctx: Any) -> dict[str, Any] | None:
         return None
     r = sorted(runs, key=lambda r: r["version"])[-1]
     return r if (ctx.workspace.root / r["project_path"]).is_file() else None
+
+
+def failed_versions(ctx: Any) -> list[dict[str, Any]]:
+    """Builds of this project that failed or were interrupted (from the journal). Their `_vNNN.fcproj` files are kept for inspection and are not used."""
+    jp = ctx.workspace.root / "filmcraft" / "execution_journal.json"
+    return failed_builds(load_journal(jp), ctx.config.filmcraft.project_name) if jp.is_file() else []
+
+
+def record_failed_builds(ctx: Any) -> list[dict[str, Any]]:
+    """Copy the journal's failed builds into the manifest (`filmcraft.failed_versions`), which `status` shows. Merges into the existing `filmcraft` record."""
+    failed = failed_versions(ctx)
+    fc = dict(ctx.manifest.get("filmcraft") or {})
+    if failed or "failed_versions" in fc:
+        fc["failed_versions"] = failed
+        ctx.manifest.set(filmcraft=fc)
+        ctx.manifest.save()
+    return failed
 
 
 def _project_sha(ctx: Any) -> str | None:
@@ -307,11 +355,35 @@ def _forget_revision_rules(ctx: Any) -> None:
     ctx.config.set_revision_overrides(None)
 
 
+def _installed_filmcraft_version(ctx: Any) -> str | None:
+    """The version of the FilmCraft CLI that would build now (``--version``, asked once per run), so an in-place upgrade changes the assemble key.
+    Falls back to the version the last build recorded when the CLI cannot be found or asked."""
+    if "filmcraft_installed_version" not in ctx.data:
+        from trip_vlog.filmcraft import discovery
+
+        try:
+            found = discovery.find_filmcraft_cli(ctx.config.filmcraft.executable)
+            ctx.data["filmcraft_installed_version"] = discovery.read_version(found.path)[0]
+        except Exception:  # noqa: BLE001 - only a cache key: the build itself reports a missing CLI
+            ctx.data["filmcraft_installed_version"] = (ctx.manifest.get("filmcraft") or {}).get("version")
+    return ctx.data["filmcraft_installed_version"]
+
+
 def _assemble_inputs(ctx: Any) -> Any:
     c = ctx.config.filmcraft
-    return {"plan": plan_file_hash(_pp(ctx).edit_plan),
-            "fc": [c.project_name, c.sequence_name, c.handle_policy, c.ambient_low_gain_db, c.executable],
-            "assets": [(a["asset_id"], a["content_version"]) for a in ctx.catalog.list_assets()]}
+    d: dict[str, Any] = {"plan": plan_file_hash(_pp(ctx).edit_plan),
+                         "fc": [c.project_name, c.sequence_name, c.handle_policy, c.ambient_low_gain_db, c.executable],
+                         "assets": [(a["asset_id"], a["content_version"]) for a in ctx.catalog.list_assets()]}
+    # keys only appear when the feature is on, so a workspace that does not use it keeps its cache
+    if c.fit_mixed_aspect:
+        d["fit"] = True
+    if c.fit_mixed_aspect or c.duck_music:
+        # what FilmCraft does with clip.fitToFrame and Volume keyframes depends on its build
+        d["filmcraft_version"] = _installed_filmcraft_version(ctx)
+    if c.duck_music:
+        d["duck"] = [c.duck_mode, c.duck_db, c.duck_ramp_seconds, c.duck_merge_gap_seconds, ctx.config.qc.audio_active_ratio_min,
+                     stable_hash({a: [(t.start, t.end, t.text, t.coarse) for t in ts] for a, ts in sorted(_qc_transcripts(ctx).items())})]
+    return d
 
 
 def _assemble_verify(ctx: Any) -> bool:
@@ -333,7 +405,9 @@ def assemble_stage(ctx: Any) -> StageResult:
     try:
         build = ad.build_project(prep.spec, cfg.filmcraft.project_name)
     except Exception as e:  # noqa: BLE001 - FilmCraft, path policy, spec and verification errors all stop assembly
-        return StageResult(Status.FAILED, {"mapping_warnings": len(prep.mapping.warnings)}, f"{type(e).__name__}: {e}")
+        failed = record_failed_builds(ctx)    # the partial project stays on disk, marked failed in the journal and manifest, and is not used
+        return StageResult(Status.FAILED, {"mapping_warnings": len(prep.mapping.warnings), **({"failed_version": failed[-1]["version"], "failed_project": failed[-1]["project"]} if failed else {})},
+                           f"{type(e).__name__}: {e}")
     run = build.run
     ctx.manifest.set(filmcraft={
         "version": run.get("filmcraft_version"), "capability_snapshot": "filmcraft/capability_snapshot.json",
@@ -341,6 +415,7 @@ def assemble_stage(ctx: Any) -> StageResult:
         "project": run["project_path"], "project_version": build.version, "spec_hash": build.spec_hash,
         "journal": "filmcraft/execution_journal.json"})
     ctx.manifest.save()
+    record_failed_builds(ctx)
     n_clips = sum(len(s.clips) for s in prep.plan.scenes)
     summary = {"project": run["project_path"], "version": build.version, "noop": build.noop, "clips": n_clips,
                "placements": len(prep.spec.placements), "verified_after_reopen": bool(run.get("verified_after_reopen")),
@@ -426,6 +501,8 @@ def _qc_inputs(ctx: Any) -> Any:
             "qc": ctx.config.qc.model_dump(), "tol": [ctx.config.project.duration_tolerance_pct, ctx.config.project.duration_tolerance_seconds],
             **({"target": ctx.config.effective_target_seconds} if ctx.config.revision_overrides.get("target_duration_seconds") else {}),
             "ambient_db": ctx.config.filmcraft.ambient_low_gain_db, "ffmpeg": ctx.ffmpeg is not None,
+            **({"framing": True, "preview_scale": ctx.config.filmcraft.preview_scale} if ctx.config.filmcraft.fit_mixed_aspect else {}),
+            **({"duck": _assemble_inputs(ctx).get("duck")} if ctx.config.filmcraft.duck_music else {}),
             "evidence": stable_hash({"audio": sorted(audio, key=lambda x: x[0]),
                                      "transcripts": {a: [(t.start, t.end, t.text, t.coarse) for t in ts] for a, ts in _qc_transcripts(ctx).items()}}),
             "outline": _qc_outline_scene_ids(ctx)}
@@ -440,6 +517,28 @@ def _qc_verify(ctx: Any) -> bool:
     except (OSError, ValueError):
         return False
     return not idx or _qc_index_path(ctx).is_file()
+
+
+def _render_music_bed(ctx: Any, ad: FilmCraftAdapter, prep: Prepared, proj_path: Path, reopen_error: str | None) -> tuple[Path | None, str | None, dict[str, str]]:
+    """The music tracks alone, rendered by FilmCraft from the saved project in a throw-away session, to measure the ducking. The project
+    file is checked to be byte-identical afterwards."""
+    if not ctx.config.filmcraft.duck_music or prep.duck is None or not prep.duck.keys:
+        return None, None, {}
+    music = [p for p in prep.spec.placements if p.clip_instance_id in prep.duck.keys]
+    sources = {p.clip_instance_id: p.source_path for p in music}
+    if ctx.ffmpeg is None:
+        return None, "ffmpeg not found", sources
+    if reopen_error:
+        return None, f"the project could not be reopened ({reopen_error})", sources
+    bed = ctx.workspace.root / "preview" / "music_bed.wav"
+    before = sha256_file(proj_path)
+    try:
+        ad.render_music_bed(bed, sorted({p.track for p in music}), project_path=proj_path)
+    except Exception as e:  # noqa: BLE001
+        return None, f"{type(e).__name__}: {e}", sources
+    if sha256_file(proj_path) != before:
+        return None, "the project file changed while the music bed was rendered (this must not happen); the measurement was discarded", sources
+    return bed, None, sources
 
 
 def qc_stage(ctx: Any) -> StageResult:
@@ -464,13 +563,19 @@ def qc_stage(ctx: Any) -> StageResult:
     except Exception as e:  # noqa: BLE001
         err = f"{type(e).__name__}: {e}"
         seq = None
-    report_path, sheet = _qc_paths(ctx)
-    doc = run_qc(QcInputs(
-        plan=prep.plan, catalog=PlanningCatalog.from_catalog(ctx.catalog), source_paths=prep.spec.asset_paths, sequence=seq,
-        project=project, reopen_error=err, mismatches=mism, preview=_preview_path(ctx), report_path=report_path, contact_sheet=sheet,
-        ffmpeg=ctx.ffmpeg, ffprobe=str(ctx.ffprobe) if ctx.ffprobe else None, config=ctx.config,
-        transcripts=_qc_transcripts(ctx), outline_scene_ids=_qc_outline_scene_ids(ctx), index_path=_qc_index_path(ctx),
-        workspace_root=ctx.workspace.root))
+    bed, bed_error, sources = _render_music_bed(ctx, ad, prep, proj_path, err)
+    try:
+        report_path, sheet = _qc_paths(ctx)
+        doc = run_qc(QcInputs(
+            plan=prep.plan, catalog=PlanningCatalog.from_catalog(ctx.catalog), source_paths=prep.spec.asset_paths, sequence=seq,
+            project=project, reopen_error=err, mismatches=mism, preview=_preview_path(ctx), report_path=report_path, contact_sheet=sheet,
+            ffmpeg=ctx.ffmpeg, ffprobe=str(ctx.ffprobe) if ctx.ffprobe else None, config=ctx.config,
+            transcripts=_qc_transcripts(ctx), outline_scene_ids=_qc_outline_scene_ids(ctx), index_path=_qc_index_path(ctx),
+            workspace_root=ctx.workspace.root, spec=eff if seq is not None else prep.spec, duck=prep.duck, music_bed=bed, music_bed_error=bed_error,
+            music_sources=sources))
+    finally:
+        if bed is not None:
+            bed.unlink(missing_ok=True)       # a temporary measuring file of ours (the whole sequence's music as WAV); nothing of the user's, also after a failure
     cs = doc["contact_sheet"]
     summary = {"status": doc["status"], **doc["counts"], "report": _rel(ctx, report_path),
                "contact_sheet": _rel(ctx, sheet) if cs["path"] else None, "preview_sheets": len(cs.get("sheets") or []),
@@ -501,14 +606,91 @@ def _qc_paths_critic(ctx: Any) -> Path:
     return Path(ctx.paths.outputs["qc_dir"]) / "critic_report.md"
 
 
+def _captions_inputs(ctx: Any) -> Any:
+    """Captions come from the plan and the current transcripts; the options shape them. Off: None (a file left from an earlier run is set aside)."""
+    if not ctx.config.captions.enabled:
+        return {"off": True}
+    return {"options": ctx.config.captions.model_dump(),
+            "transcripts": stable_hash({a: [(t.start, t.end, t.text, t.coarse) for t in ts] for a, ts in sorted(_qc_transcripts(ctx).items())})}
+
+
+def _write_captions(ctx: Any, prep: Prepared, out: Path, notes: list[str]) -> dict[str, Any] | None:
+    """The optional SRT of the handoff (config `captions.enabled`). Returns what the handoff report says about it."""
+    srt = out / SRT_NAME
+    prev = (ctx.manifest.get("captions") or {}).get("sha256")
+    if not ctx.config.captions.enabled:
+        if srt.is_file():       # captions were turned off since
+            if prev:            # the file is the one this tool wrote: it does not belong to this handoff any more
+                w = write_srt(srt, [], prev)
+                notes.extend(w["warnings"])
+                if w["stale"]:
+                    notes.append(f"captions are off (captions.enabled): the earlier {SRT_NAME} was set aside as {w['stale']}")
+            else:
+                notes.append(f"captions are off (captions.enabled): {SRT_NAME} in the handoff folder was not written by this tool and was left alone")
+        if prev:
+            ctx.manifest.set(captions=None)
+            ctx.manifest.save()
+        return None
+    res = build_captions(prep.plan, _qc_transcripts(ctx), CaptionSettings.from_config(ctx.config))
+    w = write_srt(srt, res.cues, prev)
+    info = {**res.to_dict(), "file": SRT_NAME if res.cues else None, "sha256": w["sha256"], "backup_of_edited_file": w["backup"],
+            "encoding": "UTF-8 without BOM, CRLF line endings", "generated_at": utc_now_iso()}
+    atomic_write_json(out / CAPTIONS_REPORT, info)
+    ctx.manifest.set(captions={"sha256": w["sha256"], "file": info["file"], "cues": len(res.cues)})
+    ctx.manifest.save()
+    notes.extend(w["warnings"])
+    if w["backup"]:
+        notes.append(f"{SRT_NAME} had been edited since it was written; that version was kept as {w['backup']}")
+    if not res.cues:
+        notes.append("captions are on but no clip has usable transcript text (see captions_report.json); no SRT was written. Transcribe first with `trip-vlog transcribe`")
+    return info
+
+
 def _handoff_inputs(ctx: Any) -> Any:
     out = _handoff_dir(ctx)
     return {"project": _project_sha(ctx), **({"critic_report": c} if (c := _file_sha(_qc_paths_critic(ctx))) else {}), "plan": plan_file_hash(_pp(ctx).edit_plan),
-            "formats": list(ctx.config.filmcraft.interchange_formats), "qc": _file_sha(_qc_paths(ctx)[0]),
+            "formats": list(ctx.config.filmcraft.interchange_formats),
+            **({"readback": "off"} if ctx.config.filmcraft.readback_interchange == "off" else {}), "qc": _file_sha(_qc_paths(ctx)[0]),
             "resolve_verification": _file_sha(out / "resolve_verification.json"),
             "resolve_finish_report": _file_sha(out / COMPAT_FINISH),
             "filmcraft_version": (ctx.manifest.get("filmcraft") or {}).get("version"),
+            "failed_builds": [f["version"] for f in failed_versions(ctx)], "captions": _captions_inputs(ctx),
             "assets": [(a["asset_id"], a["content_version"]) for a in ctx.catalog.list_assets()]}
+
+
+def _readback_summary(rb: dict[str, Any]) -> dict[str, Any]:
+    return {k: rb.get(k) for k in ("status", "reason", "file", "sha256", "kept_native", "not_carried")}
+
+
+def _readback_fallback(ctx: Any, export: Any, eff: TimelineSpec, out: Path, proj: Path, notes: list[str]) -> dict[str, Any]:
+    """DESIGN §15.3: FCP7 XML from the timeline read back from FilmCraft when its own export is missing or lossy. Never replaces a good export."""
+    from trip_vlog.filmcraft.interchange import FORMATS, FormatReport, HandoffReport, GLOBAL_LIMITS, titles_not_carried
+    from trip_vlog.handoff import readback as RB
+
+    cfg = ctx.config.filmcraft
+    fmt = next((f for f in (export.report.formats if export.report else []) if f.format == "fcp7_xml"), None)
+    listed = export.error if export.report is None else (None if fmt is None or fmt.exported else (fmt.error or "FilmCraft did not export the FCP7 XML"))
+    rb = RB.run_fallback(get_adapter(ctx), eff, list(export.requested), out, proj, mode=cfg.readback_interchange, listed_error=listed)
+    if rb["status"] == "generated":
+        info = FORMATS["fcp7_xml"]
+        if export.report is None:
+            export.report = HandoffReport(out_dir=str(out), titles_not_carried=titles_not_carried(eff), limitations=list(GLOBAL_LIMITS))
+        if fmt is None:
+            fmt = FormatReport(format="fcp7_xml", fc_format=info.fc_format, path=str(out / RB.XML_NAME), role=info.role)
+            export.report.formats.insert(0, fmt)
+        fmt.path, fmt.exported, fmt.ok, fmt.error = str(out / RB.XML_NAME), True, True, None
+        fmt.bytes = (out / RB.XML_NAME).stat().st_size
+        fmt.loses = list(RB.LOSES)
+        fmt.postprocess.append("generated from FilmCraft read-back (FilmCraft's own export was " + rb["native"]["state"] + ")")
+        fmt.checks = []
+        notes.append(f"{RB.XML_NAME} was GENERATED FROM THE FILMCRAFT READ-BACK because FilmCraft's own FCP7 XML export was {rb['native']['state']}; "
+                     "see the read-back section of this report and readback_interchange.json")
+    elif rb["status"] == "failed":
+        notes.append("the read-back interchange fallback was needed but failed: " + rb["reason"])
+    elif rb["status"] == "native_lossy_kept":
+        notes.append("FilmCraft's own FCP7 XML differs from the timeline in ducking keyframes or markers only; it was kept (a file from the read-back "
+                     "would drop the ducking and title styling): see the read-back section of this report")
+    return rb
 
 
 def handoff_stage(ctx: Any) -> StageResult:
@@ -540,11 +722,21 @@ def handoff_stage(ctx: Any) -> StageResult:
         from trip_vlog.revise_stages import handoff_notes
 
         notes += handoff_notes(ctx, prep.plan.plan_hash, run["version"])
+    rs = [r for r in (ctx.manifest.get("reseal") or []) if isinstance(r, dict) and r.get("what") == "plan" and r.get("hash") == prep.plan.plan_hash]
+    if rs:
+        notes.append(f"this plan was edited by hand and re-sealed with `trip-vlog reseal` on {rs[-1].get('at')} (previous content hash {str(rs[-1].get('previous_hash'))[:12]}"
+                     + (f", backup {rs[-1]['backup']}" if rs[-1].get("backup") else "") + ")")
+    failed = failed_versions(ctx)
+    if failed:
+        notes.append("failed FilmCraft build(s) " + ", ".join(f"v{f['version']} ({f['status']})" for f in failed) + " are listed in filmcraft/execution_journal.json; their "
+                     "partial _vNNN.fcproj files are kept for inspection, are not part of this handoff, and can be deleted by you when no longer wanted")
     if _qc_paths_critic(ctx).is_file():
         notes.append(f"critic report: {_rel(ctx, _qc_paths_critic(ctx))}")
     export = export_handoff(get_adapter(ctx), eff, cfg.filmcraft.interchange_formats, out, proj)
     if export.error:
         notes.append(f"interchange export failed: {export.error}")
+    readback = _readback_fallback(ctx, export, eff, out, proj, notes)
+    captions = _write_captions(ctx, prep, out, notes)
     rows = manifest_rows(ctx.catalog.list_assets(), ctx.paths.media_root, prep.mapping.used_asset_ids)
     write_media_manifest(out / "media_manifest.csv", rows)
     atomic_write_json(out / "edit_plan.json", to_json_dict(prep.plan))
@@ -562,6 +754,7 @@ def handoff_stage(ctx: Any) -> StageResult:
     preview = _preview_path(ctx)
     missing = missing_used_media(rows)
     xml_fmt = next((f for f in (export.report.formats if export.report else []) if f.format == "fcp7_xml" and f.exported), None)
+    xml_from_readback = readback.get("status") == "generated"
     finish_doc, finish_note = load_finish_report(out / COMPAT_FINISH)
     if finish_note:
         notes.append(finish_note)
@@ -569,7 +762,8 @@ def handoff_stage(ctx: Any) -> StageResult:
         plan=prep.plan, spec=eff, catalog=PlanningCatalog.from_catalog(ctx.catalog), capabilities=_capabilities(ctx),
         xml_path=Path(xml_fmt.path) if xml_fmt else None, filmcraft_version=run.get("filmcraft_version"),
         verified_after_reopen=run.get("verified_after_reopen"), mapping_warnings=[w.to_dict() for w in prep.mapping.warnings],
-        finish_report=finish_doc, tool_version=__version__))
+        finish_report=finish_doc, tool_version=__version__, xml_origin="readback" if xml_from_readback else "native",
+        readback=_readback_summary(readback) if readback.get("status") in ("generated", "failed", "native_lossy_kept") else None))
     atomic_write_json(out / COMPAT_JSON, compat)
     atomic_write_text(out / COMPAT_MD, render_compatibility_markdown(compat))
     compat_summary = summary_of(compat)
@@ -579,14 +773,16 @@ def handoff_stage(ctx: Any) -> StageResult:
         out_dir=out, export=export, project_ref=ref, preview_path=str(preview) if preview.is_file() else None,
         plan_hash=prep.plan.plan_hash, qc_status=qc_status, media_rows=rows, missing_media=missing,
         mapping_warnings=[w.to_dict() for w in prep.mapping.warnings],
-        verification=read_resolve_verification(out / "resolve_verification.json"), stage_notes=notes, compatibility=compat_summary))
+        verification=read_resolve_verification(out / "resolve_verification.json"), stage_notes=notes, compatibility=compat_summary, captions=captions,
+        readback=readback if readback.get("status") in ("generated", "failed", "native_lossy_kept") else None))
     atomic_write_text(out / "handoff_report.md", text)
     atomic_write_json(out / "handoff_summary.json", {**export.to_dict(), "missing_media": missing, "generated_at": utc_now_iso(),
                                                       "compatibility": compat_summary})
     ok = export.report is not None and export.report.ok and not missing and compat_summary["xml_roundtrip_ok"] is not False
     summary = {"formats": export.exported_files and [Path(f).name for f in export.exported_files], "files": sorted(p.name for p in out.iterdir()),
                "missing_media": len(missing), "export_error": export.error, "otio_reload": (export.otio_reload or {}).get("status"),
-               "compatibility": compat_summary, "compatibility_report": _rel(ctx, out / COMPAT_JSON)}
+               "compatibility": compat_summary, "compatibility_report": _rel(ctx, out / COMPAT_JSON),
+               **({"captions": {k: captions[k] for k in ("file", "cues", "clips_captioned")}} if captions else {})}
     return StageResult(Status.SUCCEEDED if ok else Status.PARTIAL, summary)
 
 
@@ -625,5 +821,6 @@ def build_draft_runner(ctx: Any) -> StageRunner:
         # Also registered (in apply mode) when a revision was approved with `approve --critic`, whatever qc.critic says now.
         runner.register("critic", critic_stage, deps=("qc",), inputs=critic_inputs, verify=critic_verify)
     runner.register("handoff", handoff_stage, deps=("assemble",), inputs=_handoff_inputs,
-                    verify=lambda c: (_handoff_dir(c) / "handoff_report.md").is_file() and (_handoff_dir(c) / COMPAT_JSON).is_file())
+                    verify=lambda c: (_handoff_dir(c) / "handoff_report.md").is_file() and (_handoff_dir(c) / COMPAT_JSON).is_file()
+                    and (not c.config.captions.enabled or (_handoff_dir(c) / CAPTIONS_REPORT).is_file()))
     return runner
