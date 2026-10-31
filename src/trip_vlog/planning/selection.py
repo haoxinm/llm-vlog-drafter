@@ -739,14 +739,16 @@ def _post_resolve_repair(work: dict[str, Any], ctx: SelectionContext, selection:
             changed = True
     overlapping = [e for e in report.errors if e.code in ("title_overlap", "title_overlaps_overlay", "title_outside_sequence")]
     if overlapping:
-        ordered = sorted(edit.titles, key=lambda t: (t.start_frame, t.title_id))
+        # the fixed opening / closing titles always stay: only titles the model proposed (work["titles"]) can be dropped
+        proposed = {t.get("_final_id") for t in work["titles"]}
+        ordered = sorted(edit.titles, key=lambda t: (t.title_id in proposed, t.start_frame, t.title_id))
         drop: set[str] = set()
-        end = -1
+        kept: list[Any] = []
         for t in ordered:
-            if t.start_frame < end:
+            if any(t.start_frame < k.start_frame + k.duration_frames and k.start_frame < t.start_frame + t.duration_frames for k in kept):
                 drop.add(t.title_id)
             else:
-                end = t.start_frame + t.duration_frames
+                kept.append(t)
         for t in edit.titles:
             if any(c.track_role == "overlay" and t.start_frame < c.timeline_start_frame + c.duration_frames and
                    c.timeline_start_frame < t.start_frame + t.duration_frames for sc in edit.scenes for c in sc.clips):

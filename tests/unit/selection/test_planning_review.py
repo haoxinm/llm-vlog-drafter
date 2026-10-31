@@ -275,6 +275,7 @@ def test_catalog_change_that_keeps_the_candidate_digest_replans(tmp_path):
     sctx, _ = __import__("trip_vlog.selection_stages", fromlist=["x"]).build_context(ctx)
     digest = sl.candidate_digest(sctx)
     set_best(ctx, 2.0, 5.0)                                                    # same length: the text a model sees is the same
+    ctx.data.clear()                                                           # the derived catalogs are cached per run; this is a new run
     after = selection_inputs(ctx)
     sctx2, _ = __import__("trip_vlog.selection_stages", fromlist=["x"]).build_context(ctx)
     assert sl.candidate_digest(sctx2) == digest and after["candidates"] == before["candidates"] and after["request"] == before["request"]

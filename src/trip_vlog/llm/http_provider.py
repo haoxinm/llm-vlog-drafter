@@ -115,7 +115,10 @@ class HttpProvider:
             try:
                 resp = self._transport.send(http)
             except TransportTimeout:
-                raise LLMTimeoutError(f"no reply from endpoint {self.endpoint!r} within {self.ep.timeout_seconds:g}s (timeout_seconds)") from None
+                if not last:
+                    self._sleep(self._backoff(attempt, None))
+                    continue
+                raise LLMTimeoutError(f"no reply from endpoint {self.endpoint!r} within {self.ep.timeout_seconds:g}s (timeout_seconds) after {attempt + 1} attempt(s)") from None
             except TransportConnectionError as e:
                 if last:
                     raise LLMConnectionError(f"cannot reach endpoint {self.endpoint!r} ({self.ep.host}) after {attempt + 1} attempt(s): {self._clean(e)}") from None
@@ -186,7 +189,9 @@ class HttpProvider:
         if status == 403:
             return LLMPermissionError(f"permission denied (403) at endpoint {self.endpoint!r}: {msg}", **kw)
         if status == 404:
-            return LLMNotFoundError(f"not found (404) at {self.url}: check base_url/path and the model id: {msg}", **kw)
+            from trip_vlog.llm.check import public_url  # lazy: check.py imports this module
+
+            return LLMNotFoundError(f"not found (404) at {public_url(self.url)}: check base_url/path and the model id: {msg}", **kw)
         ra = self._retry_after(headers)
         if ra is not None and ra > MAX_RETRY_AFTER:
             wait = (f"the server asked to wait {ra:g}s (Retry-After), longer than the {MAX_RETRY_AFTER:g}s this tool waits; try again later")

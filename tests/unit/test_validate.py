@@ -320,6 +320,25 @@ def test_must_include_exclude_on_edit_plans():
     assert "excluded_included" in check(plan, settings=replace(S, must_exclude=(aid("day1/a.mp4"),))).codes()
 
 
+def test_must_include_ignores_audio_only_and_excluded_targets():
+    plan = base_edit()
+    r = check(plan, settings=replace(S, must_include=("music/song.wav",)))
+    assert r.ok and "must_include_unavailable" in r.codes("warnings")
+    r = check(plan, settings=replace(S, must_include=("day2/p.mp4",), must_exclude=("day2/p.mp4",)))
+    assert r.ok and "must_include_unavailable" in r.codes("warnings")
+
+
+def test_literal_bracket_path_matches_itself_and_fingerprint_covers_features():
+    from trip_vlog.planning.catalog_view import ref_matches
+    a = mk_asset("Day [1]/clip.mp4", duration=5.0)
+    assert ref_matches("Day [1]/clip.mp4", a)
+    assert not ref_matches("Day [1]/*.mov", a)
+    a1 = mk_asset("x.mp4", duration=10.0)
+    c1 = PlanningCatalog([a1], mk_moments(a1, [(0, 5)]))
+    c2 = PlanningCatalog([a1], mk_moments(a1, [(0, 5)], silent=True))
+    assert c1.fingerprint() != c2.fingerprint()
+
+
 # ---- selection plans ----------------------------------------------------------------------------------------
 
 def sel_report(sel, **kw):

@@ -167,8 +167,11 @@ def extract_audio(ffmpeg: Path, src: Path, dest: Path, fmt: str = "wav", *, star
                   duration: float | None = None, timeout: float = 600.0) -> str | None:
     """Write a 16 kHz mono WAV/FLAC of the first audio stream (optionally a time range) to `dest`. Returns an error or None.
     The file appears atomically (written as .part, then renamed)."""
-    dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_name(dest.name + ".part")
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return f"cannot create audio directory: {e.strerror or e}"
     codec = ["-c:a", "pcm_s16le", "-f", "wav"] if fmt == "wav" else ["-c:a", "flac", "-f", "flac"]
     cmd = [str(ffmpeg), "-hide_banner", "-nostdin", "-loglevel", "error", "-y"]
     if start:
@@ -184,8 +187,15 @@ def extract_audio(ffmpeg: Path, src: Path, dest: Path, fmt: str = "wav", *, star
         return f"audio extraction timed out after {timeout:g}s"
     except OSError as e:
         return f"cannot run ffmpeg: {e.strerror or e}"
-    if rc != 0 or not part.is_file() or part.stat().st_size == 0:
+    try:
+        ok = rc == 0 and part.is_file() and part.stat().st_size > 0
+    except OSError:
+        ok = False
+    if not ok:
         part.unlink(missing_ok=True)
         return f"audio extraction failed: {(err.strip().splitlines() or ['no output'])[-1]}"
-    os.replace(part, dest)
+    try:
+        os.replace(part, dest)
+    except OSError as e:
+        return f"cannot write audio file: {e.strerror or e}"
     return None

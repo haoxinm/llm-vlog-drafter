@@ -876,3 +876,12 @@ def test_main_prints_experiments_and_flag(seq_media, tmp_path, monkeypatch, caps
     assert "image_sequence_misdetected" in txt
     rep = json.loads(out.read_text())
     assert rep["experiments"]["still_sequence"]["recommended"] == "pre_import_media_then_xml" and rep["status"] == "fail"
+
+
+def test_overall_verdict_requires_the_primary_shipped_file_to_pass():
+    ok, bad = {"passed": True}, {"passed": False}
+    # a rewritten variant passing does not count when the shipped otio failed
+    assert rv.overall_verdict({"fcp7xml": bad, "otio[original]": bad, "otio[bare]": ok}) == (False, "otio[original]")
+    assert rv.overall_verdict({"fcp7xml": ok, "otio[original]": ok, "otio[bare]": bad}) == (True, "otio[original]")
+    assert rv.overall_verdict({"fcp7xml": ok, "edl": {"passed": False, "skipped": True}}) == (True, "fcp7xml")
+    assert rv.overall_verdict({}) == (False, None)

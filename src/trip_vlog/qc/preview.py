@@ -264,13 +264,23 @@ def load_preview_sheet_index(path: Path | str) -> PreviewSheetIndex:
 # ---- frame grabs and composition ------------------------------------------------------------------------
 
 def grab_frame(ffmpeg: Path, video: Path, t: float, out: Path, width: int, timeout: float = 60.0) -> str | None:
-    cp = subprocess.run([str(ffmpeg), "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{t:.3f}", "-i", str(video),
-                         "-frames:v", "1", "-vf", f"scale={width}:-2", str(out)],
-                        capture_output=True, timeout=timeout, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL,
-                        shell=False, **popen_flags())
+    try:
+        cp = _grab_run(ffmpeg, video, t, out, width, timeout)
+    except subprocess.TimeoutExpired:
+        return f"ffmpeg timed out after {timeout:g}s"
+    except OSError as e:
+        return f"cannot run ffmpeg: {e.strerror or e}"
     if cp.returncode != 0 or not out.is_file() or out.stat().st_size == 0:
         return (cp.stderr or "no frame produced").strip()[-200:]
     return None
+
+
+def _grab_run(ffmpeg: Path, video: Path, t: float, out: Path, width: int, timeout: float):
+    cp = subprocess.run([str(ffmpeg), "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{t:.3f}", "-protocol_whitelist", "file,pipe", "-i", str(video),
+                         "-frames:v", "1", "-vf", f"scale={width}:-2", str(out)],
+                        capture_output=True, timeout=timeout, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL,
+                        shell=False, **popen_flags())
+    return cp
 
 
 def _ts(t: float) -> str:
