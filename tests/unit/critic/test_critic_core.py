@@ -114,8 +114,9 @@ def test_more_sheets_than_the_cap_are_spread_and_unsent_tiles_are_not_evidence(t
 def test_the_request_text_does_not_change_with_generated_at_and_changes_with_the_plan(tmp_path):
     inp, _ = inputs(tmp_path)
     t1 = cr.user_text(inp, 3)
+    digest = cr.index_digest(inp.index)
     inp.index.generated_at = "2030-01-01T00:00:00Z"
-    assert cr.user_text(inp, 3) == t1 and cr.index_digest(inp.index) == cr.index_digest(replace(inp).index)
+    assert cr.user_text(inp, 3) == t1 and cr.index_digest(inp.index) == digest
     other = replace(inp, qc={**QC_DOC, "checks": QC_DOC["checks"][:1]})
     assert cr.qc_digest(other.qc) != cr.qc_digest(inp.qc) and cr.user_text(other, 3) != t1
 
