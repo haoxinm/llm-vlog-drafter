@@ -230,7 +230,8 @@ def _transcribe_asset(ctx: Any, backend: Any, e: Entry) -> Transcription:
     made: list[Path] = []
     try:
         for i, (start, length) in enumerate(chunks):
-            dest = ws.audio_dir / e.aid / f"{cvh}_{sp.audio_format}_{i}.{sp.audio_format}"
+            win = hashlib.sha1(f"{sp.chunk_seconds}|{len(chunks)}|{start:.3f}|{length or 0:.3f}".encode("utf-8")).hexdigest()[:8]
+            dest = ws.audio_dir / e.aid / f"{cvh}_{sp.audio_format}_{i}_{win}.{sp.audio_format}"
             if not (sp.keep_audio and dest.is_file()):
                 err = au.extract_audio(ctx.ffmpeg, src, dest, sp.audio_format, start=start if len(chunks) > 1 else None,
                                        duration=length if len(chunks) > 1 else None, timeout=max(120.0, 2.0 * length))
