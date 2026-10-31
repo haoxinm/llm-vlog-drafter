@@ -412,7 +412,7 @@ def _qc_outline_scene_ids(ctx: Any) -> list[str] | None:
 def _qc_inputs(ctx: Any) -> Any:
     audio = [(m.moment_id, (m.features or {}).get("audio")) for m in PlanningCatalog.from_catalog(ctx.catalog).moments.values()]
     return {"project": _project_sha(ctx), "preview": _file_sha(_preview_path(ctx)), "plan": plan_file_hash(_pp(ctx).edit_plan),
-            "qc": ctx.config.qc.model_dump(), "tol": [ctx.config.project.duration_tolerance_pct, ctx.config.project.duration_tolerance_seconds],
+            "qc": ctx.config.qc.model_dump(exclude={k for k in type(ctx.config.qc).model_fields if k.startswith("critic")}), "tol": [ctx.config.project.duration_tolerance_pct, ctx.config.project.duration_tolerance_seconds],
             "ambient_db": ctx.config.filmcraft.ambient_low_gain_db, "ffmpeg": ctx.ffmpeg is not None,
             "evidence": stable_hash({"audio": sorted(audio, key=lambda x: x[0]),
                                      "transcripts": {a: [(t.start, t.end, t.text, t.coarse) for t in ts] for a, ts in _qc_transcripts(ctx).items()}}),
