@@ -26,6 +26,7 @@ def test_defaults_backend_none_and_not_active():
 def test_transcribe_speech_alias_is_folded_into_speech_enabled():
     c = parse_config({"media": {"transcribe_speech": False}})
     assert c.speech.enabled is False and c.media.transcribe_speech is None and not c.speech.active
+    assert "enabled" in c.speech.model_fields_set and "__pydantic_fields_set__" not in c.speech.__dict__
     again = parse_config(c.to_dict())  # the effective config round-trips (project.yaml is re-read by the next run)
     assert again.speech.enabled is False and again.config_hash() == c.config_hash()
     assert parse_config({"media": {"transcribe_speech": True}, "speech": {"backend": "none"}}).speech.enabled is True

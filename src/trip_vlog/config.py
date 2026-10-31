@@ -533,7 +533,7 @@ class Config(_Model):
                     f"media.transcribe_speech ({str(alias).lower()}) conflicts with speech.enabled ({str(self.speech.enabled).lower()}); "
                     "media.transcribe_speech is deprecated: remove it and use speech.enabled only")
             self.speech.__dict__["enabled"] = alias
-            self.speech.__dict__["__pydantic_fields_set__"] = self.speech.model_fields_set | {"enabled"}
+            self.speech.model_fields_set.add("enabled")
             self.media.__dict__["transcribe_speech"] = None
         return self
 
