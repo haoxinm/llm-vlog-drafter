@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping
 
 PHASH_VERSION = 2   # 2: near-flat pictures are not hashed
 FLAT_MAX_STEP = 4   # brightest step between neighbouring samples (0-255) below which a picture counts as flat
@@ -61,12 +61,28 @@ def group_duplicates(hashes: Mapping[str, int], distance: int) -> dict[str, str]
             x = parent[x]
         return x
 
-    for n, a in enumerate(ids):
-        for b in ids[n + 1:]:
-            if hamming(hashes[a], hashes[b]) <= distance:
-                ra, rb = find(a), find(b)
-                if ra != rb:
-                    parent[max(ra, rb)] = min(ra, rb)
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+
+    if distance < 0:
+        pairs: Any = ()
+    elif distance >= 63:
+        pairs = ((a, b) for n, a in enumerate(ids) for b in ids[n + 1:])
+    else:
+        # pigeonhole: two 64-bit hashes within `distance` bits agree exactly on at least one of `distance + 1` segments
+        k = distance + 1
+        bounds = [(i * 64 // k, (i + 1) * 64 // k) for i in range(k)]
+        buckets: dict[tuple[int, int], list[str]] = {}
+        for i in ids:
+            h = hashes[i]
+            for si, (lo, hi) in enumerate(bounds):
+                buckets.setdefault((si, (h >> lo) & ((1 << (hi - lo)) - 1)), []).append(i)
+        pairs = ((a, b) for ms in buckets.values() if len(ms) > 1 for n, a in enumerate(ms) for b in ms[n + 1:])
+    for a, b in pairs:
+        if hamming(hashes[a], hashes[b]) <= distance:
+            union(a, b)
     members: dict[str, list[str]] = {}
     for i in ids:
         members.setdefault(find(i), []).append(i)
