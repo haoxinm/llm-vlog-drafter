@@ -82,6 +82,7 @@ def test_fps_normalised(spec):
     (lambda s: replace(s, tracks=("V2", "A1", "A2")), "tracks must include V1"),
     (lambda s: replace(s, tracks=("V1", "V3", "A1", "A2")), "contiguous"),
     (lambda s: replace(s, tracks=("V1", "V1", "V2", "A1", "A2")), "duplicate track"),
+    (lambda s: replace(s, tracks=("V1", "Vx", "A1", "A2")), "track must look like"),
     (lambda s: replace(s, width=0), "width"),
     (lambda s: replace(s, titles=(TitleSpec("  ", 0, 10),)), "text must be a non-empty string"),
     (lambda s: replace(s, titles=(TitleSpec("x\x00y", 0, 10),)), "control characters"),

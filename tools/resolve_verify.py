@@ -34,6 +34,7 @@ excluded from the clip checks and counted for the (non-required) transitions che
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -1171,6 +1172,15 @@ def gather_inputs(args: argparse.Namespace) -> tuple[list[Path], dict | None, st
     return uniq, expected, src
 
 
+def overall_verdict(formats: dict[str, dict]) -> tuple[bool, str | None]:
+    """(passed, primary label). Only a file the user will actually import counts: adapter-rewritten ``otio[bare|slash|file_url]``
+    variants and skipped formats never do. The primary is ``otio[original]`` (the recommended file) when present, else the
+    first shipped format that was attempted."""
+    shipped = [k for k, e in formats.items() if not e.get("skipped") and not (k.startswith("otio[") and k != "otio[original]")]
+    primary = "otio[original]" if "otio[original]" in shipped else (shipped[0] if shipped else None)
+    return (bool(primary and formats[primary].get("passed")), primary)
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Verify a handoff timeline imports faithfully into DaVinci Resolve.",
                                  formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
@@ -1211,7 +1221,9 @@ def main(argv: list[str] | None = None) -> int:
     report: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION, "tool": "tools/resolve_verify.py", "os": os_info(),
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "inputs": [str(f) for f in files], "expected_source": exp_src, "expected": expected,
+        "inputs": [str(f) for f in files],
+        "input_sha256": {str(f): hashlib.sha256(Path(f).read_bytes()).hexdigest() for f in files},
+        "expected_source": exp_src, "expected": expected,
     }
     resolve, info = connect_resolve()
     report["discovery"] = {k: v for k, v in info.items()}
@@ -1244,7 +1256,8 @@ def main(argv: list[str] | None = None) -> int:
                      experiments=args.experiments, work_dir=out_path.parent / f"resolve_verify_work_{stamp}", stamp=stamp)
     report.update(res)
     report["include_risky_formats"] = bool(args.include_risky_formats)
-    ok = any(f["passed"] for f in res["formats"].values())
+    ok, primary = overall_verdict(res["formats"])
+    report["primary_format"] = primary
     report["status"] = "pass" if ok else "fail"
     report["required_checks"] = list(REQUIRED_CHECKS)
     write_report(out_path, report)
