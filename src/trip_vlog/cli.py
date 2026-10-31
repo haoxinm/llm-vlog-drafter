@@ -26,7 +26,7 @@ import yaml
 from trip_vlog import __version__
 from trip_vlog.config import ConfigError
 from trip_vlog.draft_stages import DRAFT_STAGES
-from trip_vlog.orchestrator import (ApprovalRefused, IndexResult, approve_pending, read_status, reset_revision_overrides, run_analyze, run_critic, run_draft, run_index,
+from trip_vlog.orchestrator import (ApprovalRefused, IndexResult, approve_pending, read_status, revision_awaiting_approval, reset_revision_overrides, run_analyze, run_critic, run_draft, run_index,
                                     run_outline, run_revise, run_transcribe)
 
 
@@ -227,7 +227,7 @@ def _print_draft_result(res: IndexResult) -> None:
         print(f"  edit  : {ws / ap.get('outline', 'plans/story_outline.json')} (optional)")
         print(f"  then  : trip-vlog approve --output {ws}  &&  trip-vlog resume --output {ws}")
         return
-    if res.awaiting_approval and m.stage("revise").get("status") == "awaiting_approval":
+    if res.awaiting_approval and revision_awaiting_approval(m):
         _print_revise_block(m, ws)
         return
     if res.awaiting_approval and m.stage("critic").get("status") == "awaiting_approval":
