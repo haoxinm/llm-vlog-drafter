@@ -146,7 +146,7 @@ def catalog_stage(ctx: RunContext) -> StageResult:
         counts[kind] += 1
         if kind == "changed":
             ctx.logger.event("catalog", Status.SUCCEEDED, asset_id=f.asset_id, message="content_version changed; analysis marked stale")
-    gone = ctx.catalog.mark_missing(f.asset_id for f in scan.files)
+    gone = ctx.catalog.mark_missing((f.asset_id for f in scan.files), [s.rel_path for s in scan.skipped if s.reason == "unreadable"])
     dups, moves, stale = ctx.catalog.probable_duplicates(), ctx.catalog.probable_moves(), ctx.catalog.stale_assets()
     n = ctx.catalog.export_assets_jsonl(ctx.workspace.assets_jsonl, ctx.config.media.export_gps)
     report = {"generated_at": utc_now_iso(), "scan": scan.to_report(), "probable_duplicates": dups,

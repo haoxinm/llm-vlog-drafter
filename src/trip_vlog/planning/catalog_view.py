@@ -103,8 +103,9 @@ class PlanningCatalog:
 
     def fingerprint(self) -> list[Any]:
         """JSON-able description of the planning-relevant catalog content (for stage input hashes)."""
-        return [sorted((a.asset_id, a.content_version, a.present, a.probe_ok, a.capture_time) for a in self.assets.values()),
-                sorted((m.moment_id, m.source_in_seconds, m.source_out_seconds, m.content_version) for m in self.moments.values())]
+        return [sorted((a.asset_id, a.content_version, a.present, a.probe_ok, a.capture_time, a.analysis_status or "") for a in self.assets.values()),
+                sorted((m.moment_id, m.source_in_seconds, m.source_out_seconds, m.content_version, m.best_in_seconds, m.best_out_seconds,
+                        list(m.tags), json.dumps(m.features, sort_keys=True, default=str)) for m in self.moments.values())]
 
 
 # ---- references (must_include / must_exclude) ----------------------------------------------------------
@@ -128,9 +129,11 @@ def ref_matches(ref: str, asset: AssetInfo, moment: MomentInfo | None = None) ->
     path = asset.relative_path
     if r.endswith("/"):
         return path.startswith(r)
+    if path == r:
+        return True
     if any(c in r for c in "*?["):
         return fnmatch.fnmatchcase(path, r)
-    return path == r
+    return False
 
 
 def ref_targets(ref: str, catalog: PlanningCatalog) -> list[MomentInfo]:

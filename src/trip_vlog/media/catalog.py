@@ -99,9 +99,14 @@ class Catalog:
         for version, script in MIGRATIONS:
             if version in done:
                 continue
-            self.conn.executescript(script)
-            with self.conn:
-                self.conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (version, utc_now_iso()))
+            # executescript() commits on its own, so wrap schema + version row in one explicit transaction
+            stamp = f"INSERT INTO schema_migrations(version, applied_at) VALUES ({int(version)}, '{utc_now_iso()}');"
+            try:
+                self.conn.executescript(f"BEGIN;\n{script}\n{stamp}\nCOMMIT;")
+            except BaseException:
+                if self.conn.in_transaction:
+                    self.conn.rollback()
+                raise
 
     def schema_version(self) -> int:
         return self.conn.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()[0]
@@ -144,11 +149,15 @@ class Catalog:
         fields.update(relative_path=rec["relative_path"], extension=rec.get("extension"), size_bytes=rec.get("size_bytes"),
                       mtime_ns=rec.get("mtime_ns"), content_version=rec.get("content_version"), sha256=rec.get("sha256"),
                       present=1, last_seen=now)
+        if old is not None:  # a transient fingerprint failure must not wipe the last good values
+            for k in ("content_version", "sha256"):
+                if fields[k] is None:
+                    fields[k] = old[k]
         if old is None:
             fields.update(first_seen=now, analysis_status="complete" if probe_ok else "failed")
             kind = "new"
         else:
-            old_cv, new_cv = old["content_version"], rec.get("content_version")
+            old_cv, new_cv = old["content_version"], fields["content_version"]
             status = old["analysis_status"]
             kind = "unchanged" if old["present"] else "reappeared"
             if old_cv and new_cv and old_cv != new_cv:
@@ -175,10 +184,17 @@ class Catalog:
                 self.conn.execute(f"UPDATE assets SET {sets} WHERE asset_id=?", [*fields.values(), rec["asset_id"]])
         return kind
 
-    def mark_missing(self, present_ids: Iterable[str]) -> list[str]:
-        """Flag assets no longer on disk (never deleted: plans may still reference them)."""
+    def mark_missing(self, present_ids: Iterable[str], unreadable_paths: Iterable[str] = ()) -> list[str]:
+        """Flag assets no longer on disk (never deleted: plans may still reference them).
+
+        Assets at or under `unreadable_paths` (relative; '.' = whole root) are left alone: the scan could not look there."""
         present = set(present_ids)
-        gone = [r["asset_id"] for r in self.conn.execute("SELECT asset_id FROM assets WHERE present=1") if r["asset_id"] not in present]
+        skip = [p.rstrip("/") for p in unreadable_paths]
+
+        def unseen(path: str) -> bool:
+            return any(p in ("", ".") or path == p or path.startswith(p + "/") for p in skip)
+        gone = [r["asset_id"] for r in self.conn.execute("SELECT asset_id, relative_path FROM assets WHERE present=1")
+                if r["asset_id"] not in present and not unseen(r["relative_path"])]
         with self.conn:
             for aid in gone:
                 self.conn.execute("UPDATE assets SET present=0 WHERE asset_id=?", (aid,))

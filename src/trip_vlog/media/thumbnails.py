@@ -55,7 +55,7 @@ def _run_ffmpeg_frame(ffmpeg: Path, src: Path, seconds: float, out: Path, max_si
     tmp = out.with_name(f".{out.stem}.{os.getpid()}.tmp.jpg")
     vf = f"scale='min({max_side},iw)':'min({max_side},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2"
     q = max(2, min(31, round(31 - quality * 0.29)))  # 1..100 quality -> mjpeg qscale
-    cmd = [str(ffmpeg), "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{seconds:.3f}", "-i", str(long_path(src.resolve())),
+    cmd = [str(ffmpeg), "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{seconds:.3f}", "-protocol_whitelist", "file,pipe", "-i", str(long_path(src.resolve())),
            "-frames:v", "1", "-an", "-sn", "-vf", vf, "-q:v", str(q), str(tmp)]
     try:
         cp = subprocess.run(cmd, capture_output=True, timeout=timeout, encoding="utf-8", errors="replace",
@@ -181,19 +181,25 @@ def make_asset_contact_sheet(ffmpeg: Path | None, src: Path, asset_id: str, dura
     if not duration or duration <= 0 or frames < 1:
         return "duration unknown; no contact sheet"
     times = [duration * (i + 0.5) / frames for i in range(frames)]
-    tmp_root.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=tmp_root, prefix="sheet_") as td:
-        tiles = []
-        for i, t in enumerate(times):
-            fp = Path(td) / f"f{i:02d}.jpg"
-            err = _run_ffmpeg_frame(ffmpeg, src, t, fp, TILE_W * 2, settings.quality)
-            if err:
-                continue
-            tiles.append(_label_tile(fp, [asset_id, fmt_ts(t)], TILE_W))
-        if not tiles:
-            return "no frames could be extracted"
-        _compose(tiles, min(3, len(tiles)), TILE_W, out)
-    _remove_stale(out.parent, f"{asset_id}_", out.name)
+    try:
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=tmp_root, prefix="sheet_") as td:
+            tiles = []
+            for i, t in enumerate(times):
+                fp = Path(td) / f"f{i:02d}.jpg"
+                err = _run_ffmpeg_frame(ffmpeg, src, t, fp, TILE_W * 2, settings.quality)
+                if err:
+                    continue
+                try:
+                    tiles.append(_label_tile(fp, [asset_id, fmt_ts(t)], TILE_W))
+                except Exception:  # noqa: BLE001  (truncated/corrupt frame: skip this tile)
+                    continue
+            if not tiles:
+                return "no frames could be extracted"
+            _compose(tiles, min(3, len(tiles)), TILE_W, out)
+        _remove_stale(out.parent, f"{asset_id}_", out.name)
+    except Exception as e:  # noqa: BLE001
+        return f"cannot create contact sheet: {type(e).__name__}: {e}"
     return None
 
 
