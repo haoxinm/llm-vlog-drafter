@@ -206,3 +206,16 @@ def test_titles_are_ignored_when_scene_titles_are_off(tmp_path):
     ctx, tr, st = run(planner_config(workflow={"approval": "auto_approve"}), tmp_path, titled(lambda c: "Scene 1"))
     assert st["plan"] == Status.SUCCEEDED and len(tr.plan_calls) == 1
     assert json.loads((ctx.workspace.root / "plans" / "edit_plan.json").read_text(encoding="utf-8"))["titles"] == []
+
+
+def test_post_resolve_repair_keeps_the_closing_title_and_drops_the_overlapping_scene_title():
+    from trip_vlog.planning.selection import _post_resolve_repair
+    from trip_vlog.planning.validate import ValidationReport
+    p = with_titles(title(), title("title_02", "S2", "scene_title", "scene_002", "outline_scene_title", "scene_start", off=0.0),
+                    title("title_03", "Thanks for watching", "closing", "scene_002", "user_config", "sequence_end", dur=3.0))
+    edit = resolve_selection_plan(p, CAT, PlanSettings(frame_rate="30", target_duration_seconds=12))
+    rep = validate_edit_plan(edit, CAT, VS)
+    assert "title_overlap" in rep.codes("errors")
+    work = {"titles": [{"text": "S2", "_final_id": "title_02"}]}
+    assert _post_resolve_repair(work, None, None, edit, rep)
+    assert work["titles"] == [] and [r.code for r in rep.repairs] == ["title_dropped"]

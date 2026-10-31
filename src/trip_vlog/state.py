@@ -201,6 +201,10 @@ class StageRunner:
 
     def run(self, only: list[str] | None = None, force: bool = False) -> dict[str, Status]:
         results: dict[str, Status] = {}
+        data = getattr(self.ctx, "data", None)
+        if isinstance(data, dict):   # per-run caches of derived catalogs (see selection_stages.build_context): never carried into a new run
+            for k in ("selection_context", "outline_catalog"):
+                data.pop(k, None)
         for stage in self._stages.values():
             if only is not None and stage.name not in only:
                 continue

@@ -39,7 +39,7 @@ def capability_lines(config: Any, snapshot: dict[str, Any] | None = None) -> lis
     lines = ["- Tracks: primary_video is the main picture line (video clips and photos, played one after another). overlay is a second "
              "picture line without its own sound, rarely useful. Music and narration are not placed by this step."]
     if _usable(snapshot, "add_transition"):
-        lines.append("- Transitions: cut (default) and dissolve (a cross-dissolve of 0.3 to 1.5 seconds between two primary_video clips). A "
+        lines.append("- Transitions: cut (default) and dissolve (a cross-dissolve of 0.3 to 1.0 seconds between two primary_video clips). A "
                      "dissolve needs spare footage around the cut; where there is none it becomes a cut automatically. No other transitions, "
                      "speed changes, effects, zooms or motion exist.")
     else:
