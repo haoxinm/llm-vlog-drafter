@@ -603,5 +603,11 @@ class FilmCraftAdapter:
             rep.exported = True
             if isinstance(res, dict) and isinstance(res.get("report"), list):
                 rep.engine_report = [str(x) for x in res["report"]]
-            postprocess_and_validate(info, target, snap, known, rep)
+            try:
+                postprocess_and_validate(info, target, snap, known, rep)
+            except Exception as e:  # noqa: BLE001 - one malformed/non-UTF-8 file must not drop the other formats
+                from trip_vlog.filmcraft.preview import Check
+
+                rep.error = f"post-processing failed: {type(e).__name__}: {e}"
+                rep.checks.append(Check("post-process and validate", False, rep.error))
         return report

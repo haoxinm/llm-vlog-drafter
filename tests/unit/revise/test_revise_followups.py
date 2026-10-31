@@ -41,7 +41,7 @@ def rj(p):
 def setup(tmp_path, monkeypatch):
     def make(revise=None, workflow=None, transport=None, **kw):
         cfg = revise_config(revise, workflow, **kw)
-        ctx, sel, plan = make_draft_ctx(tmp_path, monkeypatch, cfg)
+        ctx, sel, plan = make_draft_ctx(tmp_path, monkeypatch, cfg, approval_mode="manual")
         monkeypatch.setattr(ds, "latest_run", lambda c: {"project_path": "filmcraft/Trip Vlog Draft_v001.fcproj", "version": 1})
         t = transport or ReviseTransport()
         monkeypatch.setattr(rs, "gateway_factory", lambda c: gateway_for(c.config, c.workspace.root, t))

@@ -226,19 +226,20 @@ def run_build(adapter: "FilmCraftAdapter", spec: TimelineSpec, project_name: str
         rp = adapter.policy.check_read(p, "asset")
         if not rp.is_file():
             raise FilmCraftError(f"asset not found: {rp}")
-    cmap = adapter.discover_capabilities()
     fc_dir = adapter.fc_dir
     fc_dir.mkdir(parents=True, exist_ok=True)
     jpath = adapter.journal_path
     spec_hash = spec.spec_hash()
     sig = media_signature(spec.asset_paths)
     noop_run: dict[str, Any] | None = None
+    # only a build bound to the FilmCraft version needs it before the no-op check; otherwise a no-op must not start FilmCraft
+    version_bound = any(p.fit_source_size for p in spec.placements) or any(p.gain_keys for p in spec.placements)
+    cmap = adapter.discover_capabilities() if version_bound else None
     with journal_lock(jpath):
         doc = load_journal(jpath)
         if mark_abandoned(doc):
             save_journal(jpath, doc)
         latest = _newest_complete(doc, project_name)
-        version_bound = any(p.fit_source_size for p in spec.placements) or any(p.gain_keys for p in spec.placements)
         stale_build = version_bound and latest is not None and latest.get("filmcraft_version") != cmap.version
         if not force_new_version and not stale_build and _is_noop(adapter, latest, spec_hash, sig):
             noop_run = latest
@@ -248,6 +249,8 @@ def run_build(adapter: "FilmCraftAdapter", spec: TimelineSpec, project_name: str
                                  f"journal: {jpath}). Wait for it to finish and run the command again. If that build is really gone (for example it ran on another host or "
                                  f"under another host name, which cannot be checked for 24 hours), run `trip-vlog resume --abandon-running` to mark it abandoned")
         else:
+            if cmap is None:
+                cmap = adapter.discover_capabilities()
             version = next_version(doc, fc_dir, project_name)
             project_path = fc_dir / project_filename(project_name, version)
             spec_copy = fc_dir / f"{project_path.stem}.timeline_spec.json"

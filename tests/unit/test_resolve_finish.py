@@ -611,3 +611,49 @@ def test_cli_dry_run_and_status_shows_the_stage(tmp_path, inject, capsys):
 def test_verify_script_runs_from_a_checkout_without_the_package_installed():
     p = subprocess.run([sys.executable, "-S", str(ROOT / "tools" / "resolve_verify.py"), "--help"], capture_output=True, text=True)
     assert p.returncode == 0 and "--handoff" in p.stdout, p.stderr
+
+
+# ---------------------------------------------------------------- review follow-ups
+def test_title_readback_reads_only_the_target_track(tmp_path, inject):
+    w = build_workspace(tmp_path, titles=[title("Iceland", 0, 60)])
+    inject()
+    res, _ = run(w["ws"])
+    assert res.report["titles"][0]["status"] == "created"
+    calls = [c for c in res.api.log if c["call"] == "timeline.GetItemListInTrack" and c["args"][:2] == ["video", 2]]
+    assert calls  # the title's track was read directly
+
+
+def test_stage_still_recopies_when_same_size_source_changed(tmp_path):
+    w = _siblings_ws(tmp_path)
+    inp = finish.load_inputs(w["ws"])
+    r = finish.FinishRun(inp, ApiSession(), "S", False, echo=lambda *_: None)
+    src = w["media"] / "261010_stars_-318.jpg"
+    a = finish.stage_still(r, str(src))
+    data = src.read_bytes()
+    src.write_bytes(bytes([data[0] ^ 1]) + data[1:])  # same size, different content
+    import os
+    st = src.stat()
+    os.utime(src, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+    assert finish.stage_still(r, str(src)) == a and a.read_bytes() == src.read_bytes()
+
+
+def test_unavailable_run_keeps_prior_successful_stage_record(tmp_path, inject, monkeypatch):
+    w = build_workspace(tmp_path)
+    inject()
+    res, _ = run(w["ws"])
+    assert res.status == "pass"
+    monkeypatch.setattr(finish, "resolve_factory", lambda: (None, {"diagnosis": ["down"]}))
+    res2, _ = run(w["ws"])
+    assert res2.status == "manual_required"
+    st = Manifest.load(w["ws"] / "manifest.json").stage("resolve_finish")
+    assert st["status"] == "succeeded" and st["summary"]["project"] == res.report["project"]["name"]
+
+
+def test_failed_create_project_is_not_recorded_as_a_run(tmp_path, inject):
+    w = build_workspace(tmp_path)
+    fake = inject()
+    fake.pm.CreateProject = lambda name: None
+    res, _ = run(w["ws"])
+    assert res.status == "fail"
+    m = Manifest.load(w["ws"] / "manifest.json").get("resolve_finish")
+    assert not m.get("runs")
