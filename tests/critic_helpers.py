@@ -165,7 +165,7 @@ def write_qc(ws: Path, plan, status: str = "warn") -> None:
     atomic_write_json(ws / "preview" / "qc_report.json", doc)
 
 
-def make_draft_ctx(tmp_path: Path, monkeypatch, cfg, *, approval_mode: str = "manual"):
+def make_draft_ctx(tmp_path: Path, monkeypatch, cfg, *, approval_mode: str = "automatic"):
     """RunContext stand-in over a workspace that holds a finished baseline-style draft: plan files, QC report, preview sheet index and images."""
     from trip_vlog.planning.catalog_view import PlanningCatalog
 

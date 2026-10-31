@@ -543,7 +543,7 @@ def approve_outline(output: Path | str) -> dict[str, Any]:
 
 
 def approve_critic(output: Path | str) -> dict[str, Any]:
-    """Approve the critic revision that waits for it (`workflow.plan_review: true` with `qc.critic: apply`). The approval is bound to the revision
+    """Approve the critic revision that waits for it (`qc.critic: apply` with `workflow.plan_review: true`, or on a plan approved by hand). The approval is bound to the revision
     (its operations and the plan they start from); the next `resume` applies exactly that revision. Refused when the plan changed since."""
     from trip_vlog.draft_stages import plan_file_hash
 
@@ -555,7 +555,7 @@ def approve_critic(output: Path | str) -> dict[str, Any]:
     pend = dict(st.get("pending") or {})
     if pend.get("status") not in ("pending", "approved"):
         raise ApprovalRefused("no critic revision is waiting for approval; one is proposed by `trip-vlog critic --mode apply` "
-                              "(or a draft with qc.critic: apply) when workflow.plan_review is true")
+                              "(or a draft with qc.critic: apply) when workflow.plan_review is true or the plan was approved by hand")
     config = load_config(ws.project_yaml)
     paths = resolve_paths(config, manifest.get("media_root") or ws.root.parent, ws.root)
     try:

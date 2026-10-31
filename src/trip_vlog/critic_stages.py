@@ -15,9 +15,9 @@ Where it runs: after `qc`, before `handoff`, only when ``qc.critic`` is ``report
 Approval semantics (``manifest.approval``, mode ``critic_fix``). A critic fix only ever starts from a plan that is approved (manually, automatically
 or derived from the outline). The ``critic_fix`` approval is bound to the NEW plan's hash and records ``parent_plan_hash`` (the approved plan it came
 from), ``revision`` (the revision file listing exactly the operations applied), ``critic_report`` (+ sha256 of the report snapshot ``qc/critic_report.rNN.json``
-that motivated it) and ``authorization``: ``automatic`` (``workflow.plan_review: false``) or ``manual`` (the person ran ``trip-vlog approve --critic``).
+that motivated it) and ``authorization``: ``automatic`` (``workflow.plan_review: false`` and the parent plan needed no hand approval) or ``manual`` (the person ran ``trip-vlog approve --critic``).
 It authorizes the listed validated operations and nothing else; a later edit of the plan changes the hash and invalidates it like any other approval.
-With ``workflow.plan_review: true`` nothing is applied by itself: the stage writes the proposed revision (``status: proposed``), records it as pending
+With ``workflow.plan_review: true``, or when the parent plan was approved by hand (``trip-vlog approve``, the baseline planner), nothing is applied by itself: the stage writes the proposed revision (``status: proposed``), records it as pending
 in ``manifest.critic.pending`` and stops (``awaiting_approval``); ``trip-vlog approve --critic`` then ``resume`` applies exactly that revision.
 
 Safety rails of a round. The round limit counts the applied rounds of the lineage that ends in the current plan (an append-only list in the manifest)
@@ -262,7 +262,7 @@ def critic_inputs(ctx: Any) -> Any:
     cfg = ctx.config
     q = cfg.qc
     base: dict[str, Any] = {"mode": effective_mode(ctx), "limits": [q.critic_max_rounds, q.critic_max_ops_per_round, q.critic_apply_min_severity],
-                            "plan_review": cfg.workflow.plan_review, "validation": stable_hash(ValidationSettings.from_config(cfg).__dict__),
+                            "plan_review": cfg.workflow.plan_review, "manual_review": _needs_manual_review(ctx), "validation": stable_hash(ValidationSettings.from_config(cfg).__dict__),
                             "planning": stable_hash(PlanSettings.from_config(cfg).__dict__), "min_still_seconds": float(q.min_still_seconds),
                             "failed": sorted(state_of(ctx).get("failed", []))}
     try:
@@ -688,11 +688,29 @@ def _settle_input_hash(ctx: Any) -> None:
     ctx.manifest.stages.setdefault("critic", {})["input_hash"] = h
 
 
+def _needs_manual_review(ctx: Any) -> bool:
+    """A critic revision needs `trip-vlog approve --critic` when workflow.plan_review is true, or when the plan it starts from was approved by a person
+    (mode `manual`: the baseline planner's `approve`): the model must not rewrite what a person signed off without the person's say. A plan the person did
+    not have to approve (automatic, derived from the outline) keeps automatic fixes. A critic_fix inherits the requirement through its parent approval."""
+    if ctx.config.workflow.plan_review:
+        return True
+    ap = ds.approval_record(ctx.manifest)
+    for _ in range(100):
+        if not ap:
+            return False
+        if ap.get("mode") != "critic_fix":
+            return ap.get("mode") == "manual"
+        if ap.get("authorization") == "manual":
+            return True
+        ap = ap.get("parent_approval")
+    return False
+
+
 def _authorize(ctx: Any, rv: Review, selected: list[cr.Finding], res: ApplyResult, mode: str,
                rounds_doc: list[dict[str, Any]]) -> tuple[str | None, int | None, StageResult | None]:
     """('automatic' | 'manual', revision number or None, None) when the round may run; (None, None, awaiting-approval result) when a person has to approve the revision first
-    (workflow.plan_review): the revision is written as `proposed` and recorded as pending in manifest.critic.pending."""
-    if not ctx.config.workflow.plan_review:
+    (workflow.plan_review, or the parent plan was approved by hand): the revision is written as `proposed` and recorded as pending in manifest.critic.pending."""
+    if not _needs_manual_review(ctx):
         return "automatic", None, None
     parent = rv.inp.plan
     rh = _revision_hash(parent.plan_hash, selected)
@@ -702,7 +720,7 @@ def _authorize(ctx: Any, rv: Review, selected: list[cr.Finding], res: ApplyResul
     n = int(pend["number"]) if pend.get("revision_hash") == rh and pend.get("number") else next_revision_number(ctx)
     for f in selected:
         f.change_status, f.change_note = "pending", "waiting for your approval: trip-vlog approve --critic, then resume"
-    doc = _report_doc(ctx, rv, mode=mode, status="ok", reason="workflow.plan_review is true: the proposed changes wait for your approval (trip-vlog approve --critic)",
+    doc = _report_doc(ctx, rv, mode=mode, status="ok", reason="the plan was approved by a person (or workflow.plan_review is true): the proposed changes wait for your approval (trip-vlog approve --critic)",
                       selected=selected, res=res, rounds=rounds_doc)
     rel = _write_report_safely(ctx, doc)
     rpath = _write_revision(ctx, n, _revision_doc(ctx, n, "proposed", parent, res, selected, rel, None), res)
