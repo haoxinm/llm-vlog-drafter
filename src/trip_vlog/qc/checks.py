@@ -151,7 +151,7 @@ def parse_blackdetect(text: str) -> list[dict[str, float]]:
 
 def detect_black(ffmpeg: Path, preview: Path, min_seconds: float, pic_th: float, pix_th: float,
                  timeout: float = 600.0) -> list[dict[str, float]]:
-    cp = subprocess.run([str(ffmpeg), "-hide_banner", "-nostats", "-i", str(preview), "-vf",
+    cp = subprocess.run([str(ffmpeg), "-hide_banner", "-nostats", "-protocol_whitelist", "file,pipe", "-i", str(preview), "-vf",
                          f"blackdetect=d={min_seconds}:pic_th={pic_th}:pix_th={pix_th}", "-an", "-f", "null", "-"],
                         capture_output=True, timeout=timeout, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL,
                         shell=False, **popen_flags())
