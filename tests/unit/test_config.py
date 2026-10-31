@@ -145,3 +145,25 @@ def test_output_symlink_escape_rejected(tmp_path):
         pytest.skip("cannot create symlinks here")
     with pytest.raises(ConfigError, match="outside the workspace"):
         resolve_paths(Config(), media, ws)
+
+
+def test_local_only_is_an_allowlist():
+    import pytest as _pt
+    from trip_vlog.config import ConfigError, parse_config
+    with _pt.raises(ConfigError, match="known local provider"):
+        parse_config({"media": {"local_only": True, "vision_provider": "openai", "llm_provider": "replay"}})
+    parse_config({"media": {"local_only": True, "vision_provider": "replay", "llm_provider": "ollama"}})
+
+
+def test_implicit_workspace_config_ignores_executables(tmp_path, monkeypatch):
+    from trip_vlog.config import load_config
+    monkeypatch.delenv("TRIP_VLOG_TRUST_WORKSPACE_CONFIG", raising=False)
+    f = tmp_path / "project.yaml"
+    f.write_text("filmcraft:\n  executable: /tmp/evil\nmedia:\n  ffmpeg_path: /tmp/evil\n", encoding="utf-8")
+    msgs: list[str] = []
+    cfg = load_config(f, implicit=True, warn=msgs.append)
+    assert cfg.filmcraft.executable is None and cfg.media.ffmpeg_path is None and len(msgs) == 2
+    assert load_config(f).filmcraft.executable == "/tmp/evil"  # explicit --config is trusted
+    assert load_config(f, {"filmcraft.executable": "/ok"}, implicit=True).filmcraft.executable == "/ok"
+    monkeypatch.setenv("TRIP_VLOG_TRUST_WORKSPACE_CONFIG", "1")
+    assert load_config(f, implicit=True).filmcraft.executable == "/tmp/evil"

@@ -118,11 +118,17 @@ class Manifest:
         path = Path(path)
         if path.exists():
             try:
-                data = json.loads(path.read_text(encoding="utf-8"))
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                text = None  # undecodable content is corruption
+            # a transient OSError (e.g. sharing violation) propagates: never quarantine a possibly healthy manifest
+            if text is not None:
+                try:
+                    data = json.loads(text)
+                except ValueError:
+                    data = None
                 if isinstance(data, dict) and isinstance(data.get("stages"), dict):
                     return cls(path, data)
-            except (OSError, ValueError):
-                pass
             try:  # unreadable manifest: keep it for inspection, start fresh
                 os.replace(path, path.with_name(path.name + ".corrupt"))
             except OSError:

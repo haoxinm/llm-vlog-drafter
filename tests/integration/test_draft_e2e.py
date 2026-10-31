@@ -130,8 +130,7 @@ def test_approval_is_bound_to_plan_hash_and_planner_llm_is_rejected(tmp_path, me
 def test_full_draft_outputs(drafted, media):
     ws, res = drafted["ws"], drafted["res"]
     assert res.exit_code == 0, res.stage_status
-    assert res.stage_status == {s: "succeeded" for s in ("scan", "probe", "catalog", "thumbnails", "segment", "plan", "approval", "assemble", "preview", "qc", "handoff")} \
-        or all(v in ("succeeded", "partial") for v in res.stage_status.values())
+    assert res.stage_status == {s: "succeeded" for s in ("scan", "probe", "catalog", "thumbnails", "segment", "plan", "approval", "assemble", "preview", "qc", "handoff")}
     m = rj(ws / "manifest.json")
     assert m["approval"]["mode"] == "automatic" and m["planner"] == "baseline"
     assert m["filmcraft"]["version"] and (ws / m["filmcraft"]["capability_snapshot"]).is_file()

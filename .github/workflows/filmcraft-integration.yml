@@ -2,11 +2,15 @@ name: filmcraft-integration
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
 env:
   FILMCRAFT_COMMIT: 693c41be5a93241e7c502e24d09a946c8a06944e
+
+permissions:
+  contents: read
 
 jobs:
   integration:
