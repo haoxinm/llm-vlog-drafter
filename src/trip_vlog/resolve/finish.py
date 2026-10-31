@@ -269,11 +269,13 @@ STILLS_DIR_REL = f"resolve_handoff/{STILLS_DIR}"
 
 def stage_still(run: FinishRun, source: str) -> Path:
     """Copy a still to ``resolve_handoff/stills/<key>/<name>`` (shutil.copy2, never a link) and return the copy. The folder holds only
-    that file, so Resolve sees no numbered siblings. An existing copy of the same size is reused. The source is only read."""
+    that file, so Resolve sees no numbered siblings. An existing copy is reused only if size and mtime match the source (copy2 preserves mtime). The source is only read."""
     src = Path(source)
     dest = run.inp.handoff / STILLS_DIR / stills_key(source) / src.name
-    if dest.is_file() and dest.stat().st_size == src.stat().st_size:
-        return dest
+    if dest.is_file():
+        d, s_ = dest.stat(), src.stat()
+        if d.st_size == s_.st_size and d.st_mtime_ns == s_.st_mtime_ns:
+            return dest
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dest)
     return dest
@@ -388,6 +390,20 @@ def _find_item(dump: dict[str, Any], kind: str, tindex: int, name: str, start: i
     return None
 
 
+def _dump_video_track(tl: Any, tindex: int, tl_start: float) -> dict[str, Any]:
+    """Dump only video track ``tindex`` (dump_timeline-shaped, so _find_item works) instead of re-reading the whole timeline."""
+    errs: list[str] = []
+    items = safe_call(method(tl, "GetItemListInTrack"), "video", tindex, default=[], errors=errs,
+                      label=f"GetItemListInTrack(video,{tindex})") or []
+    rec = []
+    for i, it in enumerate(items):
+        r = dump_item(it, tl_start, errs)
+        r["index"] = i
+        rec.append(r)
+    rec.sort(key=lambda r: (r["start"] if r["start"] is not None else 0))
+    return {"tracks": [{"kind": "video", "index": tindex, "name": f"video {tindex}", "items": rec}], "errors": errs}
+
+
 def _set_title_text(item: Any, text: str, steps: list[str]) -> bool:
     count = safe_call(method(item, "GetFusionCompCount"))
     steps.append(f"GetFusionCompCount -> {count!r}")
@@ -469,13 +485,13 @@ def create_title(run: FinishRun, project: Any, mp: Any, tl: Any, index: int, tit
         appended = list(res) if isinstance(res, list) else []
         if not appended:
             raise RuntimeError("AppendToTimeline returned no timeline item")
-        found = _find_item(dump_timeline(tl), "video", tindex, rec["helper_timeline"], title.start_frame,
+        track = _dump_video_track(tl, tindex, tl_start)
+        found = _find_item(track, "video", tindex, rec["helper_timeline"], title.start_frame,
                            title.start_frame + title.duration_frames)
         steps.append(f"read-back V{tindex} {title.start_frame}-{title.start_frame + title.duration_frames}: "
                      f"{'found' if found else 'NOT found'}")
         if not found:
-            seen = [f"{it.get('name')} {it.get('start')}-{it.get('end')}" for t in dump_timeline(tl)["tracks"]
-                    if t["kind"] == "video" and t["index"] == tindex for it in t["items"]]
+            seen = [f"{it.get('name')} {it.get('start')}-{it.get('end')}" for t in track["tracks"] for it in t["items"]]
             raise RuntimeError(f"no item named '{rec['helper_timeline']}' at V{tindex} {title.start_frame}-"
                                f"{title.start_frame + title.duration_frames} after AppendToTimeline (V{tindex} holds: "
                                f"{'; '.join(seen) or 'nothing'})")
@@ -572,9 +588,11 @@ def render_markdown(rep: dict[str, Any]) -> str:
 
 
 def _record_manifest(root: Path, status: str, summary: dict[str, Any], error: str | None, started: str, project: str | None,
-                     timeline: str | None, resolve_info: dict[str, Any] | None) -> None:
+                     timeline: str | None, resolve_info: dict[str, Any] | None, keep_prior_success: bool = False) -> None:
     ws = Workspace(root)
     m = Manifest.load(ws.manifest_path)
+    if keep_prior_success and m.stage(STAGE).get("status") in ("succeeded", "partial"):
+        return  # nothing was attempted: keep the record of the earlier successful run
     m.stages[STAGE] = {"status": status, "decision": "ran", "started_at": started, "finished_at": utc_now_iso(),
                        "summary": summary, "error": error}
     runs = list((m.get(STAGE) or {}).get("runs") or [])
@@ -683,7 +701,7 @@ def _unavailable(inp: FinishInputs, report: dict[str, Any], diag: list[str], sta
                   summary="Resolve scripting unavailable; nothing was changed", api_calls=[], phases=[])
     _write_reports(inp, report)
     _record_manifest(inp.root, "failed", {"status": "manual_required"}, "Resolve scripting unavailable", report["started_at"],
-                     None, None, None)
+                     None, None, None, keep_prior_success=True)
     echo(f"Report: {inp.handoff / REPORT_JSON}")
     return FinishResult(EXIT_UNAVAILABLE, "manual_required", report)
 
@@ -707,6 +725,7 @@ def _execute(inp: FinishInputs, report: dict[str, Any], session: ApiSession, api
     markers: list[dict[str, Any]] = []
     titles: list[dict[str, Any]] = []
     status = "fail"
+    created = False
     try:
         # 1. project
         project = None
@@ -723,6 +742,7 @@ def _execute(inp: FinishInputs, report: dict[str, Any], session: ApiSession, api
         if project is None:
             run.phase("create project", "failed", f"CreateProject('{name}') returned None")
             raise RuntimeError("Resolve refused to create the project (name clash, or the open project could not be closed)")
+        created = True
         run.phase("create project", "ok", name)
         sets = {"timelineFrameRate": fps_setting(spec.fps), "timelineResolutionWidth": str(spec.width),
                 "timelineResolutionHeight": str(spec.height)}
@@ -824,7 +844,7 @@ def _execute(inp: FinishInputs, report: dict[str, Any], session: ApiSession, api
                      {"status": status, "project": report["project"]["name"], "timeline": tl_name, "repairs": len(repairs),
                       "markers_added": sum(1 for m in markers if m["result"] == "added"), "titles_created": len(titles) - len(failed_titles),
                       "titles_failed": len(failed_titles), "report": f"resolve_handoff/{REPORT_JSON}"},
-                     error, started, report["project"]["name"], tl_name, {k: report["resolve"].get(k) for k in ("product", "version")})
+                     error, started, report["project"]["name"] if created else None, tl_name, {k: report["resolve"].get(k) for k in ("product", "version")})
     echo("")
     echo(f"Result: {status.upper()}  ({summary})")
     for c in final_checks:

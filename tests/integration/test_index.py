@@ -250,3 +250,20 @@ def test_missing_ffprobe_degrades_gracefully(media_dir, workspace, monkeypatch, 
     assert res.exit_code == 0 and res.stage_status["probe"] == "partial"
     assert asset_by_path(workspace, "still_1080p.png")["probe_status"] == "ok"  # images use Pillow
     assert "ffprobe not found" in asset_by_path(workspace, "landscape_5s.mp4")["probe_error"]
+
+
+def test_deleted_thumbnails_are_rebuilt_on_rerun(media_dir, workspace):
+    index(media_dir, workspace)
+    shutil.rmtree(workspace / "media_index" / "thumbnails")
+    (workspace / "media_index" / "thumbnails").mkdir()
+    res = index(media_dir, workspace)
+    assert res.stage_status["thumbnails"] == "succeeded"
+    assert list((workspace / "media_index" / "thumbnails").glob("*.jpg"))
+
+
+def test_one_shot_overrides_are_not_persisted(media_dir, workspace):
+    import yaml
+    index(media_dir, workspace, overrides={"workflow.approval": "auto_approve", "filmcraft.executable": "/x/fc", "project.title": "T"})
+    saved = yaml.safe_load((workspace / "project.yaml").read_text(encoding="utf-8"))
+    assert saved["workflow"]["approval"] == "stop_after_outline"
+    assert saved["filmcraft"]["executable"] is None and saved["project"]["title"] == "T"

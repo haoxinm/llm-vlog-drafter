@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import json
 from fractions import Fraction
 from pathlib import Path
@@ -92,8 +93,16 @@ def test_resolve_verification_states(tmp_path):
     assert read_resolve_verification(p)[0] == "absent"
     p.write_text(json.dumps({"status": "manual_required"}), encoding="utf-8")
     assert read_resolve_verification(p)[0] == "not_passing"
-    p.write_text(json.dumps({"status": "pass", "resolve": {"product": "DaVinci Resolve", "version": "21.1"}}), encoding="utf-8")
+    tl = tmp_path / "timeline.otio"
+    tl.write_text("v1", encoding="utf-8")
+    doc = {"status": "pass", "resolve": {"product": "DaVinci Resolve", "version": "21.1"}, "inputs": [str(tl)],
+           "input_sha256": {str(tl): hashlib.sha256(b"v1").hexdigest()}}
+    p.write_text(json.dumps(doc), encoding="utf-8")
     assert read_resolve_verification(p)[0] == "passing"
+    tl.write_text("v2", encoding="utf-8")  # package re-exported after verification
+    assert read_resolve_verification(p)[0] == "stale"
+    p.write_text(json.dumps({"status": "pass"}), encoding="utf-8")  # no recorded inputs: cannot be tied to this package
+    assert read_resolve_verification(p)[0] == "stale"
     p.write_text("{nope", encoding="utf-8")
     assert read_resolve_verification(p)[0] == "unreadable"
 

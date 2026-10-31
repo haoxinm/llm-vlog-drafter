@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,8 +24,29 @@ STATIC_LIMITATIONS = (
 )
 
 
+def _inputs_match(doc: dict[str, Any], base: Path) -> bool:
+    """True when every input the script verified still exists and, where it recorded a sha256, is unchanged."""
+    inputs = doc.get("inputs")
+    if not isinstance(inputs, list) or not inputs:
+        return False
+    hashes = doc.get("input_sha256")
+    if not isinstance(hashes, dict) or not hashes:
+        return False  # report predates input hashing: cannot tie it to the current files
+    for raw in inputs:
+        p = Path(str(raw))
+        if not p.is_absolute():
+            p = base / p
+        want = hashes.get(str(raw))
+        try:
+            if not want or hashlib.sha256(p.read_bytes()).hexdigest() != want:
+                return False
+        except OSError:
+            return False
+    return True
+
+
 def read_resolve_verification(path: Path) -> tuple[str, str]:
-    """('absent' | 'passing' | 'not_passing' | 'unreadable', description) for resolve_verification.json."""
+    """('absent' | 'passing' | 'stale' | 'not_passing' | 'unreadable', description) for resolve_verification.json."""
     if not path.is_file():
         return "absent", ""
     try:
@@ -35,6 +57,8 @@ def read_resolve_verification(path: Path) -> tuple[str, str]:
     res = doc.get("resolve") or {}
     where = ", ".join(x for x in (f"{res.get('product', 'Resolve')} {res.get('version', '')}".strip(), (doc.get("os") or {}).get("system")
                                   if isinstance(doc.get("os"), dict) else None) if x)
+    if status == "pass" and not _inputs_match(doc, path.parent):
+        return "stale", "status 'pass' but the verified files changed (or their hashes were not recorded); re-run the verification script"
     if status == "pass":
         return "passing", f"status 'pass' ({where or 'Resolve version not recorded'}), written {doc.get('timestamp', 'at an unknown time')}"
     return "not_passing", f"status '{status or 'unknown'}' ({where or 'no Resolve session'})"
