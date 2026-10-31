@@ -144,7 +144,7 @@ The spike was run on Linux only. Re-verify on both target OSes (DESIGN 22.1).
 1. `trip-vlog --version`, `filmcraft-cli --version` (via `$FILMCRAFT_CLI`), `ffmpeg -version`, `ffprobe -version`.
 2. Unset `FILMCRAFT_CLI` and remove FilmCraft from `PATH`. Run `trip-vlog draft --media "$MEDIA" --output "$WS" --duration 30 --auto-approve` (without `--auto-approve` the run stops at the approval gate before FilmCraft is looked for). FilmCraft is found in a standard folder (`executable_source` `standard-location` in `filmcraft/capability_snapshot.json`) or the run fails with an error that lists the folders searched. Windows folders: `%ProgramFiles%\FilmCraft\`, `%ProgramW6432%`, `%ProgramFiles(x86)%`, `%LOCALAPPDATA%\FilmCraft\`, `%LOCALAPPDATA%\Programs\FilmCraft\`, `~\.local\bin`, `~\.cargo\bin`. macOS folders: `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, `~/.cargo/bin`, `/Applications/FilmCraft.app/Contents/MacOS/`, `~/Applications/FilmCraft.app/Contents/MacOS/`. Test one folder per OS.
 3. With ffmpeg/ffprobe off `PATH`, run `trip-vlog index --media "$MEDIA" --output "$WS"`. Only these extra folders are searched: macOS `/opt/homebrew/bin`, `/usr/local/bin`, `/opt/local/bin`; Windows `C:\ProgramData\chocolatey\bin`, `C:\ffmpeg\bin`, `C:\Program Files\ffmpeg\bin`. A folder outside these (for example a winget package folder) is expected to fail with "ffprobe not found". Then pass `--ffmpeg` / `--ffprobe` explicitly, and set `FFMPEG` / `FFPROBE`.
-**Pass:** each tool is found by the documented lookup order (`--flag`, env var, `PATH`, standard folders). `filmcraft/capability_snapshot.json` and `manifest.json` record the FilmCraft version. A nonexistent explicit `--filmcraft PATH` (or `$FILMCRAFT_CLI`) is an error, not a silent fallback. (For ffmpeg/ffprobe a bad explicit path does fall through to the next lookup step; record what you see.)
+**Pass:** each tool is found by the documented lookup order (`--flag`, env var, `PATH`, standard folders). Executable paths (`filmcraft.executable`, `media.ffprobe_path`, `media.ffmpeg_path`) are honoured from `--config`, `--set` or the environment, but ignored with a warning when they come only from the workspace's own `project.yaml` (which `resume` loads implicitly), unless `TRIP_VLOG_TRUST_WORKSPACE_CONFIG=1`; they are never written back to `project.yaml`. Likewise `workflow.approval` (`--auto-approve`) is a one-shot flag and is not saved: a later `resume` without it stops at the approval gate again. `filmcraft/capability_snapshot.json` and `manifest.json` record the FilmCraft version. A nonexistent explicit `--filmcraft PATH` (or `$FILMCRAFT_CLI`) is an error, not a silent fallback. (For ffmpeg/ffprobe a bad explicit path does fall through to the next lookup step; record what you see.)
 **Capture:** console output, `capability_snapshot.json`, the exact install paths.
 
 ### P0-02 Spike script on this OS
@@ -190,8 +190,8 @@ The spike was run on Linux only. Re-verify on both target OSes (DESIGN 22.1).
 **Steps:**
 1. macOS: `python3 tools/resolve_verify.py --spike-out $SCRATCH_DIR`. Windows: `python tools\resolve_verify.py --spike-out $SCRATCH_DIR`. If Resolve is installed in a non-default place, set `RESOLVE_SCRIPT_API` and `RESOLVE_SCRIPT_LIB` first.
 2. Read the console table and `resolve_verification.json` (written to `--output`; default the `--handoff` folder, else the current directory).
-**Pass:** the exit code is 0 only if some format passes every required check (import, fps, duration, clip_order, record_inout, source_in, media_online, image_sequence_misdetected). On 21.1.1.10 the still is expected to arrive offline as an image sequence, so `media_online` and `image_sequence_misdetected` fail for the FCP7 XML and the tool exits **1**; OTIO is rejected by `ImportTimelineFromFile`. Record that exit 1 as the expected baseline, not a failure. The test passes when, for the FCP7 XML, every required check **other than** those two still-related ones passes and nothing else fails. An exit 0 on 21.1.1.10 means your version fixed the still problem: record it as a finding. Exit 3 means scripting is unavailable: use the manual checklist (P0-05).
-**Capture:** `resolve_verification.json`, console table, Workspace > Console text if every import returned None, Resolve version, Python version.
+**Pass:** the exit code is 0 only if the primary shipped file passes every required check (import, fps, duration, clip_order, record_inout, source_in, media_online, image_sequence_misdetected). The primary is the recommended `otio[original]` file when it was shipped, else the first shipped format; adapter-rewritten OTIO variants and skipped formats never count, so a pass on one of those alone gives exit 1. `resolve_verification.json` records `primary_format` and `input_sha256` (a hash per verified input file); a verification whose inputs changed since is stale, not current. On 21.1.1.10 the still is expected to arrive offline as an image sequence, so `media_online` and `image_sequence_misdetected` fail for the FCP7 XML and the tool exits **1**; OTIO is rejected by `ImportTimelineFromFile`. Record that exit 1 as the expected baseline, not a failure. The test passes when, for the FCP7 XML, every required check **other than** those two still-related ones passes and nothing else fails. An exit 0 on 21.1.1.10 means your version fixed the still problem: record it as a finding. Exit 3 means scripting is unavailable: use the manual checklist (P0-05).
+**Capture:** `resolve_verification.json` (check `primary_format` and `input_sha256`), console table, Workspace > Console text if every import returned None, Resolve version, Python version.
 
 ### P0-07 OTIO import through the Resolve UI
 **Platforms:** both (Resolve)
@@ -334,7 +334,7 @@ The spike was run on Linux only. Re-verify on both target OSes (DESIGN 22.1).
 1. Set A includes `IMG_1042.JPG` with numbered siblings, so the P2-01 draft already contains it.
 2. macOS: `python3 tools/resolve_verify.py --handoff "$WSB/resolve_handoff"`. Windows: `python tools\resolve_verify.py --handoff "$WSB\resolve_handoff"`.
 3. `trip-vlog resume --output "$WSB"` afterwards to refresh the report.
-**Pass:** use the per-check table, not the exit code: for the FCP7 XML every required check passes except `media_online` and `image_sequence_misdetected` for the camera-style stills on 21.1.1.10 (documented), so the tool exits **1** there; exit 0 means your Resolve version handles the stills (record it). Any other failed required check is a failure. The refreshed `handoff_report.md` now reflects the verification.
+**Pass:** use the per-check table, not the exit code: for the FCP7 XML every required check passes except `media_online` and `image_sequence_misdetected` for the camera-style stills on 21.1.1.10 (documented), so the tool exits **1** there; exit 0 means your Resolve version handles the stills (record it). Any other failed required check is a failure. The overall verdict is about the primary shipped file only (see P0-06). The refreshed `handoff_report.md` now reflects the verification. Then re-export or rebuild the handoff so a file changes and run `resume`: the report must call the old `resolve_verification.json` stale (its `input_sha256` no longer matches) rather than present it as current.
 **Capture:** `resolve_handoff/resolve_verification.json`, console table, screenshots, Resolve version.
 
 ### P2-08 `status`, `index`, `approve` edge behaviour
@@ -390,7 +390,7 @@ Needs live endpoints. Sub-phases: 3a gateway, 3b vision labeling, 3c speech.
 **Purpose:** cost transparency and the first live vision labels.
 **Steps:**
 1. `trip-vlog analyze --output "$WS" --media "$MEDIA" --config "$CFG" --dry-run` (Set A).
-2. `trip-vlog analyze --output "$WS" --media "$MEDIA" --config "$CFG" --limit 3`.
+2. `trip-vlog analyze --output "$WS" --media "$MEDIA" --config "$CFG" --limit 3`. Then `trip-vlog resume --output "$WS"`: it restores the same `--limit 3` (and `--dry-run`, if the last run was one; recorded as `run_limit`/`run_dry_run` in `manifest.json`) and does not widen the run to every asset.
 3. `trip-vlog status --output "$WS"`.
 **Pass:** the dry run prints segments, frames, images, requests, endpoint and `remote`, and sends nothing. The live run labels the first 3 assets (sorted by path), exit 0; `status` shows token totals. Moments appear in `media_index/moments.jsonl`.
 **Capture:** standard capture, the dry-run numbers.
@@ -697,15 +697,15 @@ Needs live endpoints. Sub-phases: 3a gateway, 3b vision labeling, 3c speech.
 ### P5-11 Critic apply mode
 **Platforms:** both (new FilmCraft project)
 **Purpose:** localized fixes become a new plan version and project.
-**Steps:** back up the workspace. `trip-vlog critic --output "$WSL" --mode apply`. Compare `plans/revisions/critic_r01.md`, the new `filmcraft/..._v00N.fcproj`, `preview/draft.before_critic_r01.mp4` and the new preview. Check `manifest.json` `critic.rounds` and `approval.mode = critic_fix`.
+**Steps:** back up the workspace. Use a plan that was not approved by hand (an LLM draft approved as `derived_from_outline`, or `--auto-approve`); for a plan approved with `trip-vlog approve` see P5-12. `trip-vlog critic --output "$WSL" --mode apply`. Compare `plans/revisions/critic_r01.md`, the new `filmcraft/..._v00N.fcproj`, `preview/draft.before_critic_r01.mp4` and the new preview. Check `manifest.json` `critic.rounds` and `approval.mode = critic_fix`.
 **Pass:** only proposals of at least `major` severity that cite evidence about the clip/scene they change are applied (max 3); the earlier project is untouched; the diff matches what you see; QC is re-run (not reverted if worse; the report says so); a second run does not repeat the same fix.
 **Capture:** revision files, both previews, standard capture.
 
 ### P5-12 Critic with plan review, and crash recovery
 **Platforms:** both
 **Purpose:** `approve --critic` and rollback.
-**Steps:** with `--set workflow.plan_review=true` run `critic --mode apply`: expect exit 3 and `plans/revisions/critic_r01.md`. Run `trip-vlog approve --output "$WSL" --critic` then `resume`. Separately, press Ctrl-C during the rebuild of an apply round; run `resume`.
-**Pass:** nothing is applied until approved; the approval is bound to the new plan hash; after the interruption `critic.applying` is cleaned up by restoring the parent files (plans, QC, preview).
+**Steps:** run `critic --mode apply` on a plan you approved by hand with `trip-vlog approve` (baseline draft, or after editing the outline/plan): expect exit 3, the fixes written as `proposed` in `plans/revisions/critic_r01.md` and not applied. Repeat with `--set workflow.plan_review=true` on an automatically approved plan: same result. Run `trip-vlog approve --output "$WSL" --critic` then `resume`. Separately, press Ctrl-C during the rebuild of an apply round; run `resume`.
+**Pass:** a hand-approved plan (or `plan_review`) never gets critic fixes without `approve --critic`; a plan that needed no hand approval keeps automatic fixes; nothing is applied until approved; the approval is bound to the new plan hash; after the interruption `critic.applying` is cleaned up by restoring the parent files (plans, QC, preview).
 **Capture:** standard capture, `manifest.json`.
 
 ---
