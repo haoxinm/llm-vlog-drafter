@@ -5,11 +5,12 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import os
 import re
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal, Mapping
+from typing import Any, Callable, Literal, Mapping
 from urllib.parse import urlsplit
 
 import yaml
@@ -17,6 +18,9 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError,
 
 from trip_vlog.paths import check_portable_component, is_within
 
+# Settings that make trip-vlog spawn a binary; never taken from an implicitly loaded workspace project.yaml.
+EXECUTABLE_KEYS = ("filmcraft.executable", "media.ffprobe_path", "media.ffmpeg_path")
+TRUST_WORKSPACE_ENV = "TRIP_VLOG_TRUST_WORKSPACE_CONFIG"
 LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
 
@@ -626,7 +630,7 @@ class Config(_Model):
                     f"media.transcribe_speech ({str(alias).lower()}) conflicts with speech.enabled ({str(self.speech.enabled).lower()}); "
                     "media.transcribe_speech is deprecated: remove it and use speech.enabled only")
             self.speech.__dict__["enabled"] = alias
-            self.speech.__dict__["__pydantic_fields_set__"] = self.speech.model_fields_set | {"enabled"}
+            self.speech.model_fields_set.add("enabled")
             self.media.__dict__["transcribe_speech"] = None
         return self
 
@@ -734,8 +738,14 @@ def parse_config(raw: Mapping[str, Any] | None, overrides: Mapping[str, Any] | N
         raise ConfigError(_format_errors(e)) from None
 
 
-def load_config(path: Path | None, overrides: Mapping[str, Any] | None = None) -> Config:
-    """Load project.yaml (or defaults when path is None) and apply overrides."""
+def load_config(path: Path | None, overrides: Mapping[str, Any] | None = None, *, implicit: bool = False,
+                warn: Callable[[str], None] | None = None) -> Config:
+    """Load project.yaml (or defaults when path is None) and apply overrides.
+
+    implicit=True marks a file the user did not name (the workspace's own project.yaml): executable paths in it are
+    ignored with a warning unless TRIP_VLOG_TRUST_WORKSPACE_CONFIG=1, because a workspace received from someone else
+    could otherwise make `resume` launch an arbitrary binary. Pass them via --set or the config flag instead.
+    """
     raw: Any = {}
     if path is not None:
         try:
@@ -748,6 +758,14 @@ def load_config(path: Path | None, overrides: Mapping[str, Any] | None = None) -
             raise ConfigError(f"config file {path} is not valid YAML: {e}") from None
         if not isinstance(raw, dict):
             raise ConfigError(f"config file {path} must contain a mapping at top level")
+        if implicit and os.environ.get(TRUST_WORKSPACE_ENV) != "1":
+            for key in EXECUTABLE_KEYS:
+                sec, _, field = key.partition(".")
+                if isinstance(raw.get(sec), dict) and raw[sec].get(field) is not None:
+                    del raw[sec][field]
+                    if warn:
+                        warn(f"warning: ignoring {key} from workspace file {path}; pass it with --set {key}=... "
+                             f"(or set {TRUST_WORKSPACE_ENV}=1 to trust this workspace)")
     return parse_config(raw, overrides)
 
 

@@ -423,7 +423,7 @@ def _qc_outline_scene_ids(ctx: Any) -> list[str] | None:
 def _qc_inputs(ctx: Any) -> Any:
     audio = [(m.moment_id, (m.features or {}).get("audio")) for m in PlanningCatalog.from_catalog(ctx.catalog).moments.values()]
     return {"project": _project_sha(ctx), "preview": _file_sha(_preview_path(ctx)), "plan": plan_file_hash(_pp(ctx).edit_plan),
-            "qc": ctx.config.qc.model_dump(), "tol": [ctx.config.project.duration_tolerance_pct, ctx.config.project.duration_tolerance_seconds],
+            "qc": ctx.config.qc.model_dump(exclude={k for k in type(ctx.config.qc).model_fields if k.startswith("critic")}), "tol": [ctx.config.project.duration_tolerance_pct, ctx.config.project.duration_tolerance_seconds],
             **({"target": ctx.config.effective_target_seconds} if ctx.config.revision_overrides.get("target_duration_seconds") else {}),
             "ambient_db": ctx.config.filmcraft.ambient_low_gain_db, "ffmpeg": ctx.ffmpeg is not None,
             "evidence": stable_hash({"audio": sorted(audio, key=lambda x: x[0]),
@@ -565,14 +565,19 @@ def handoff_stage(ctx: Any) -> StageResult:
     finish_doc, finish_note = load_finish_report(out / COMPAT_FINISH)
     if finish_note:
         notes.append(finish_note)
-    compat = build_compatibility_report(CompatInputs(
-        plan=prep.plan, spec=eff, catalog=PlanningCatalog.from_catalog(ctx.catalog), capabilities=_capabilities(ctx),
-        xml_path=Path(xml_fmt.path) if xml_fmt else None, filmcraft_version=run.get("filmcraft_version"),
-        verified_after_reopen=run.get("verified_after_reopen"), mapping_warnings=[w.to_dict() for w in prep.mapping.warnings],
-        finish_report=finish_doc, tool_version=__version__))
-    atomic_write_json(out / COMPAT_JSON, compat)
-    atomic_write_text(out / COMPAT_MD, render_compatibility_markdown(compat))
-    compat_summary = summary_of(compat)
+    compat_summary = None
+    try:
+        compat = build_compatibility_report(CompatInputs(
+            plan=prep.plan, spec=eff, catalog=PlanningCatalog.from_catalog(ctx.catalog), capabilities=_capabilities(ctx),
+            xml_path=Path(xml_fmt.path) if xml_fmt else None, filmcraft_version=run.get("filmcraft_version"),
+            verified_after_reopen=run.get("verified_after_reopen"), mapping_warnings=[w.to_dict() for w in prep.mapping.warnings],
+            finish_report=finish_doc, tool_version=__version__))
+        atomic_write_json(out / COMPAT_JSON, compat)
+        atomic_write_text(out / COMPAT_MD, render_compatibility_markdown(compat))
+        compat_summary = summary_of(compat)
+    except Exception as e:  # noqa: BLE001 - the advisory report must not cost the export results
+        notes.append(f"compatibility report failed: {type(e).__name__}: {e}")
+        compat_summary = None
     text = render_handoff_report(HandoffReportInputs(
         title=prep.plan.project.title, filmcraft_version=run.get("filmcraft_version"), tool_version=__version__,
         platform=f"{ctx.manifest.get('platform', {}).get('system', '?')} {ctx.manifest.get('platform', {}).get('machine', '')}".strip(),
@@ -583,7 +588,7 @@ def handoff_stage(ctx: Any) -> StageResult:
     atomic_write_text(out / "handoff_report.md", text)
     atomic_write_json(out / "handoff_summary.json", {**export.to_dict(), "missing_media": missing, "generated_at": utc_now_iso(),
                                                       "compatibility": compat_summary})
-    ok = export.report is not None and export.report.ok and not missing and compat_summary["xml_roundtrip_ok"] is not False
+    ok = export.report is not None and export.report.ok and not missing and compat_summary is not None and compat_summary["xml_roundtrip_ok"] is not False
     summary = {"formats": export.exported_files and [Path(f).name for f in export.exported_files], "files": sorted(p.name for p in out.iterdir()),
                "missing_media": len(missing), "export_error": export.error, "otio_reload": (export.otio_reload or {}).get("status"),
                "compatibility": compat_summary, "compatibility_report": _rel(ctx, out / COMPAT_JSON)}

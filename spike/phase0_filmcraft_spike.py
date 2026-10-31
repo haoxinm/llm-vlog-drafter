@@ -541,12 +541,16 @@ REQUIRED_COMMANDS = {
 }
 
 
+OUT_MARKER = ".phase0_spike_out"
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--filmcraft-cli", default=os.environ.get("FILMCRAFT_CLI"), help="path to built filmcraft-cli (or $FILMCRAFT_CLI)")
     ap.add_argument("--filmcraft-src", default=os.environ.get("FILMCRAFT_SRC"), help="FilmCraft git checkout (for commit/describe)")
     ap.add_argument("--fixtures", default=str(REPO / "tests/fixtures/generated"))
     ap.add_argument("--out", default=str(REPO / "spike/out"))
+    ap.add_argument("--force", action="store_true", help="allow deleting an existing non-empty --out directory that this spike did not create")
     args = ap.parse_args(argv)
     args.filmcraft_cli = find_filmcraft_cli(args.filmcraft_cli)
     if not args.filmcraft_cli:
@@ -559,8 +563,18 @@ def main(argv=None) -> int:
     binary = args.filmcraft_cli
     out = Path(args.out).resolve()
     if out.exists():
-        shutil.rmtree(out)
+        # never wipe an arbitrary directory (e.g. --out ~ or --out .): only an empty dir, the default, a dir this spike marked, or --force
+        is_default = out == (REPO / "spike/out").resolve()
+        if out.is_dir() and any(out.iterdir()) and not (is_default or (out / OUT_MARKER).is_file() or args.force):
+            print(f"error: refusing to delete non-empty {out} (not created by this spike); pass --force to override", file=sys.stderr)
+            return 2
+        if out.is_dir():
+            shutil.rmtree(out)
+        else:
+            print(f"error: --out {out} exists and is not a directory", file=sys.stderr)
+            return 2
     out.mkdir(parents=True)
+    (out / OUT_MARKER).write_text("created by spike/phase0_filmcraft_spike.py; safe to delete\n", encoding="utf-8")
     fx = Path(args.fixtures).resolve()
     if not (fx / "landscape_5s.mp4").exists():
         run([sys.executable, REPO / "tests/fixtures/make_fixtures.py", fx])

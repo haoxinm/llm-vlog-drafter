@@ -23,9 +23,9 @@ def rj(p):
 
 @pytest.fixture
 def setup(tmp_path, monkeypatch):
-    def make(qc=None, workflow=None, transport=None, **kw):
+    def make(qc=None, workflow=None, transport=None, approval_mode="automatic", **kw):
         cfg = critic_config(qc, workflow, **kw)
-        ctx, sel, plan = make_draft_ctx(tmp_path, monkeypatch, cfg)
+        ctx, sel, plan = make_draft_ctx(tmp_path, monkeypatch, cfg, approval_mode=approval_mode)
         t = transport or CriticTransport()
         monkeypatch.setattr(cs, "gateway_factory", lambda c: gateway_for(c.config, c.workspace.root, t))
         return ctx, plan, t
@@ -161,7 +161,7 @@ def test_a_hand_edited_plan_is_reviewed_but_no_change_is_proposed_for_it(setup):
 
 # ---- caching ----------------------------------------------------------------------------------------------------
 
-def test_cache_key_covers_plan_qc_sheets_prompt_model_and_limits_and_nothing_else(setup, monkeypatch):
+def test_cache_key_covers_plan_qc_sheets_prompt_model_and_limits(setup, monkeypatch):
     ctx, plan, t = setup()
     k0 = cs.critic_inputs(ctx)
     assert cs.critic_inputs(ctx) == k0 and k0["prompt"]["system"]["version"] == 2 and k0["prompt"]["response_schema"] == "1" and k0["llm"]["model"] == "test-model"
@@ -179,7 +179,7 @@ def test_cache_key_covers_plan_qc_sheets_prompt_model_and_limits_and_nothing_els
     assert changed({"qc": {"critic": "apply"}}) and changed({"qc": {"critic_max_ops_per_round": 2}}) and changed({"qc": {"critic_images": False}})
     assert changed({"llm": {"endpoints": {"main": {"api": "anthropic_messages", "model": "other-model"}}}})
     assert changed({"llm": {"endpoints": {"main": {"api": "anthropic_messages", "model": "test-model", "params": {"temperature": 0.1}}}}})
-    assert not changed({"qc": {"critic_max_rounds": 1}})
+    assert changed({"qc": {"critic_max_rounds": 2}})      # a non-default limit is part of the key
 
 
 def test_unchanged_inputs_make_no_request_and_no_new_report(setup):
@@ -245,7 +245,7 @@ def test_apply_writes_a_new_plan_version_revision_approval_and_rebuilds_in_order
     ap = ctx.manifest.get("approval")
     snap = root / "qc" / "critic_report.r01.json"
     assert ap["status"] == "approved" and ap["mode"] == "critic_fix" and ap["plan_hash"] == new.plan_hash and ap["parent_plan_hash"] == plan.plan_hash
-    assert ap["revision"] == "plans/revisions/critic_r01.json" and ap["critic_report"] == "qc/critic_report.r01.json" and ap["parent_approval"]["mode"] == "manual"
+    assert ap["revision"] == "plans/revisions/critic_r01.json" and ap["critic_report"] == "qc/critic_report.r01.json" and ap["parent_approval"]["mode"] == "automatic"
     import hashlib
     assert ap["critic_report_sha256"] == hashlib.sha256(snap.read_bytes()).hexdigest() and rj(snap)["plan_hash"] == plan.plan_hash
     # rebuild in order, on the new plan, then a second review of the final version
@@ -302,7 +302,7 @@ def test_apply_with_nothing_valid_changes_nothing(setup, monkeypatch):
     rebuild = stub_rebuild(monkeypatch)
     before = plan_files(ctx)
     res = cs.critic_stage(ctx)
-    assert res.status == Status.SUCCEEDED and rebuild == [] and plan_files(ctx) == before and ctx.manifest.get("approval")["mode"] == "manual"
+    assert res.status == Status.SUCCEEDED and rebuild == [] and plan_files(ctx) == before and ctx.manifest.get("approval")["mode"] == "automatic"
     assert rj(ctx.workspace.root / "qc" / "critic_report.json")["findings"][0]["change"]["status"] == "invalid"
 
 
@@ -314,7 +314,7 @@ def test_a_failed_rebuild_puts_the_previous_plan_back_and_keeps_the_proposed_one
     summary_before = (ctx.workspace.root / "plans" / "plan_summary.md").read_bytes() if (ctx.workspace.root / "plans" / "plan_summary.md").exists() else None
     res = cs.critic_stage(ctx)
     assert res.status == Status.PARTIAL and "FilmCraft exploded" in res.error
-    assert plan_files(ctx) == before and ctx.manifest.get("approval")["mode"] == "manual" and ctx.manifest.get("approval")["plan_hash"] == plan.plan_hash
+    assert plan_files(ctx) == before and ctx.manifest.get("approval")["mode"] == "automatic" and ctx.manifest.get("approval")["plan_hash"] == plan.plan_hash
     root = ctx.workspace.root
     rev = rj(root / "plans" / "revisions" / "critic_r01.json")
     assert rev["status"] == "failed" and "put back" in rev["note"] and (root / "plans" / "revisions" / "critic_r01.edit_plan.json").is_file()
@@ -342,7 +342,7 @@ def test_plan_review_stops_for_approval_then_applies_exactly_the_approved_revisi
     assert pend["status"] == "pending" and pend["parent_plan_hash"] == plan.plan_hash and pend["revision"] == "plans/revisions/critic_r01.json"
     rev = rj(root / pend["revision"])
     assert rev["status"] == "proposed" and rev["authorization"] is None and len(rev["ops_applied"]) == 2
-    assert res.summary["revision"] == pend["revision"] and ctx.manifest.get("approval")["mode"] == "manual"
+    assert res.summary["revision"] == pend["revision"] and ctx.manifest.get("approval")["mode"] == "automatic"
     assert rj(root / "qc" / "critic_report.json")["findings"][0]["change"]["status"] == "pending"
     # asking again changes nothing (same revision number, no new request: the response cache answers)
     assert cs.critic_stage(ctx).status == Status.AWAITING_APPROVAL and len(t.calls) == 1 and ctx.manifest.get("critic")["pending"]["number"] == 1
@@ -378,3 +378,41 @@ def test_approving_a_critic_revision_is_refused_without_one_or_after_the_plan_ch
     atomic_write_json(p, with_hash(EditPlan.model_validate(doc)).model_dump(mode="json"))
     with pytest.raises(ApprovalRefused, match="changed since the critic revision was proposed"):
         approve_critic(root)
+
+
+def test_a_plan_the_person_approved_by_hand_is_not_rewritten_without_approve_critic(setup, monkeypatch):
+    """qc.critic: apply with plan_review false: a baseline-planner plan approved with `trip-vlog approve` (mode manual) still needs `approve --critic`."""
+    calls = {"n": 0}
+
+    def respond(call):
+        calls["n"] += 1
+        return proposals(call) if calls["n"] == 1 else {"summary": "Better.", "findings": []}
+    ctx, plan, t = setup(qc={"critic": "apply"}, transport=CriticTransport(respond), approval_mode="manual")
+    rebuild = stub_rebuild(monkeypatch)
+    before = plan_files(ctx)
+    res = cs.critic_stage(ctx)
+    assert res.status == Status.AWAITING_APPROVAL and rebuild == [] and plan_files(ctx) == before
+    assert ctx.manifest.get("approval")["mode"] == "manual" and ctx.manifest.get("critic")["pending"]["status"] == "pending"
+    (ctx.workspace.root / "project.yaml").write_text(ctx.config.to_yaml(), encoding="utf-8")
+    ctx.manifest.save()
+    approve_critic(ctx.workspace.root)
+    ctx.manifest.data = Manifest.load(ctx.manifest.path).data
+    res = cs.critic_stage(ctx)
+    assert res.status == Status.SUCCEEDED and plan_files(ctx) != before and ctx.manifest.get("approval")["mode"] == "critic_fix"
+    assert ctx.manifest.get("approval")["authorization"] == "manual"
+
+
+def test_a_derived_or_automatic_approval_keeps_automatic_fixes(setup, monkeypatch):
+    for mode in ("automatic", "derived_from_outline"):
+        ctx, plan, t = setup(qc={"critic": "apply"}, transport=CriticTransport(proposals), approval_mode=mode)
+        stub_rebuild(monkeypatch)
+        assert not cs._needs_manual_review(ctx)
+
+
+def test_toggling_the_critic_does_not_change_the_qc_stage_input(setup):
+    ctx, plan, t = setup()
+    k0 = ds._qc_inputs(ctx)
+    ctx.config.qc.critic, ctx.config.qc.critic_max_rounds = "apply", 3
+    assert ds._qc_inputs(ctx) == k0
+    ctx.config.qc.min_still_seconds += 1
+    assert ds._qc_inputs(ctx) != k0

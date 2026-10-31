@@ -316,11 +316,25 @@ def test_connection_errors_retry_then_raise(img):
         gw(endpoint_config("openai_chat"), t, sleep=lambda s: None).complete(make_request([img]))
 
 
-def test_timeout_is_typed_and_not_retried(img):
-    t = FakeTransport(TransportTimeout("t"), chat_reply())
+def test_timeout_is_typed_after_retries_are_exhausted(img):
+    t = FakeTransport(*[TransportTimeout("t")] * 3, chat_reply())
     with pytest.raises(LLMTimeoutError, match="timeout_seconds"):
-        gw(endpoint_config("openai_chat", timeout_seconds=5), t).complete(make_request([img]))
-    assert len(t.requests) == 1 and t.requests[0].timeout == 5
+        gw(endpoint_config("openai_chat", timeout_seconds=5), t, sleep=lambda s: None).complete(make_request([img]))
+    assert len(t.requests) == 3 and t.requests[0].timeout == 5
+
+
+def test_timeout_is_retried_then_succeeds(img):
+    t = FakeTransport(TransportTimeout("t"), chat_reply())
+    gw(endpoint_config("openai_chat"), t, sleep=lambda s: None).complete(make_request([img]))
+    assert len(t.requests) == 2
+
+
+def test_404_message_does_not_leak_url_query(img):
+    t = FakeTransport(http_json({"error": {"message": "nope"}}, 404))
+    cfg = endpoint_config("openai_chat", base_url="http://localhost:1234/v1?key=SECRETKEY123")
+    with pytest.raises(LLMNotFoundError) as ei:
+        gw(cfg, t).complete(make_request([img]))
+    assert "SECRETKEY123" not in str(ei.value) and "localhost:1234/v1" in str(ei.value)
 
 
 @pytest.mark.parametrize("status,expected", [(400, LLMBadRequestError), (422, LLMBadRequestError), (401, LLMAuthError),

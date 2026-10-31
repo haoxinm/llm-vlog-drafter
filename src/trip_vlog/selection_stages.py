@@ -38,6 +38,15 @@ class SelectionPrerequisite(RuntimeError):
 def build_context(ctx: Any) -> tuple[sl.SelectionContext, str]:
     """Selection context from the workspace: the outline file as it is now (re-validated, never rewritten) and the catalog."""
     cfg = ctx.config
+    # built once per run (the catalog and config do not change within a run); the key re-builds it if the outline file is edited meanwhile
+    try:
+        st = outline_stages.outline_paths(ctx).outline.stat()
+        key: Any = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = None
+    cached = ctx.data.get("selection_context")
+    if key is not None and cached and cached[0] == key:
+        return cached[1]
     outline, report, oc = outline_stages.check_outline_file(ctx)
     if outline is None or not report.ok:
         raise SelectionPrerequisite("the story outline is missing or not valid (edit plans/story_outline.json, then `trip-vlog resume`):\n" + report.format())
@@ -48,6 +57,8 @@ def build_context(ctx: Any) -> tuple[sl.SelectionContext, str]:
         config=cfg, outline=outline, oc=oc, view=PlanningCatalog.from_catalog(ctx.catalog), vset=vset, pset=PlanSettings.from_config(cfg),
         tset=TitleSettings.from_config(cfg), capabilities=capability_lines(cfg, read_snapshot(ctx.workspace.root)), budgets=budgets, budget_note=note,
         min_still_seconds=float(cfg.qc.min_still_seconds))
+    if key is not None:
+        ctx.data["selection_context"] = (key, (sctx, h))
     return sctx, h
 
 

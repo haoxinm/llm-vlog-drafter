@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from trip_vlog import __version__
-from trip_vlog.config import Config, ConfigError, ResolvedPaths, load_config, resolve_paths
+from trip_vlog.config import EXECUTABLE_KEYS, Config, ConfigError, ResolvedPaths, load_config, resolve_paths
 from trip_vlog.logging_utils import RunLogger, Status, new_run_id, utc_now_iso
 from trip_vlog.media import thumbnails as thumbs
 from trip_vlog.media.catalog import Catalog
@@ -150,7 +150,7 @@ def catalog_stage(ctx: RunContext) -> StageResult:
         counts[kind] += 1
         if kind == "changed":
             ctx.logger.event("catalog", Status.SUCCEEDED, asset_id=f.asset_id, message="content_version changed; analysis marked stale")
-    gone = ctx.catalog.mark_missing(f.asset_id for f in scan.files)
+    gone = ctx.catalog.mark_missing((f.asset_id for f in scan.files), [s.rel_path for s in scan.skipped if s.reason == "unreadable"])
     dups, moves, stale = ctx.catalog.probable_duplicates(), ctx.catalog.probable_moves(), ctx.catalog.stale_assets()
     n = ctx.catalog.export_assets_jsonl(ctx.workspace.assets_jsonl, ctx.config.media.export_gps)
     report = {"generated_at": utc_now_iso(), "scan": scan.to_report(), "probable_duplicates": dups,
@@ -172,6 +172,16 @@ def _thumb_inputs(ctx: RunContext) -> Any:
     return {"assets": [(r["asset_id"], r["content_version"], r["probe_status"]) for r in rows],
             "settings": _thumb_settings(ctx).key(), "frames": ctx.config.media.contact_sheet_frames,
             "ffmpeg": ctx.ffmpeg_version}
+
+
+def _thumbnails_verify(ctx: RunContext) -> bool:
+    """Cache hit only while every recorded thumbnail/contact sheet file still exists."""
+    for row in ctx.catalog.list_assets():
+        for col in ("thumbnail_path", "contact_sheet_path"):
+            rel = row[col] if col in row.keys() else None
+            if rel and not (ctx.workspace.root / rel).is_file():
+                return False
+    return True
 
 
 def thumbnails_stage(ctx: RunContext) -> StageResult:
@@ -244,7 +254,7 @@ def build_index_runner(ctx: RunContext) -> StageRunner:
     runner.register("scan", scan_stage, always_run=True)
     runner.register("probe", probe_stage, deps=("scan",), inputs=_probe_inputs)
     runner.register("catalog", catalog_stage, deps=("probe",), always_run=True)
-    runner.register("thumbnails", thumbnails_stage, deps=("catalog",), inputs=_thumb_inputs)
+    runner.register("thumbnails", thumbnails_stage, deps=("catalog",), inputs=_thumb_inputs, verify=_thumbnails_verify)
     return runner
 
 
@@ -316,6 +326,9 @@ left out of `assets.jsonl` unless `media.export_gps: true`. Do not share this fo
 
 Commands: `trip-vlog status --output <this folder>`, `trip-vlog approve --output <this folder>` and `trip-vlog resume --output <this folder>`.
 """
+
+
+NON_PERSISTENT_OVERRIDES = frozenset({"workflow.approval", *EXECUTABLE_KEYS})
 
 
 def _cfg_overrides_summary(overrides: Mapping[str, Any]) -> dict[str, Any]:
@@ -441,7 +454,11 @@ def _execute(media: Path | str | None, output: Path | str, config_path: Path | s
     ws = Workspace(Path(output).expanduser().resolve())
     overrides = dict(overrides or {})
     cfg_file: Path | None = Path(config_path) if config_path else (ws.project_yaml if ws.project_yaml.exists() else None)
-    config = load_config(cfg_file, overrides)
+    implicit = not config_path and cfg_file is not None
+    config = load_config(cfg_file, overrides, implicit=implicit, warn=echo)
+    # project.yaml records the user's file config plus durable overrides; one-shot flags (approval mode, executables)
+    # must not leak into later runs.
+    saved = load_config(cfg_file, {k: v for k, v in overrides.items() if k not in NON_PERSISTENT_OVERRIDES}, implicit=implicit)
     manifest = Manifest.load(ws.manifest_path)
     from trip_vlog.revision_common import apply_manifest_overrides
 
@@ -462,7 +479,7 @@ def _execute(media: Path | str | None, output: Path | str, config_path: Path | s
     ffprobe, ffmpeg = find_ffprobe(config.media.ffprobe_path), find_ffmpeg(config.media.ffmpeg_path)
     ffprobe_ver, ffmpeg_ver = tool_version(ffprobe), tool_version(ffmpeg)
     if persist_config:   # `critic --mode ...` is a one-off: it must not change what the next `resume` does
-        atomic_write_text(ws.project_yaml, config.to_yaml())
+        atomic_write_text(ws.project_yaml, saved.to_yaml())
         manifest.set(config_hash=config.config_hash())
     manifest.set(
         tool_version=__version__, platform=platform_info(),
@@ -479,6 +496,9 @@ def _execute(media: Path | str | None, output: Path | str, config_path: Path | s
         manifest.set(pipeline="transcribe")
     elif pipeline == "outline" and manifest.get("pipeline") != "draft":
         manifest.set(pipeline="outline")
+    if pipeline in ("analyze", "transcribe") and manifest.get("pipeline") == pipeline:
+        # remembered so `resume` never silently widens a limited/dry run
+        manifest.set(run_limit=analyze_limit, run_dry_run=bool(dry_run))
     manifest.save()
     atomic_write_text(ws.readme, WORKSPACE_README.format(version=__version__))
     logger.event("run", Status.RUNNING, command=command, tool_version=__version__)
@@ -558,7 +578,7 @@ def approve_plan(output: Path | str) -> dict[str, Any]:
     manifest = Manifest.load(ws.manifest_path)
     if manifest.stage("plan").get("status") != "succeeded" and manifest.stage("plan").get("decision") != "cache_hit":
         raise ApprovalRefused("there is no successful plan yet; run `trip-vlog draft` (or `resume`) first")
-    config = load_config(ws.project_yaml)
+    config = load_config(ws.project_yaml, implicit=True)
     from trip_vlog.revision_common import apply_manifest_overrides
 
     apply_manifest_overrides(config, manifest)
@@ -602,7 +622,7 @@ def approve_outline(output: Path | str) -> dict[str, Any]:
 
 
 def approve_critic(output: Path | str) -> dict[str, Any]:
-    """Approve the critic revision that waits for it (`workflow.plan_review: true` with `qc.critic: apply`). The approval is bound to the revision
+    """Approve the critic revision that waits for it (`qc.critic: apply` with `workflow.plan_review: true`, or on a plan approved by hand). The approval is bound to the revision
     (its operations and the plan they start from); the next `resume` applies exactly that revision. Refused when the plan changed since."""
     from trip_vlog.draft_stages import plan_file_hash
 
@@ -614,7 +634,7 @@ def approve_critic(output: Path | str) -> dict[str, Any]:
     pend = dict(st.get("pending") or {})
     if pend.get("status") not in ("pending", "approved"):
         raise ApprovalRefused("no critic revision is waiting for approval; one is proposed by `trip-vlog critic --mode apply` "
-                              "(or a draft with qc.critic: apply) when workflow.plan_review is true")
+                              "(or a draft with qc.critic: apply) when workflow.plan_review is true or the plan was approved by hand")
     config = load_config(ws.project_yaml)
     paths = resolve_paths(config, manifest.get("media_root") or ws.root.parent, ws.root)
     try:
