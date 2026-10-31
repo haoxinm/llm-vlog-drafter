@@ -262,14 +262,14 @@ def reseal(output: Path | str, what: tuple[str, ...] | None = None) -> list[Seal
                 continue
             if wanted is None and not exists():
                 continue            # nothing to seal: not an error unless the person asked for it by name
-            results.append((_seal_outline if kind == "outline" else _seal_plan)(ctx, ws.root))
+            r = (_seal_outline if kind == "outline" else _seal_plan)(ctx, ws.root)
+            results.append(r)
+            if r.outcome == "sealed":       # persist each seal right away: a later seal that raises must not lose this one's md_hash / approval invalidation
+                manifest.set(reseal=[*(manifest.get("reseal") or []), {"at": utc_now_iso(), "what": r.what, "previous_hash": r.previous_hash, "hash": r.new_hash,
+                                                                      "backup": r.backup, "repairs": len(r.repairs), "approval": r.approval}])
+                manifest.save()
         if not results:
             raise ConfigError(f"{ws.root} has neither plans/story_outline.json nor plans/edit_plan.json; nothing to re-seal")
-        sealed = [r for r in results if r.outcome == "sealed"]
-        if sealed:
-            manifest.set(reseal=[*(manifest.get("reseal") or []), *({"at": utc_now_iso(), "what": r.what, "previous_hash": r.previous_hash, "hash": r.new_hash,
-                                                                   "backup": r.backup, "repairs": len(r.repairs), "approval": r.approval} for r in sealed)])
-            manifest.save()
         for r in results:
             logger.event("reseal", Status.SUCCEEDED if r.ok else Status.FAILED, what=r.what, outcome=r.outcome, previous_hash=r.previous_hash, hash=r.new_hash)
     return results

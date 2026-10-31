@@ -212,3 +212,21 @@ def test_a_framing_mismatch_is_a_verification_warning_not_a_failure():
     rep = VerificationReport()
     rep.warnings.append(Mismatch("framing", "p1", 56.25, 100.0, "p1: scale 100.0 read back"))
     assert rep.ok and rep.to_dict()["warnings"][0]["kind"] == "framing"
+
+
+def test_music_ducking_check_caps_the_measured_spans(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from trip_vlog.qc import ducking as D
+
+    calls = []
+    monkeypatch.setattr(D, "mean_level_db", lambda *a, **k: calls.append(a) or -20.0)
+    bed = tmp_path / "bed.wav"
+    bed.write_bytes(b"x")
+    plan = SimpleNamespace(sequence=SimpleNamespace(fps="30"), scenes=[SimpleNamespace(clips=[SimpleNamespace(
+        clip_instance_id="m", timeline_start_frame=0, duration_frames=30 * 2000, source_in_seconds=0.0)])])
+    wins = [D.DuckWindow(i * 600 + 100, i * 600 + 400, "speech", ("land",)) for i in range(100)]
+    duck = D.DuckPlan(wins, {"m": (D.GainKey(0, 0.0),)}, settings=D.DuckSettings(True, -12.0, 0.2, 1.0, "speech"))
+    res = D.check_music_ducking(plan, duck, bed, {"m": "src.wav"}, "ffmpeg")
+    assert len(calls) == 2 * D.MAX_MEASURED_SPANS
+    assert res.data["spans_skipped"] > 0 and "not measured" in res.detail
