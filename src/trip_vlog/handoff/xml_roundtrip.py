@@ -12,12 +12,13 @@ Pure functions over plain data: no FilmCraft, no Resolve, no filesystem access.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import unicodedata
 from fractions import Fraction
 from typing import Any
 
 from trip_vlog.filmcraft.timeline_spec import TimelineSpec, fit_scale_percent
 from trip_vlog.handoff.fcp7_xml import Fcp7Timeline, XmlClip
-from trip_vlog.resolve.paths import paths_equal
+from trip_vlog.resolve.paths import normalize_path, paths_equal
 
 GAIN_TOLERANCE_DB = 0.25
 SCALE_TOLERANCE = 0.5
@@ -193,6 +194,11 @@ def _near_source(actual: Fraction | int | None, e_int: int | None, e_exact: Frac
     return abs(Fraction(actual) - exact) <= slack + Fraction(tol).limit_denominator(1000)
 
 
+def _path_key(p: Any) -> str:
+    """Case-folded normalised path: a superset key for ``paths_equal`` (equal paths always share it), so candidates can be indexed."""
+    return unicodedata.normalize("NFC", normalize_path(p, None, windows=False)).lower()
+
+
 def _identity_ok(e: ExpectedClip, x: XmlClip, fold_case: bool | None) -> bool:
     if e.is_title:
         return x.is_generator and (x.name == e.text or x.text == e.text)
@@ -235,8 +241,16 @@ def compare_timeline_xml(xml: Fcp7Timeline, exp: ExpectedTimeline, *, tolerance_
     used: set[int] = set()
     for (kind, trk), items in sorted(groups.items()):
         xs = xml.track_clips(kind, trk)
+        by_path: dict[str, list[tuple[int, XmlClip]]] = {}
+        generators: list[tuple[int, XmlClip]] = []
+        for i, x in enumerate(xs):   # normalise each XML path once instead of once per expected clip
+            if x.is_generator:
+                generators.append((i, x))
+            elif x.path is not None:
+                by_path.setdefault(_path_key(x.path), []).append((i, x))
         for e in sorted(items, key=lambda c: (c.start, c.clip_instance_id)):
-            cands = [(i, x) for i, x in enumerate(xs) if id(x) not in used and x.enabled and _identity_ok(e, x, fold_case)]
+            pool = generators if e.is_title else (by_path.get(_path_key(e.path), []) if e.path is not None else [])
+            cands = [(i, x) for i, x in pool if id(x) not in used and x.enabled and _identity_ok(e, x, fold_case)]
             # An exact path match wins over one that only matches after case folding (A.mov vs a.mov on macOS).
             exact = [c for c in cands if e.is_title or _identity_ok(e, c[1], False)]
             cands = exact or cands

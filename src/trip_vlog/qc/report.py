@@ -131,21 +131,27 @@ def run_qc(i: QcInputs) -> dict[str, Any]:
                  for s in plan.scenes for c in s.clips if c.track_role == "primary_video"]
         dissolves = {c.clip_instance_id: c.transition_in.duration_frames for sc in plan.scenes for c in sc.clips
                      if c.track_role == "primary_video" and c.transition_in.type == "dissolve"}
-        tiles = plan_tiles(clips, fps, frames, offset_seconds=q.cut_sample_offset_seconds, max_per_sheet=q.contact_sheet_max_frames,
-                           max_sheets=q.contact_sheet_max_sheets, transition_frames=dissolves)
-        res = build_preview_sheets(i.ffmpeg, i.preview, i.contact_sheet, tiles, fps, columns=q.contact_sheet_columns,
-                                   tile_width=q.contact_sheet_tile_width, max_per_sheet=q.contact_sheet_max_frames,
-                                   offset_seconds=q.cut_sample_offset_seconds, duration_frames=frames, plan_hash=plan.plan_hash, rel=rel)
-        res.index.generated_at = utc_now_iso()
-        if i.index_path is not None:
-            atomic_write_json(i.index_path, res.index.to_dict())
-        sheet = {"path": res.written[0].name if res.written else None, "frames": res.frames, "failed_frames": res.failed,
-                 "error": res.index.error, "sheets": [s.path for s in res.index.sheets if s.path],
-                 "index": rel(i.index_path) if i.index_path is not None else None,
-                 "cuts_total": res.index.cuts_total, "cuts_sampled": res.index.cuts_sampled}
-        if res.index.error or res.failed:
-            results.append(C.CheckResult("contact_sheet", C.WARN, res.index.error or f"{len(res.failed)} frame(s) could not be extracted",
-                                         {"failed": res.failed[:10]}))
+        try:
+            tiles = plan_tiles(clips, fps, frames, offset_seconds=q.cut_sample_offset_seconds, max_per_sheet=q.contact_sheet_max_frames,
+                               max_sheets=q.contact_sheet_max_sheets, transition_frames=dissolves)
+            res = build_preview_sheets(i.ffmpeg, i.preview, i.contact_sheet, tiles, fps, columns=q.contact_sheet_columns,
+                                       tile_width=q.contact_sheet_tile_width, max_per_sheet=q.contact_sheet_max_frames,
+                                       offset_seconds=q.cut_sample_offset_seconds, duration_frames=frames, plan_hash=plan.plan_hash, rel=rel)
+            res.index.generated_at = utc_now_iso()
+            if i.index_path is not None:
+                atomic_write_json(i.index_path, res.index.to_dict())
+        except Exception as e:  # noqa: BLE001 - preview sheets are cosmetic; keep the deterministic results
+            res = None
+            sheet["error"] = f"{type(e).__name__}: {e}"
+            results.append(C.CheckResult("contact_sheet", C.WARN, f"preview sheets could not be built: {sheet['error']}", {}))
+        if res is not None:
+            sheet = {"path": res.written[0].name if res.written else None, "frames": res.frames, "failed_frames": res.failed,
+                     "error": res.index.error, "sheets": [s.path for s in res.index.sheets if s.path],
+                     "index": rel(i.index_path) if i.index_path is not None else None,
+                     "cuts_total": res.index.cuts_total, "cuts_sampled": res.index.cuts_sampled}
+            if res.index.error or res.failed:
+                results.append(C.CheckResult("contact_sheet", C.WARN, res.index.error or f"{len(res.failed)} frame(s) could not be extracted",
+                                             {"failed": res.failed[:10]}))
     else:   # no preview or no ffmpeg: sheets and index of an earlier run would describe a different preview
         remove_stale_sheets(i.contact_sheet, i.index_path)
     status = C.overall_status(results)

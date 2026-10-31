@@ -13,6 +13,7 @@ import sys as _sys
 from pathlib import Path as _P
 
 _sys.path.insert(0, str(_P(__file__).resolve().parents[2] / "fixtures" / "filmcraft"))
+from trip_vlog.filmcraft.adapter import FilmCraftAdapter
 import fcsupport  # noqa: E402
 from fcsupport import fc  # noqa: E402,F401
 from trip_vlog.filmcraft.errors import (
@@ -71,6 +72,20 @@ def test_rerun_with_same_spec_is_a_noop_and_never_duplicates(fc, tmp_path, monke
     snap = adapter.open_project(second.project_path) and adapter.inspect_sequence()
     assert snap.clip_count == 6 and len(snap.markers) == 1  # V1:2 V2:2(title) A1:1 A2:1 (portrait has no audio)
     assert second.media_map.item_for(spec.placements[0].source_path) >= 1 and "c2" in second.clip_map
+
+
+def test_noop_with_fresh_adapter_never_starts_or_discovers_filmcraft(fc, tmp_path):
+    adapter, media, ws = fc
+    spec = fcsupport.sample_spec(media)
+    first = adapter.build_project(spec)
+    adapter.close()
+    # a brand-new process-equivalent adapter whose FilmCraft binary does not exist: an up-to-date build must still succeed
+    broken = FilmCraftAdapter(ws, media, argv_prefix=[str(tmp_path / "no-such-filmcraft")], request_timeout=5.0)
+    try:
+        res = broken.build_project(spec)
+    finally:
+        broken.close()
+    assert res.noop and res.version == first.version and res.project_path == first.project_path
 
 
 def test_changed_spec_creates_a_new_version_and_leaves_the_old_one_alone(fc):

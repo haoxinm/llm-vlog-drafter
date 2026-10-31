@@ -161,9 +161,12 @@ def _check_refs(report: ValidationReport, clips: list[tuple[str, str]], catalog:
                 report.warn("must_exclude_ref", f"clip {cid} matches the must_exclude reference {ref!r}", clip=cid)
     used_ids = {m.moment_id for _, m, _ in used}
     for n, ref in enumerate(dict.fromkeys(s.must_include), 1):
-        targets = [m for m in ref_targets(ref, catalog) if catalog.assets[m.asset_id].present]
+        # same filters as the baseline planner: video/image only, and must_exclude wins over must_include
+        targets = [m for m in ref_targets(ref, catalog) if catalog.assets[m.asset_id].present
+                   and catalog.assets[m.asset_id].media_type in ("video", "image")
+                   and not any(ref_matches(x, catalog.assets[m.asset_id], m) for x in s.must_exclude)]
         if not targets:
-            report.warn("must_include_unavailable", f"must_include {ref!r} matches no available moment")
+            report.warn("must_include_unavailable", f"must_include {ref!r} matches no placeable moment (missing, audio-only or excluded)")
         elif not any(m.moment_id in used_ids for m in targets):
             report.error("must_include_missing", f"{required_label(n)} is not used by any clip")
             report.warn("must_include_ref", f"{required_label(n)} is the must_include reference {ref!r}")

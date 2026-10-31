@@ -168,3 +168,10 @@ def test_extract_audio_formats_chunks_and_errors(tmp_path, ff):
     assert au.extract_audio(Path(ff), src, flac, "flac") is None and flac.read_bytes()[:4] == b"fLaC"
     err = au.extract_audio(Path(ff), tmp_path / "missing.wav", tmp_path / "x" / "d.wav", "wav")
     assert err and "failed" in err and not (tmp_path / "x" / "d.wav").exists()
+
+
+def test_extract_audio_reports_oserror_as_error_string(tmp_path):
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    err = au.extract_audio(tmp_path / "ffmpeg", tmp_path / "in.mp4", blocker / "sub" / "out.wav")
+    assert isinstance(err, str) and "audio directory" in err

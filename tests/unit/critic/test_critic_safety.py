@@ -47,7 +47,8 @@ def test_lineage_counts_every_round_when_the_plan_returns_to_an_earlier_hash():
     rounds = [{"status": "applied", "round": i + 1, "parent_plan_hash": a, "plan_hash": b} for i, (a, b) in enumerate([("A", "B"), ("B", "A"), ("A", "B"), ("B", "A")])]
     state = {"rounds": rounds + [{"status": "failed", "round": 5, "parent_plan_hash": "A", "plan_hash": "C"}]}
     assert [r["round"] for r in cs.lineage(state, "A")] == [1, 2, 3, 4]
-    assert cs.lineage(state, "B") == [] and cs.lineage(state, "Z") == []       # only the tip of the chain has a lineage and cs.seen_hashes(state) == {"A", "B"}
+    assert cs.lineage(state, "B") == [] and cs.lineage(state, "Z") == []       # only the tip of the chain has a lineage
+    assert cs.seen_hashes(state) == {"A", "B"}
 
 
 def test_a_critic_that_flips_a_setting_back_and_forth_is_stopped_at_the_second_flip(setup, monkeypatch):

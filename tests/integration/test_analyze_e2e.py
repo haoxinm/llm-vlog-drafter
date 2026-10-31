@@ -172,3 +172,12 @@ def test_fine_sampling_contact_sheet_input_and_downstream_plan(media_dir, worksp
         view = PlanningCatalog.from_catalog(cat)
     refined = [m for m in view.moments.values() if m.source_in_seconds is not None]
     assert refined and all(m.length_seconds > 0 for m in refined)
+
+
+def test_limit_and_dry_run_are_persisted_for_resume(media_dir, workspace, fake):
+    analyze(media_dir, workspace, limit=1)
+    man = rj(workspace / "manifest.json")
+    assert man["pipeline"] == "analyze" and man["run_limit"] == 1 and man["run_dry_run"] is False
+    analyze(media_dir, workspace, dry_run=True)
+    man = rj(workspace / "manifest.json")
+    assert man["run_limit"] is None and man["run_dry_run"] is True

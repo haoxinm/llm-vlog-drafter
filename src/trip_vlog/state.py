@@ -132,11 +132,17 @@ class Manifest:
         path = Path(path)
         if path.exists():
             try:
-                data = json.loads(path.read_text(encoding="utf-8-sig"))
+                text = path.read_text(encoding="utf-8-sig")
+            except UnicodeDecodeError:
+                text = None  # undecodable content is corruption
+            # a transient OSError (e.g. sharing violation) propagates: never quarantine a possibly healthy manifest
+            if text is not None:
+                try:
+                    data = json.loads(text)
+                except ValueError:
+                    data = None
                 if isinstance(data, dict) and isinstance(data.get("stages"), dict):
                     return cls(path, data)
-            except (OSError, ValueError):
-                pass
             try:  # unreadable manifest: keep it for inspection, start fresh
                 os.replace(path, path.with_name(path.name + ".corrupt"))
             except OSError:
@@ -206,6 +212,10 @@ class StageRunner:
 
     def run(self, only: list[str] | None = None, force: bool = False) -> dict[str, Status]:
         results: dict[str, Status] = {}
+        data = getattr(self.ctx, "data", None)
+        if isinstance(data, dict):   # per-run caches of derived catalogs (see selection_stages.build_context): never carried into a new run
+            for k in ("selection_context", "outline_catalog"):
+                data.pop(k, None)
         for stage in self._stages.values():
             if only is not None and stage.name not in only:
                 continue

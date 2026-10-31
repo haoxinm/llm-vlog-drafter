@@ -183,7 +183,7 @@ def test_the_request_is_normalised_and_fenced_and_never_mistaken_for_a_placehold
 @pytest.fixture
 def ctx(tmp_path, monkeypatch):
     cfg = revise_config()
-    c, sel, p = make_draft_ctx(tmp_path, monkeypatch, cfg)
+    c, sel, p = make_draft_ctx(tmp_path, monkeypatch, cfg, approval_mode="manual")
     monkeypatch.setattr(ds, "latest_run", lambda x: {"project_path": "filmcraft/x_v001.fcproj", "version": 1, "project_sha256": "abc"})
     monkeypatch.setattr(rc, "outline_alternatives", lambda x: (None, {}))
     return c

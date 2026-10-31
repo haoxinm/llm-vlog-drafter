@@ -286,7 +286,7 @@ def validate_spec(spec: TimelineSpec) -> list[str]:
             for i in range(1, count + 1):
                 if f"{kind}{i}" not in seen_tracks:
                     add(f"tracks must be contiguous: {kind}{count} is listed but {kind}{i} is not")
-    if not (_is_int(spec.video_track_count) and spec.video_track_count <= 32 and spec.audio_track_count <= 32):
+    if tracks_ok and (spec.video_track_count > 32 or spec.audio_track_count > 32):
         add("at most 32 video and 32 audio tracks are supported")
 
     ids: set[str] = set()

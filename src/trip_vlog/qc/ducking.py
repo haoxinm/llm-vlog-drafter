@@ -37,6 +37,7 @@ from trip_vlog.qc.checks import PASS, SKIPPED, WARN, CheckResult, TranscriptSpan
 PAD_SECONDS = 0.15
 TOLERANCE_DB = 2.0          # rendered difference vs. expected, dB (mean level of a window; resampling and mixing add a little)
 MIN_MEASURE_SECONDS = 0.5   # a window shorter than this (after the ramps) is not measured
+MAX_MEASURED_SPANS = 24     # each measured span runs ffmpeg twice (bed and source); the rest are skipped and reported
 
 
 @dataclass(frozen=True)
@@ -225,6 +226,7 @@ def check_music_ducking(plan: EditPlan, duck: DuckPlan, bed: Path | None, source
     findings: list[dict[str, Any]] = []
     measured: list[dict[str, Any]] = []
     clips = {c.clip_instance_id: c for sc in plan.scenes for c in sc.clips}
+    n_measured_spans = skipped_spans = 0
     for cid, keys in duck.keys.items():
         c = clips[cid]
         src = source_paths.get(cid)
@@ -245,6 +247,10 @@ def check_music_ducking(plan: EditPlan, duck: DuckPlan, bed: Path | None, source
         for a, b, delta, kind in spans:
             if (b - a) / fps < MIN_MEASURE_SECONDS:
                 continue
+            if n_measured_spans >= MAX_MEASURED_SPANS:
+                skipped_spans += 1          # each span costs two ffmpeg runs; keep the QC stage bounded on long vlogs
+                continue
+            n_measured_spans += 1
             got = mean_level_db(ffmpeg, bed, a / fps, (b - a) / fps)
             s_in = float(c.source_in_seconds) + (a - lo) / fps
             ref = mean_level_db(ffmpeg, src, s_in, (b - a) / fps)
@@ -260,11 +266,13 @@ def check_music_ducking(plan: EditPlan, duck: DuckPlan, bed: Path | None, source
     if not measured:
         return CheckResult(name, SKIPPED, "skipped: no window was long and audible enough to measure", {"skipped": True, "reason": "nothing_measurable"})
     ducked_rows = [m for m in measured if m["kind"] == "ducked"]
+    skip_note = f"; {skipped_spans} more span(s) not measured (cap {MAX_MEASURED_SPANS})" if skipped_spans else ""
     if findings:
         f = findings[0]
         return CheckResult(name, WARN, f"{len(findings)} of {len(measured)} measured span(s) of the music bed differ from the plan by more than "
                            f"{tolerance_db:g} dB; e.g. {f['clip_instance_id']} frames {f['start_frame']}-{f['end_frame']} ({f['kind']}): rendered "
-                           f"{f['rendered_minus_source_db']:g} dB against the source, expected {f['expected_db']:g} dB",
-                           {"findings": findings[:30], "measured": measured[:60], "total": len(findings)})
+                           f"{f['rendered_minus_source_db']:g} dB against the source, expected {f['expected_db']:g} dB" + skip_note,
+                           {"findings": findings[:30], "measured": measured[:60], "total": len(findings), "spans_skipped": skipped_spans})
     return CheckResult(name, PASS, f"the music bed sits {abs(duck.settings.depth_db):g} dB lower inside {len(ducked_rows)} measured duck window(s) and "
-                       f"at its clip gain outside ({len(measured)} span(s), tolerance {tolerance_db:g} dB)", {"measured": measured[:60]})
+                       f"at its clip gain outside ({len(measured)} span(s), tolerance {tolerance_db:g} dB){skip_note}",
+                       {"measured": measured[:60], "spans_skipped": skipped_spans})

@@ -212,3 +212,26 @@ def test_a_frame_grab_that_raises_counts_as_a_failed_frame(tmp_path, monkeypatch
     plan = P.plan_tiles(clips((0, 30), (30, 60)), FPS, 60)
     res = P.build_preview_sheets(Path("ffmpeg"), tmp_path / "p.mp4", first, plan, FPS, duration_frames=60)
     assert res.index.error and res.failed and "TimeoutExpired" in res.failed[0] and not first.exists()
+
+
+def test_preview_sheet_failure_does_not_abort_qc(tmp_path, monkeypatch):
+    from qc_helpers import make_plan, clip
+    from trip_vlog.config import Config
+    from trip_vlog.planning.catalog_view import PlanningCatalog
+    from trip_vlog.qc import report as R
+
+    prev = tmp_path / "preview"
+    prev.mkdir()
+    (prev / "draft.mp4").write_bytes(b"x")
+    monkeypatch.setattr(R, "build_preview_sheets", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+    plan = make_plan(("s", [clip("c1", 0, 90)]))
+    monkeypatch.setattr(R.C, "check_preview", lambda *a, **k: R.C.CheckResult("preview", R.C.PASS, "ok"))
+    monkeypatch.setattr(R.C, "detect_black", lambda *a, **k: [])
+    monkeypatch.setattr(R.C, "check_preview_decodes", lambda *a, **k: R.C.CheckResult("decode", R.C.PASS, "ok"))
+    monkeypatch.setattr(R, "run_ffprobe", lambda *a, **k: object())
+    doc = R.run_qc(R.QcInputs(plan=plan, catalog=PlanningCatalog([], []), source_paths=[], sequence=None, project=None, reopen_error="x",
+                              mismatches=[], preview=prev / "draft.mp4", report_path=prev / "qc_report.json",
+                              contact_sheet=prev / "sheet.jpg", ffmpeg="ffmpeg", ffprobe="ffprobe", config=Config(), workspace_root=tmp_path))
+    assert (prev / "qc_report.json").is_file() and (prev / "qc_report.md").is_file()
+    assert "disk full" in doc["contact_sheet"]["error"]
+    assert any(c["name"] == "contact_sheet" and c["status"] == "warn" for c in doc["checks"])
