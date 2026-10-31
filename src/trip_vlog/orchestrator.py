@@ -376,6 +376,9 @@ def _execute(media: Path | str | None, output: Path | str, config_path: Path | s
         manifest.set(pipeline="analyze")
     elif pipeline == "transcribe" and manifest.get("pipeline") in (None, "index"):
         manifest.set(pipeline="transcribe")
+    if pipeline in ("analyze", "transcribe") and manifest.get("pipeline") == pipeline:
+        # remembered so `resume` never silently widens a limited/dry run
+        manifest.set(run_limit=analyze_limit, run_dry_run=bool(dry_run))
     manifest.save()
     atomic_write_text(ws.readme, WORKSPACE_README.format(version=__version__))
     logger.event("run", Status.RUNNING, command=command, tool_version=__version__)
