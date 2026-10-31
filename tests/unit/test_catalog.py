@@ -118,3 +118,21 @@ def test_cache_only_hits_ok_and_matching_version(tmp_path):
         assert c.cache_get("asset_1", "probe", "other-key", "fast:1") is None
         c.cache_put("asset_1", "probe", "k", "fast:1", {}, status="failed", error="x")
         assert c.cache_get("asset_1", "probe", "k", "fast:1") is None
+
+
+def test_mark_missing_skips_unreadable_subtrees(tmp_path):
+    with Catalog(tmp_path / "c.sqlite") as c:
+        recs = [rec(p, cv=f"fast:{p}") for p in ["a/x.mp4", "b/y.mp4", "b/z/w.mp4"]]
+        for r in recs:
+            c.upsert_asset(r)
+        assert c.mark_missing([], unreadable_paths=["b"]) == [recs[0]["asset_id"]]
+        assert c.mark_missing([], unreadable_paths=["."]) == []
+
+
+def test_failed_fingerprint_keeps_previous_content_version(tmp_path):
+    with Catalog(tmp_path / "c.sqlite") as c:
+        r = rec(cv="fast:v1", sha256="s")
+        c.upsert_asset(r)
+        c.upsert_asset({**r, "content_version": None, "sha256": None})
+        row = c.get_asset(r["asset_id"])
+        assert row["content_version"] == "fast:v1" and row["sha256"] == "s"

@@ -136,3 +136,24 @@ def test_runner_rejects_bad_registration(tmp_path):
         runner.register("a", lambda c: StageResult())
     with pytest.raises(ValueError):
         runner.register("x", lambda c: StageResult(), deps=("missing",))
+
+
+def test_manifest_load_quarantines_json_corruption_but_not_oserror(tmp_path, monkeypatch):
+    import pathlib
+    from trip_vlog.state import Manifest
+    p = tmp_path / "manifest.json"
+    p.write_text("{not json", encoding="utf-8")
+    Manifest.load(p)
+    assert (tmp_path / "manifest.json.corrupt").exists() and not p.exists()
+    p.write_text('{"stages": {}}', encoding="utf-8")
+    real = pathlib.Path.read_text
+
+    def boom(self, *a, **k):
+        if self.name == "manifest.json":
+            raise PermissionError("sharing violation")
+        return real(self, *a, **k)
+    monkeypatch.setattr(pathlib.Path, "read_text", boom)
+    import pytest
+    with pytest.raises(OSError):
+        Manifest.load(p)
+    assert p.exists()

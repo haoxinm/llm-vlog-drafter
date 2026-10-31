@@ -102,6 +102,28 @@ def test_export_through_fake_rewrites_validates_and_reports_losses(fc, monkeypat
     assert any("verified" in l for l in rep.limitations)
 
 
+def test_postprocess_failure_is_contained_per_format(fc, monkeypatch):
+    monkeypatch.setitem(sys.modules, "opentimelineio", None)
+    adapter, media, ws = fc
+    spec = fcsupport.sample_spec(media)
+    adapter.build_project(spec)
+    from trip_vlog.filmcraft import adapter as adapter_mod
+
+    real = adapter_mod.postprocess_and_validate
+
+    def boom(info, target, snap, known, rep):
+        if info.key == "otio":
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+        return real(info, target, snap, known, rep)
+
+    monkeypatch.setattr(adapter_mod, "postprocess_and_validate", boom)
+    rep = adapter.export_interchange(spec=spec)
+    by = {f.format: f for f in rep.formats}
+    assert set(by) == {"fcp7_xml", "otio"}
+    assert by["fcp7_xml"].exported and by["fcp7_xml"].error is None
+    assert by["otio"].error and "post-processing failed" in by["otio"].error and not by["otio"].ok
+
+
 def test_export_unknown_format_and_outside_workspace(fc, tmp_path):
     adapter, media, ws = fc
     adapter.build_project(fcsupport.sample_spec(media))

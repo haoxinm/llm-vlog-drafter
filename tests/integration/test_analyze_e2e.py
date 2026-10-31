@@ -93,3 +93,12 @@ def test_cli_dry_run_and_status(media_dir, workspace, fake, capsys):
     status = capsys.readouterr().out
     assert "analyze" in status and "succeeded" in status
     assert cli.main(["analyze", "--media", str(media_dir), "--output", str(workspace), "--config", str(cfg), "--sampling-fps", "0"]) == 2
+
+
+def test_limit_and_dry_run_are_persisted_for_resume(media_dir, workspace, fake):
+    analyze(media_dir, workspace, limit=1)
+    man = rj(workspace / "manifest.json")
+    assert man["pipeline"] == "analyze" and man["run_limit"] == 1 and man["run_dry_run"] is False
+    analyze(media_dir, workspace, dry_run=True)
+    man = rj(workspace / "manifest.json")
+    assert man["run_limit"] is None and man["run_dry_run"] is True

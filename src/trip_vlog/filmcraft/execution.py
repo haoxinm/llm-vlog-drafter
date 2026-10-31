@@ -147,7 +147,6 @@ def run_build(adapter: "FilmCraftAdapter", spec: TimelineSpec, project_name: str
         rp = adapter.policy.check_read(p, "asset")
         if not rp.is_file():
             raise FilmCraftError(f"asset not found: {rp}")
-    cmap = adapter.discover_capabilities()
     fc_dir = adapter.fc_dir
     fc_dir.mkdir(parents=True, exist_ok=True)
     jpath = adapter.journal_path
@@ -166,6 +165,7 @@ def run_build(adapter: "FilmCraftAdapter", spec: TimelineSpec, project_name: str
                            MediaMap.from_dict(latest.get("media_mapping", {})), ClipMap.from_dict(latest.get("clip_mapping", {})),
                            list(latest.get("warnings", [])))
 
+    cmap = adapter.discover_capabilities()  # only a real build needs FilmCraft; a no-op must not start it
     version = next_version(doc, fc_dir, project_name)
     project_path = fc_dir / project_filename(project_name, version)
     spec_copy = fc_dir / f"{project_path.stem}.timeline_spec.json"

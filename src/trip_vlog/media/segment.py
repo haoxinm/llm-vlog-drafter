@@ -303,7 +303,7 @@ def _run(cmd: list[str], timeout: float) -> tuple[int, str, str]:
 def detect_scenes(ffmpeg: Path, src: Path, threshold: float, timeout: float) -> list[tuple[float, float]]:
     """Scene cuts via select='gt(scene,T)' on a downscaled copy. Raises RuntimeError on ffmpeg failure."""
     vf = f"scale=160:-2:flags=fast_bilinear,select='gt(scene,{threshold:g})',metadata=mode=print:file=-"
-    cmd = [str(ffmpeg), "-hide_banner", "-nostats", "-nostdin", "-loglevel", "error", "-i", str(long_path(src.resolve())),
+    cmd = [str(ffmpeg), "-hide_banner", "-nostats", "-nostdin", "-loglevel", "error", "-protocol_whitelist", "file,pipe", "-i", str(long_path(src.resolve())),
            "-an", "-sn", "-vf", vf, "-f", "null", "-"]
     try:
         rc, out, err = _run(cmd, timeout)
@@ -325,7 +325,7 @@ def detect_audio(ffmpeg: Path, src: Path, settings: SegmentSettings, duration: f
                 base + "astats=metadata=1:reset=1,ametadata=mode=print:file=-"]  # older ffmpeg without measure_* options
     last = "no output"
     for af in variants:
-        cmd = [str(ffmpeg), "-hide_banner", "-nostats", "-nostdin", "-loglevel", "info", "-i", str(long_path(src.resolve())),
+        cmd = [str(ffmpeg), "-hide_banner", "-nostats", "-nostdin", "-loglevel", "info", "-protocol_whitelist", "file,pipe", "-i", str(long_path(src.resolve())),
                "-vn", "-sn", "-af", af, "-f", "null", "-"]
         try:
             rc, out, err = _run(cmd, timeout)

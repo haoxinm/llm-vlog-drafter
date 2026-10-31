@@ -81,7 +81,10 @@ def outline_inputs(ctx: Any) -> Any:
 
 def check_outline_file(ctx: Any, oc: OutlineCatalog | None = None) -> tuple[ol.StoryOutline | None, ValidationReport, OutlineCatalog]:
     """Parse and validate `plans/story_outline.json` as the user may have edited it. Never rewrites the file."""
-    oc = oc or build_outline_catalog(ctx.catalog, ctx.config)
+    if oc is None:   # the catalog does not change within a run: build it once
+        oc = ctx.data.get("outline_catalog")
+        if oc is None:
+            oc = ctx.data["outline_catalog"] = build_outline_catalog(ctx.catalog, ctx.config)
     path = outline_paths(ctx).outline
     report = ValidationReport()
     if not path.is_file():

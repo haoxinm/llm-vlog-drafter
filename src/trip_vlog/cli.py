@@ -441,10 +441,10 @@ def _cmd_resume(args: argparse.Namespace) -> int:
     if m.get("pipeline") == "draft":
         return _cmd_draft(args, "resume")
     if m.get("pipeline") == "analyze":
-        args.limit, args.dry_run = None, False
+        args.limit, args.dry_run = m.get("run_limit"), bool(m.get("run_dry_run"))
         return _cmd_analyze(args, "resume")
     if m.get("pipeline") == "transcribe":
-        args.limit, args.dry_run = None, False
+        args.limit, args.dry_run = m.get("run_limit"), bool(m.get("run_dry_run"))
         return _cmd_transcribe(args, "resume")
     if m.get("pipeline") == "outline":
         args.dry_run = False
