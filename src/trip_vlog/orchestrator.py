@@ -686,26 +686,25 @@ def approve_revision(output: Path | str) -> dict[str, Any]:
     return pend
 
 
-def revision_awaiting_approval(manifest: Manifest, ws: Workspace | None = None) -> bool:
+def revision_awaiting_approval(manifest: Manifest) -> bool:
     """True only when a natural-language revision proposal is really the thing waiting: the revise stage is at the approval gate AND its proposal is still
-    `pending` (not stale/approved/cleared) and, when a workspace is given, still bound to the current plan. A leftover `awaiting_approval` stage record from an
-    older proposal must not capture an unflagged `approve` meant for another stage (e.g. the critic)."""
+    `pending` (not stale/approved/cleared). A leftover `awaiting_approval` stage record from an older proposal must not capture an unflagged `approve` meant
+    for another stage (e.g. the critic). The plan-hash check is deliberately not part of this predicate: `approve_revision` does it and refuses loudly."""
     if manifest.stage("revise").get("status") != "awaiting_approval":
         return False
-    pend = (manifest.get("revise") or {}).get("pending") or {}
-    if pend.get("status") != "pending":
-        return False
-    if ws is not None:
-        from trip_vlog.draft_stages import plan_file_hash
+    return ((manifest.get("revise") or {}).get("pending") or {}).get("status") == "pending"
 
-        try:
-            config = load_config(ws.project_yaml)
-            paths = resolve_paths(config, manifest.get("media_root") or ws.root.parent, ws.root)
-            if plan_file_hash(paths.outputs["edit_plan_file"]) != pend.get("parent_plan_hash"):
-                return False
-        except Exception:
-            return False
-    return True
+
+def _revision_bound_to_current_plan(manifest: Manifest, ws: Workspace) -> bool:
+    from trip_vlog.draft_stages import plan_file_hash
+
+    pend = (manifest.get("revise") or {}).get("pending") or {}
+    try:
+        config = load_config(ws.project_yaml)
+        paths = resolve_paths(config, manifest.get("media_root") or ws.root.parent, ws.root)
+        return plan_file_hash(paths.outputs["edit_plan_file"]) == pend.get("parent_plan_hash")
+    except Exception:
+        return False
 
 
 def approve_pending(output: Path | str, which: str | None = None) -> tuple[str, dict[str, Any]]:
@@ -726,7 +725,10 @@ def approve_pending(output: Path | str, which: str | None = None) -> tuple[str, 
             which = "outline"
         elif manifest.stage("approval").get("status") == "awaiting_approval":
             which = "plan"
-        elif revision_awaiting_approval(manifest, ws):
+        elif revision_awaiting_approval(manifest) and not (manifest.stage("critic").get("status") == "awaiting_approval"
+                                                           and not _revision_bound_to_current_plan(manifest, ws)):
+            # a pending proposal always answers a bare `approve` (approve_revision refuses loudly if the plan changed), unless the critic is also waiting
+            # and the proposal is stale against the current plan: then the critic is the live gate
             return "revision", approve_revision(output)
         elif manifest.stage("critic").get("status") == "awaiting_approval":
             return "critic", approve_critic(output)
