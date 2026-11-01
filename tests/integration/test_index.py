@@ -267,3 +267,16 @@ def test_one_shot_overrides_are_not_persisted(media_dir, workspace):
     saved = yaml.safe_load((workspace / "project.yaml").read_text(encoding="utf-8"))
     assert saved["workflow"]["approval"] == "stop_after_outline"
     assert saved["filmcraft"]["executable"] is None and saved["project"]["title"] == "T"
+
+
+def test_hand_edited_executable_paths_survive_rewrite(media_dir, workspace):
+    import yaml
+    index(media_dir, workspace)
+    p = workspace / "project.yaml"
+    doc = yaml.safe_load(p.read_text(encoding="utf-8"))
+    doc["filmcraft"]["executable"] = "/opt/fc/filmcraft-cli"
+    doc["media"]["ffprobe_path"] = "/opt/ff/ffprobe"
+    p.write_text(yaml.safe_dump(doc), encoding="utf-8")
+    index(media_dir, workspace)  # implicit load ignores the paths for execution, but must not erase them
+    saved = yaml.safe_load(p.read_text(encoding="utf-8"))
+    assert saved["filmcraft"]["executable"] == "/opt/fc/filmcraft-cli" and saved["media"]["ffprobe_path"] == "/opt/ff/ffprobe"
