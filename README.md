@@ -39,6 +39,17 @@ arguments. Or activate the venv first (PowerShell: `.venv\Scripts\Activate.ps1`)
 
 Lookup order for each tool: `media.ffprobe_path` / `media.ffmpeg_path` (or `--ffprobe` / `--ffmpeg`), then `$FFPROBE` / `$FFMPEG`, then `PATH`, then standard install folders.
 
+### Docker (Linux server / NAS)
+
+An Ubuntu 24.04 based image (`linux/amd64` and `linux/arm64`) with `trip-vlog`, FFmpeg and a non-root user is described by the `Dockerfile`; `docker-compose.yml` is an
+example for a NAS. Keys come from the environment at run time, and FilmCraft (a Linux binary, mounted) and Resolve (a separate machine) stay outside the image.
+Build, multi-arch, volumes and limitations: [docs/DOCKER.md](docs/DOCKER.md).
+
+```sh
+docker build -t trip-vlog .
+docker run --rm -v /path/to/media:/media:ro -v /path/to/workspace:/work --user "$(id -u):$(id -g)" trip-vlog index --media /media --output /work/vlog
+```
+
 ## FilmCraft (editing engine)
 
 `draft` drives [FilmCraft](https://github.com/storytold/filmcraft) through its documented MCP interface (`filmcraft-cli mcp`). It was developed and

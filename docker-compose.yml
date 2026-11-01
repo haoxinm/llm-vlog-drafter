@@ -1,0 +1,30 @@
+# Example for a Linux server / NAS. trip-vlog is a command line tool, not a service, so there is no `restart:` policy
+# and no `up`: run one command at a time with `docker compose run --rm trip-vlog <command>`. See docs/DOCKER.md.
+#
+#   cp docker.env.example .env.docker   # then put your keys in it
+#   docker compose run --rm trip-vlog draft --media /media --output /work/vlog --duration 180
+#
+# Everything below can be overridden from the shell or a `.env` file next to this one.
+services:
+  trip-vlog:
+    image: trip-vlog:latest
+    build:
+      context: .
+      args:
+        EXTRAS: ""          # "otio" adds OpenTimelineIO
+    # Run as the owner of your folders (`id -u` / `id -g` on the host; on many NAS systems 1000:1000, Synology often 1026:100).
+    user: "${PUID:-1000}:${PGID:-1000}"
+    env_file:
+      - path: .env.docker   # LLM keys etc. Optional: compose skips it if the file does not exist.
+        required: false
+    environment:
+      # FILMCRAFT_CLI: /opt/filmcraft/filmcraft-cli   # uncomment together with the filmcraft volume below
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ${MEDIA_DIR:-./media}:/media:ro      # originals, never modified
+      - ${WORK_DIR:-./work}:/work            # output workspace (plans, preview, QC, Resolve handoff package)
+      # - /opt/filmcraft:/opt/filmcraft:ro   # a Linux (same CPU architecture) filmcraft-cli, if you have one
+    # Needed only with a local LLM / whisper server running on the Docker host (Ollama etc.), see docs/DOCKER.md
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
+    # No port is published and no network is needed unless you use a remote LLM endpoint.
