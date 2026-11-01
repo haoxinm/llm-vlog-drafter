@@ -490,6 +490,25 @@ def _handoff_inputs(ctx: Any) -> Any:
             "assets": [(a["asset_id"], a["content_version"]) for a in ctx.catalog.list_assets()]}
 
 
+def _publish_compatibility(out: Path, build: Any) -> tuple[Any, str | None]:
+    """Build and write the advisory compatibility report. Both files are written only after both are rendered; on any failure
+    stale copies from an earlier run are removed so nothing on disk reads as current. Returns (summary | None, note | None)."""
+    try:
+        compat = build()
+        md = render_compatibility_markdown(compat)
+        summary = summary_of(compat)
+        atomic_write_json(out / COMPAT_JSON, compat)
+        atomic_write_text(out / COMPAT_MD, md)
+        return summary, None
+    except Exception as e:  # noqa: BLE001 - the advisory report must not cost the export results
+        for name in (COMPAT_JSON, COMPAT_MD):
+            try:
+                (out / name).unlink()
+            except OSError:
+                pass
+        return None, f"compatibility report failed: {type(e).__name__}: {e}"
+
+
 def handoff_stage(ctx: Any) -> StageResult:
     run = latest_run(ctx)
     if run is None:
@@ -527,19 +546,13 @@ def handoff_stage(ctx: Any) -> StageResult:
     finish_doc, finish_note = load_finish_report(out / COMPAT_FINISH)
     if finish_note:
         notes.append(finish_note)
-    compat_summary = None
-    try:
-        compat = build_compatibility_report(CompatInputs(
-            plan=prep.plan, spec=eff, catalog=PlanningCatalog.from_catalog(ctx.catalog), capabilities=_capabilities(ctx),
-            xml_path=Path(xml_fmt.path) if xml_fmt else None, filmcraft_version=run.get("filmcraft_version"),
-            verified_after_reopen=run.get("verified_after_reopen"), mapping_warnings=[w.to_dict() for w in prep.mapping.warnings],
-            finish_report=finish_doc, tool_version=__version__))
-        atomic_write_json(out / COMPAT_JSON, compat)
-        atomic_write_text(out / COMPAT_MD, render_compatibility_markdown(compat))
-        compat_summary = summary_of(compat)
-    except Exception as e:  # noqa: BLE001 - the advisory report must not cost the export results
-        notes.append(f"compatibility report failed: {type(e).__name__}: {e}")
-        compat_summary = None
+    compat_summary, compat_note = _publish_compatibility(out, lambda: build_compatibility_report(CompatInputs(
+        plan=prep.plan, spec=eff, catalog=PlanningCatalog.from_catalog(ctx.catalog), capabilities=_capabilities(ctx),
+        xml_path=Path(xml_fmt.path) if xml_fmt else None, filmcraft_version=run.get("filmcraft_version"),
+        verified_after_reopen=run.get("verified_after_reopen"), mapping_warnings=[w.to_dict() for w in prep.mapping.warnings],
+        finish_report=finish_doc, tool_version=__version__)))
+    if compat_note:
+        notes.append(compat_note)
     text = render_handoff_report(HandoffReportInputs(
         title=prep.plan.project.title, filmcraft_version=run.get("filmcraft_version"), tool_version=__version__,
         platform=f"{ctx.manifest.get('platform', {}).get('system', '?')} {ctx.manifest.get('platform', {}).get('machine', '')}".strip(),
@@ -553,7 +566,7 @@ def handoff_stage(ctx: Any) -> StageResult:
     ok = export.report is not None and export.report.ok and not missing and compat_summary is not None and compat_summary["xml_roundtrip_ok"] is not False
     summary = {"formats": export.exported_files and [Path(f).name for f in export.exported_files], "files": sorted(p.name for p in out.iterdir()),
                "missing_media": len(missing), "export_error": export.error, "otio_reload": (export.otio_reload or {}).get("status"),
-               "compatibility": compat_summary, "compatibility_report": _rel(ctx, out / COMPAT_JSON)}
+               "compatibility": compat_summary, "compatibility_report": _rel(ctx, out / COMPAT_JSON) if compat_summary is not None else None}
     return StageResult(Status.SUCCEEDED if ok else Status.PARTIAL, summary)
 
 

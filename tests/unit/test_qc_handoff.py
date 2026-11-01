@@ -126,3 +126,35 @@ def test_report_claims_verification_only_when_passing(tmp_path):
     ex = HandoffExport([], HandoffReport(str(tmp_path), [], limitations=[]))
     assert "Verified by the user-run script" in render_handoff_report(_inputs(tmp_path, ex, ("passing", "status 'pass'")))
     assert "UNVERIFIED" in render_handoff_report(_inputs(tmp_path, ex, ("not_passing", "status 'fail'")))
+
+
+def test_compatibility_failure_removes_stale_files_and_reports_none(tmp_path):
+    from trip_vlog import draft_stages as D
+
+    (tmp_path / D.COMPAT_JSON).write_text("{}", encoding="utf-8")
+    (tmp_path / D.COMPAT_MD).write_text("old", encoding="utf-8")
+
+    def boom():
+        raise AttributeError("'str' object has no attribute 'get'")
+
+    summary, note = D._publish_compatibility(tmp_path, boom)
+    assert summary is None and "AttributeError" in note
+    assert not (tmp_path / D.COMPAT_JSON).exists() and not (tmp_path / D.COMPAT_MD).exists()
+
+
+def test_compatibility_render_failure_does_not_leave_a_fresh_json(tmp_path, monkeypatch):
+    from trip_vlog import draft_stages as D
+
+    monkeypatch.setattr(D, "render_compatibility_markdown", lambda c: (_ for _ in ()).throw(KeyError("x")))
+    summary, note = D._publish_compatibility(tmp_path, lambda: {"a": 1})
+    assert summary is None and "KeyError" in note and not list(tmp_path.iterdir())
+
+
+def test_compatibility_success_writes_both(tmp_path, monkeypatch):
+    from trip_vlog import draft_stages as D
+
+    monkeypatch.setattr(D, "render_compatibility_markdown", lambda c: "md")
+    monkeypatch.setattr(D, "summary_of", lambda c: {"ok": True})
+    summary, note = D._publish_compatibility(tmp_path, lambda: {"a": 1})
+    assert summary == {"ok": True} and note is None
+    assert (tmp_path / D.COMPAT_JSON).is_file() and (tmp_path / D.COMPAT_MD).read_text(encoding="utf-8") == "md"
