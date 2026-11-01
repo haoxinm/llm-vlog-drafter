@@ -128,6 +128,85 @@
       "title": "SelectionScene",
       "type": "object"
     },
+    "SelectionTitle": {
+      "additionalProperties": false,
+      "properties": {
+        "duration_seconds": {
+          "exclusiveMinimum": 0,
+          "maximum": 60,
+          "title": "Duration Seconds",
+          "type": "number"
+        },
+        "rationale": {
+          "default": "",
+          "maxLength": 500,
+          "title": "Rationale",
+          "type": "string"
+        },
+        "role": {
+          "enum": [
+            "opening_title",
+            "scene_title",
+            "closing"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "scene_id": {
+          "pattern": "^[A-Za-z0-9_.-]{1,80}$",
+          "title": "Scene Id",
+          "type": "string"
+        },
+        "start": {
+          "$ref": "#/$defs/TitleStart"
+        },
+        "style": {
+          "const": "simple",
+          "default": "simple",
+          "title": "Style",
+          "type": "string"
+        },
+        "text": {
+          "maxLength": 60,
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        },
+        "text_source": {
+          "enum": [
+            "project_title",
+            "outline_scene_title",
+            "user_config",
+            "folder_name",
+            "user"
+          ],
+          "title": "Text Source",
+          "type": "string"
+        },
+        "title_id": {
+          "pattern": "^[A-Za-z0-9_.-]{1,80}$",
+          "title": "Title Id",
+          "type": "string"
+        },
+        "track": {
+          "const": "V2",
+          "default": "V2",
+          "title": "Track",
+          "type": "string"
+        }
+      },
+      "required": [
+        "title_id",
+        "text",
+        "role",
+        "scene_id",
+        "text_source",
+        "start",
+        "duration_seconds"
+      ],
+      "title": "SelectionTitle",
+      "type": "object"
+    },
     "SelectionTransition": {
       "additionalProperties": false,
       "properties": {
@@ -152,9 +231,49 @@
       ],
       "title": "SelectionTransition",
       "type": "object"
+    },
+    "TitleStart": {
+      "additionalProperties": false,
+      "description": "Where a title starts, relative to the plan (code turns it into a frame): `scene_start` / `clip_start` + offset, or\n`sequence_end` (the title ends `offset` seconds before the end of the sequence).",
+      "properties": {
+        "clip_instance_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9_.-]{1,80}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Clip Instance Id"
+        },
+        "offset_seconds": {
+          "default": 0.0,
+          "maximum": 3600,
+          "minimum": 0,
+          "title": "Offset Seconds",
+          "type": "number"
+        },
+        "relative_to": {
+          "enum": [
+            "scene_start",
+            "clip_start",
+            "sequence_end"
+          ],
+          "title": "Relative To",
+          "type": "string"
+        }
+      },
+      "required": [
+        "relative_to"
+      ],
+      "title": "TitleStart",
+      "type": "object"
     }
   },
-  "$id": "urn:trip-vlog:schema:selection_plan:1.0",
+  "$id": "urn:trip-vlog:schema:selection_plan:1.1",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "description": "LLM-facing selection plan: moment IDs, target durations, anchors. No source timestamps.",
@@ -174,9 +293,20 @@
       "type": "array"
     },
     "schema_version": {
-      "const": "1.0",
+      "enum": [
+        "1.0",
+        "1.1"
+      ],
       "title": "Schema Version",
       "type": "string"
+    },
+    "titles": {
+      "items": {
+        "$ref": "#/$defs/SelectionTitle"
+      },
+      "maxItems": 50,
+      "title": "Titles",
+      "type": "array"
     },
     "uncertainties": {
       "items": {

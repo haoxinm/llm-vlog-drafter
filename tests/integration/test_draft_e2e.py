@@ -109,9 +109,7 @@ def test_invalid_plan_is_rejected_before_filmcraft(tmp_path, media, ffmpeg_tools
     assert rj(ws / "plans" / "assemble_validation_report.json")["ok"] is False
 
 
-def test_approval_is_bound_to_plan_hash_and_planner_llm_is_rejected(tmp_path, media, ffmpeg_tools):
-    from trip_vlog.config import ConfigError
-
+def test_approval_is_bound_to_plan_hash(tmp_path, media, ffmpeg_tools):
     ws = tmp_path / "ws"
     assert draft(media, ws).awaiting_approval
     assert cli.main(["approve", "--output", str(ws)]) == 0
@@ -120,8 +118,6 @@ def test_approval_is_bound_to_plan_hash_and_planner_llm_is_rejected(tmp_path, me
     res = draft(media, ws, **{"project.target_duration_seconds": 9, "filmcraft.executable": CLI or "nonexistent"})
     assert res.awaiting_approval  # new plan -> approval invalidated
     assert rj(ws / "manifest.json")["approval"]["status"] == "invalidated"
-    with pytest.raises(ConfigError, match="not implemented"):
-        draft(media, tmp_path / "ws_llm", **{"workflow.planner": "llm"})
 
 
 # ---- full pipeline with real FilmCraft -------------------------------------------------------------------------

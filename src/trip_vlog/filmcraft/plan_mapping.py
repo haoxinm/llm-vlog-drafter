@@ -7,6 +7,8 @@ Track layout (names are the adapter's ``V1..Vn`` / ``A1..An``):
     natural_audio  -> A1 (stand-alone audio clip)
     music          -> A2
     narration      -> A3 (only created when a narration clip exists)
+    titles         -> V2 (``graphics.newText`` through the adapter; frames come straight from the plan, size and position are
+                      the TitleSpec defaults: a lower-left text sized from the sequence height)
 
 Audio policy: ``muted`` -> no linked audio; ``natural_sound`` -> linked audio at unity gain;
 ``ambient_low`` -> linked audio with a constant gain of ``ambient_gain_db`` (default -12 dB). The gain is a
@@ -25,7 +27,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
-from trip_vlog.filmcraft.timeline_spec import MarkerSpec, Placement, TimelineSpec, TransitionIn, validate_spec
+from trip_vlog.filmcraft.timeline_spec import MarkerSpec, Placement, TimelineSpec, TitleSpec, TransitionIn, validate_spec
 from trip_vlog.planning.catalog_view import PlanningCatalog
 from trip_vlog.planning.duration import frames_to_float, parse_fps
 from trip_vlog.planning.models import EditClip, EditPlan
@@ -142,8 +144,9 @@ def edit_plan_to_spec(plan: EditPlan, catalog: PlanningCatalog, media_root: Path
     if "A3" in tracks:
         tracks.add("A2")
     markers = tuple(MarkerSpec(m.frame, m.name, m.scene_id) for m in plan.markers)
+    titles = tuple(TitleSpec(t.text, t.start_frame, t.duration_frames, t.track) for t in plan.titles)  # size/position: the TitleSpec defaults
     spec = TimelineSpec(st.sequence_name, plan.sequence.width, plan.sequence.height, fps,
-                        tuple(sorted(tracks, key=lambda t: (t[0] != "V", int(t[1:])))), tuple(placements), markers)
+                        tuple(sorted(tracks, key=lambda t: (t[0] != "V", int(t[1:])))), tuple(placements), markers, titles)
     issues = validate_spec(spec)
     if issues:
         raise MappingError(issues)

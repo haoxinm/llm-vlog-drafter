@@ -1,0 +1,141 @@
+{
+  "$id": "https://trip-vlog.local/schemas/story_outline_response:1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Story editor reply: scenes in story order; scene ids are assigned by code.",
+  "properties": {
+    "hook": {
+      "additionalProperties": false,
+      "properties": {
+        "justification": {
+          "description": "Why this is a real, compelling moment, else null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "moment_id": {
+          "description": "The hook moment (also listed in the first scene), else null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "used": {
+          "description": "True when the first scene is a short nonlinear opening hook.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "used",
+        "moment_id",
+        "justification"
+      ],
+      "type": "object"
+    },
+    "missing_coverage": {
+      "description": "Coverage the story needs (or the user asked for) that the catalog lacks.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "premise": {
+      "description": "A short narrative premise grounded in the catalog (a few sentences).",
+      "type": "string"
+    },
+    "scenes": {
+      "description": "Scenes in story order.",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_moment_ids": {
+            "description": "IDs copied exactly from the catalog, in the order they would be used.",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "chronology_note": {
+            "description": "Why the scene is out of chronological order, or null when it is in order.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "purpose": {
+            "description": "What this scene does for the story, in one or two sentences (up to 500 characters).",
+            "type": "string"
+          },
+          "role": {
+            "description": "Editorial role of the scene.",
+            "enum": [
+              "opening_hook",
+              "arrival_context",
+              "establishing_place",
+              "activity_action",
+              "personal_reaction",
+              "culture_food",
+              "scenic_breathing_room",
+              "transition",
+              "reflection_ending",
+              "other"
+            ],
+            "type": "string"
+          },
+          "target_duration_seconds": {
+            "description": "Time budget for the scene on the timeline, in seconds (more than 0).",
+            "type": "number"
+          },
+          "title": {
+            "description": "Short working title, at most 60 characters (it can become an on-screen title).",
+            "type": "string"
+          },
+          "tone": {
+            "description": "Emotional tone, a few words.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "title",
+          "purpose",
+          "tone",
+          "target_duration_seconds",
+          "candidate_moment_ids",
+          "chronology_note"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "story_mode_used": {
+      "description": "How the scenes are ordered.",
+      "enum": [
+        "chronological",
+        "mostly_chronological",
+        "thematic"
+      ],
+      "type": "string"
+    },
+    "uncertainties": {
+      "description": "Things the user should confirm before the outline is approved.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "premise",
+    "story_mode_used",
+    "scenes",
+    "hook",
+    "missing_coverage",
+    "uncertainties"
+  ],
+  "title": "story_outline_response",
+  "type": "object"
+}

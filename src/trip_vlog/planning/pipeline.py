@@ -18,6 +18,7 @@ from trip_vlog.planning.catalog_view import PlanningCatalog
 from trip_vlog.planning.models import EditPlan, SelectionPlan, to_json_dict, write_schemas
 from trip_vlog.planning.resolve_plan import PlanSettings, resolve_selection_plan
 from trip_vlog.planning.summary import render_summary
+from trip_vlog.planning.titles import TitleSettings, with_default_titles
 from trip_vlog.planning.validate import ValidationReport, ValidationSettings, validate_edit_plan, validate_selection_plan
 from trip_vlog.state import StageResult, Workspace, atomic_write_json, atomic_write_text, stable_hash
 
@@ -66,7 +67,7 @@ def plan_baseline(ctx_or_workspace: Any, config: Config | None = None, *, write:
     ws, cfg, catalog, own, outputs = _resolve_inputs(ctx_or_workspace, config)
     try:
         view = PlanningCatalog.from_catalog(catalog)
-        selection = build_baseline_selection(view, BaselineSettings.from_config(cfg))
+        selection = with_default_titles(build_baseline_selection(view, BaselineSettings.from_config(cfg)), TitleSettings.from_config(cfg))
         vset = ValidationSettings.from_config(cfg)
         sel_report = validate_selection_plan(selection, view, vset)
         if not sel_report.ok:
@@ -90,13 +91,13 @@ def _write_failure(ws: Workspace, cfg: Config, outputs: dict[str, Path] | None, 
 
 
 def _write_all(ws: Workspace, cfg: Config, outputs: dict[str, Path] | None, selection: SelectionPlan, edit: EditPlan,
-               report: ValidationReport, view: PlanningCatalog) -> PlanPaths:
+               report: ValidationReport, view: PlanningCatalog, **summary_kwargs: Any) -> PlanPaths:
     pp = plan_paths(ws, cfg, outputs)
     pp.plans_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_json(pp.selection_plan, to_json_dict(selection))
     atomic_write_json(pp.edit_plan, to_json_dict(edit))
     write_schemas(pp.plans_dir)
-    atomic_write_text(pp.summary, render_summary(edit, view, report))
+    atomic_write_text(pp.summary, render_summary(edit, view, report, selection=selection, **summary_kwargs))
     atomic_write_json(pp.validation_report, report.to_dict())
     return pp
 
@@ -106,7 +107,7 @@ def plan_inputs(ctx: Any) -> Any:
     view = PlanningCatalog.from_catalog(ctx.catalog)
     cfg = ctx.config
     return {"catalog": view.fingerprint(), "baseline": BaselineSettings.from_config(cfg).key(),
-            "plan": stable_hash(PlanSettings.from_config(cfg).__dict__), "validation": stable_hash(ValidationSettings.from_config(cfg).__dict__)}
+            "plan": stable_hash(PlanSettings.from_config(cfg).__dict__), "titles": TitleSettings.from_config(cfg).key(), "validation": stable_hash(ValidationSettings.from_config(cfg).__dict__)}
 
 
 def plan_baseline_stage(ctx: Any) -> StageResult:
