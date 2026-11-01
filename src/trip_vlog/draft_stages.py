@@ -387,7 +387,13 @@ def build_draft_runner(ctx: Any) -> StageRunner:
     runner = build_index_runner(ctx)
     plan_path_exists = lambda c: _pp(c).edit_plan.is_file()
     runner.register("segment", segment_assets, deps=("catalog",), inputs=segment_inputs)
-    runner.register("plan", plan_stage, deps=("segment",), verify=plan_path_exists,
+    plan_dep = "segment"
+    if ctx.config.workflow.planner == "llm":  # Phase 4 consumes the labeled moments; the baseline planner never needs an LLM
+        from trip_vlog.analysis.stage import analyze_inputs, analyze_stage
+
+        runner.register("analyze", analyze_stage, deps=("segment",), inputs=analyze_inputs)
+        plan_dep = "analyze"
+    runner.register("plan", plan_stage, deps=(plan_dep,), verify=plan_path_exists,
                     inputs=lambda c: {**plan_inputs(c), "planner": c.config.workflow.planner})
     runner.register("approval", approval_stage, deps=("plan",), always_run=True)
     runner.register("assemble", assemble_stage, deps=("approval",), inputs=_assemble_inputs, verify=_assemble_verify)
