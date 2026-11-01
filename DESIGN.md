@@ -1104,7 +1104,17 @@ Resolve; EDL froze Resolve; AAF could not be opened. Policy:
     range; importing without `sourceClipsPath`, or pre-importing media
     with `ImportMedia` and then importing the XML with
     `importSourceClips=False`, does not fix it. Markers survive the
-    FCP7 XML import in this test. OTIO is rejected by `ImportTimelineFromFile` in every
+    FCP7 XML import in this test. `resolve-finish` on a real 60-still
+    workspace (21.1.1.10, Windows): `ReplaceClip` with the original path
+    **returns False for a still that has numbered siblings in its folder**
+    (e.g. `261010_stars_-318.jpg` … `-377.jpg`; Resolve sees one frame of
+    an on-disk image sequence) and succeeds for a still without them.
+    Copying that one file into its own folder
+    (`resolve_handoff/stills/<key>/<name>`, original untouched) and
+    calling `ReplaceClip` on the copy brought all 59 refused stills
+    online; every required read-back check passed. The Resolve project
+    then references those copies, so the folder must travel with it.
+    OTIO is rejected by `ImportTimelineFromFile` in every
     path form tried, though the UI import accepts it; OTIO therefore
     stays an unverified secondary export.
 -   Third-party measurements (see `docs/research/resolve-mcp.md`) report
@@ -1124,13 +1134,16 @@ adapter:
     existing user project) and set frame rate and resolution from the
     edit plan before import.
 2.  Import the FCP7 XML handoff timeline with a unique timeline name;
-    detect offline media and relink against the media manifest's
-    absolute paths.
+    detect offline media and image-sequence misreads and relink with
+    `ReplaceClip` against the media manifest's absolute paths, falling
+    back to an isolated single-file copy of a still when Resolve refuses
+    the original (§15.5). Status: proven on 21.1.1.10.
 3.  Re-add scene markers from the edit plan / FilmCraft read-back.
 4.  Recreate titles as editable Resolve titles (Text+/Fusion title)
     on the intended track and frame range, using only documented API
     calls; if a title cannot be placed reliably, leave it listed in the
-    report rather than approximate it.
+    report rather than approximate it. Status: implemented but not yet
+    exercised on real Resolve; the edit plan gains titles in Phase 4.
 5.  Read the Resolve timeline back and compare with the FilmCraft
     read-back (order, record/source in-out ±1 frame, fps, duration,
     media online, markers, titles), writing
@@ -1312,8 +1325,9 @@ templates and schemas, - cache invalidation.
 
 Deliver: - story outline generation with the approval stop, - LLM
 selection plans feeding the existing resolver/validator, - duration
-budgeting, - human-readable plan summary, - `--planner llm` as the
-default once tested.
+budgeting, - human-readable plan summary, - editable titles in the edit
+plan (mapped to FilmCraft text clips and recreated by `resolve-finish`),
+- `--planner llm` as the default once tested.
 
 ### Phase 5 --- QC critic and handoff hardening
 
