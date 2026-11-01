@@ -283,7 +283,7 @@ def validate_spec(spec: TimelineSpec) -> list[str]:
         if "V1" not in seen_tracks:
             add("tracks must include V1")
         for kind, count in (("V", spec.video_track_count), ("A", spec.audio_track_count)):
-            for i in range(1, count + 1):
+            for i in range(1, min(count, 32) + 1):  # the cap below reports anything larger; do not loop over hostile counts
                 if f"{kind}{i}" not in seen_tracks:
                     add(f"tracks must be contiguous: {kind}{count} is listed but {kind}{i} is not")
     if tracks_ok and (spec.video_track_count > 32 or spec.audio_track_count > 32):

@@ -34,3 +34,23 @@ def test_unflagged_approve_prefers_critic_over_stale_revise(tmp_path, monkeypatc
     monkeypatch.setattr(orchestrator, "approve_critic", lambda out: {"ok": True})
     monkeypatch.setattr(orchestrator, "approve_revision", lambda out: pytest.fail("stale revise approved"))
     assert orchestrator.approve_pending(tmp_path) == ("critic", {"ok": True})
+
+
+def test_unflagged_approve_routes_hash_stale_revision_to_refusal(tmp_path, monkeypatch):
+    m = _manifest(tmp_path, "awaiting_approval", "pending")
+    m.save()
+    called = []
+    monkeypatch.setattr(orchestrator, "approve_revision", lambda out: called.append(out) or {"ok": True})
+    monkeypatch.setattr(orchestrator, "approve_plan", lambda out: pytest.fail("edit plan approved instead of revision"))
+    assert orchestrator.approve_pending(tmp_path) == ("revision", {"ok": True})
+    assert called
+
+
+def test_unflagged_approve_prefers_critic_when_revision_hash_stale(tmp_path, monkeypatch):
+    m = _manifest(tmp_path, "awaiting_approval", "pending")
+    m.stages["critic"] = {"status": "awaiting_approval"}
+    m.save()
+    monkeypatch.setattr(orchestrator, "_revision_bound_to_current_plan", lambda manifest, ws: False)
+    monkeypatch.setattr(orchestrator, "approve_critic", lambda out: {"ok": True})
+    monkeypatch.setattr(orchestrator, "approve_revision", lambda out: pytest.fail("stale revise approved"))
+    assert orchestrator.approve_pending(tmp_path) == ("critic", {"ok": True})

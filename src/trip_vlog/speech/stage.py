@@ -228,10 +228,18 @@ def _transcribe_asset(ctx: Any, backend: Any, e: Entry) -> Transcription:
     chunks = chunk_plan(e.duration, sp.chunk_seconds) if backend.name == "openai_transcriptions" else [(0.0, e.duration)]
     parts: list[tuple[float, Transcription]] = []
     made: list[Path] = []
+    dests: list[Path] = []
+    for i, (start, length) in enumerate(chunks):
+        win = hashlib.sha1(f"{sp.chunk_seconds}|{len(chunks)}|{start:.3f}|{length or 0:.3f}".encode("utf-8")).hexdigest()[:8]
+        dests.append(ws.audio_dir / e.aid / f"{cvh}_{sp.audio_format}_{i}_{win}.{sp.audio_format}")
+    if sp.keep_audio:
+        # kept chunk files from an earlier chunking/backend of this content version are stale and would pile up
+        for old in (ws.audio_dir / e.aid).glob(f"{cvh}_{sp.audio_format}_*"):
+            if old not in dests:
+                old.unlink(missing_ok=True)
     try:
         for i, (start, length) in enumerate(chunks):
-            win = hashlib.sha1(f"{sp.chunk_seconds}|{len(chunks)}|{start:.3f}|{length or 0:.3f}".encode("utf-8")).hexdigest()[:8]
-            dest = ws.audio_dir / e.aid / f"{cvh}_{sp.audio_format}_{i}_{win}.{sp.audio_format}"
+            dest = dests[i]
             if not (sp.keep_audio and dest.is_file()):
                 err = au.extract_audio(ctx.ffmpeg, src, dest, sp.audio_format, start=start if len(chunks) > 1 else None,
                                        duration=length if len(chunks) > 1 else None, timeout=max(120.0, 2.0 * length))
