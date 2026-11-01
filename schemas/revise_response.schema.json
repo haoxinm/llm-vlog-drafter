@@ -1,0 +1,222 @@
+{
+  "$id": "https://trip-vlog.local/schemas/revise_response:1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Revision reply: the operations (from a closed set, durations in seconds only, ids copied from the request) that answer the person's request, questions about what is unclear, whether the change is destructive and what no operation can do.",
+  "properties": {
+    "ambiguous": {
+      "description": "Questions about what is unclear; empty when the request is clear.",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "about": {
+            "description": "The words of the request it concerns.",
+            "type": "string"
+          },
+          "assumption": {
+            "description": "What would be done by default, or null.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "question": {
+            "description": "What is unclear, as a question the person can answer.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "question",
+          "about",
+          "assumption"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "destructive": {
+      "description": "True when the change removes content the person may not expect to lose or changes the length a lot.",
+      "type": "boolean"
+    },
+    "destructive_reason": {
+      "description": "One sentence on why; null when destructive is false.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "operations": {
+      "description": "The operations, in the order they are applied.",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "anchor": {
+            "description": "trim_clip: where in the moment the clip is taken.",
+            "enum": [
+              "start",
+              "center",
+              "end",
+              "best",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "audio": {
+            "description": "set_clip_audio.",
+            "enum": [
+              "mute",
+              "keep",
+              "lower",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "clip_instance_id": {
+            "description": "The clip to change; null for operations on a scene.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "duration_seconds": {
+            "description": "trim_clip: the new length in seconds; add_moment: the clip's length.",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "moment_id": {
+            "description": "swap_moment, add_moment: one of the alternatives of the scene.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operation": {
+            "description": "One operation of the closed set.",
+            "enum": [
+              "trim_clip",
+              "swap_moment",
+              "remove_clip",
+              "move_clip",
+              "set_transition",
+              "set_clip_audio",
+              "shorten_scene",
+              "add_moment",
+              "remove_scene",
+              "move_scene"
+            ],
+            "type": "string"
+          },
+          "rationale": {
+            "description": "One short sentence on how this operation serves the request.",
+            "type": "string"
+          },
+          "request_part": {
+            "description": "The words of the request this operation answers.",
+            "type": "string"
+          },
+          "scene_id": {
+            "description": "shorten_scene, add_moment, remove_scene, move_scene.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "shorten_by_seconds": {
+            "description": "shorten_scene: how many seconds to take out of the scene.",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "to_position": {
+            "description": "move_clip, move_scene, add_moment: the new place, counted from 1.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "transition_seconds": {
+            "description": "set_transition: 0 for a cut, 0.3 to 1.0 for a dissolve.",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "transition_type": {
+            "description": "set_transition.",
+            "enum": [
+              "cut",
+              "dissolve",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "operation",
+          "clip_instance_id",
+          "scene_id",
+          "duration_seconds",
+          "anchor",
+          "moment_id",
+          "to_position",
+          "transition_type",
+          "transition_seconds",
+          "audio",
+          "shorten_by_seconds",
+          "rationale",
+          "request_part"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "summary": {
+      "description": "What was understood, in one or two sentences.",
+      "type": "string"
+    },
+    "unsupported": {
+      "description": "Parts of the request that no operation can do.",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "description": "Why not.",
+            "type": "string"
+          },
+          "request_part": {
+            "description": "The words of the request that no operation can do.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_part",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "summary",
+    "operations",
+    "ambiguous",
+    "destructive",
+    "destructive_reason",
+    "unsupported"
+  ],
+  "title": "revise_response",
+  "type": "object"
+}

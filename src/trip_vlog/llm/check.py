@@ -85,6 +85,10 @@ def endpoints_to_check(config: Config, name: str | None) -> list[str]:
         n = config.llm.endpoint_for("critic", images=config.qc.critic_images)[0]
         if n not in out:
             out.append(n)
+    if config.llm.revise is not None:     # `trip-vlog revise` reads text only; without llm.revise it uses the text profile, already checked
+        n = config.llm.endpoint_for("revise")[0]
+        if n not in out:
+            out.append(n)
     return out
 
 

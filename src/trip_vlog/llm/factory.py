@@ -46,7 +46,7 @@ def _dir(value: str, workspace: Path) -> Path:
 def make_gateway(
     config: Config,
     workspace: Path | str,
-    purpose: Literal["vision", "text", "critic"] = "vision",
+    purpose: Literal["vision", "text", "critic", "revise"] = "vision",
     *,
     images: bool = True,
     mode: str | None = None,
@@ -55,14 +55,14 @@ def make_gateway(
     transport: Transport | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> Gateway:
-    """Gateway for `purpose`, using the endpoint profile named by llm.vision / llm.text / llm.critic (`images`: whether the critic
-    sends images, which decides its fallback profile: vision when it does, text when it does not).
+    """Gateway for `purpose`, using the endpoint profile named by llm.vision / llm.text / llm.critic / llm.revise (`images`: whether the critic
+    sends images, which decides its fallback profile: vision when it does, text when it does not; `revise` falls back to the text profile).
 
     live: real calls (+ workspace response cache). record: like live, and every validated response is also saved to the
     fixture dir. replay: stored responses only, no network, no key needed. `transport`/`sleep` are test injection points.
     """
-    if purpose not in ("vision", "text", "critic"):
-        raise ValueError("purpose must be 'vision', 'text' or 'critic'")
+    if purpose not in ("vision", "text", "critic", "revise"):
+        raise ValueError("purpose must be 'vision', 'text', 'critic' or 'revise'")
     env = os.environ if env is None else env
     llm = config.llm
     workspace = Path(workspace)

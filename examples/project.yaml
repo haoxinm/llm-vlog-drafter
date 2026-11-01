@@ -118,6 +118,20 @@ qc:
   critic_max_sheets: 4           # most preview sheet images in one request
   critic_max_tokens: 6000        # upper bound on the reply (also capped by the endpoint's max_tokens)
 
+# Natural-language revisions (README "Revisions", `trip-vlog revise`). A request that is unclear or destructive is only PROPOSED (exit code 3);
+# `trip-vlog approve --revision` then `resume` apply exactly that proposal.
+revise:
+  auto_apply: true               # false: every revision waits for approval (as workflow.plan_review: true does)
+  max_request_chars: 2000        # longer requests are refused: ask for one change at a time
+  max_ops: 12                    # operations kept from one reply; more are dropped and then need confirmation
+  max_tokens: 4000               # upper bound on the reply (also capped by the endpoint's max_tokens)
+  confirm_duration_change_pct: 15.0          # a change of the film's length by more than this share ...
+  confirm_duration_change_min_seconds: 10.0  # ... and at least this many seconds needs confirmation
+  confirm_change_pct_any: 30.0   # ... or by more than this share whatever the seconds (moving the target duration or waiving must_include always needs confirmation)
+  confirm_removed_clips: 3       # removing more clips than this needs confirmation (a removed scene counts all its clips)
+  confirm_scene_removal: true    # removing a whole scene always needs confirmation
+  max_duration_change_pct: 50.0  # hard bound: operations that change the length by more than this are refused
+
 outputs:                         # relative to the output workspace
   project_file: "filmcraft/TripVlog.fcproj"
   preview_file: "preview/draft.mp4"
@@ -130,6 +144,7 @@ llm:
   text: main                     # endpoint profile for text/planning calls
   vision: main                   # endpoint profile for vision calls
   critic: null                   # endpoint profile for the QC critic; null = the vision profile (or the text profile when no image is sent)
+  revise: null                   # endpoint profile for `trip-vlog revise`; null = the text profile (it reads text only)
   endpoints:
     main:
       api: anthropic_messages    # anthropic_messages | openai_chat | openai_responses

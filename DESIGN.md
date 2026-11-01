@@ -1370,6 +1370,29 @@ overwrite the previous version. See the README section "QC critic".
 Deliver: - natural-language revision parser, - localized plan diffs, -
 versioned project updates, - rerender and change summary.
 
+*Status note (Phase 6).* Implemented as `trip-vlog revise` (stage `revise`, after `qc`). A model (purpose
+`revise`, prompt `revise.v1`, strict schema `revise_response`) maps the request onto the closed operation set of
+`planning/plan_diff.py` (the critic's seven operations plus `add_moment`, `remove_scene`, `move_scene`); code validates
+every operation through the resolver and validators and refuses what does not hold. Per §16, an ambiguous or
+destructive revision is never applied on its own: thresholds in `revise.*` (a removed scene, more than N removed clips,
+a large change of length (a share above `revise.confirm_change_pct_any` whatever the seconds), a moved target duration, removed must_include
+content, a refused operation next to valid ones, a model question) make it a `proposed` revision that stops with exit
+code 3 until `trip-vlog approve --revision` (a request that only asks a question exits 5: nothing to approve); `resume` or `revise --apply` then applies exactly the approved operations,
+and nothing is applied when the plan changed since. An applied revision is a new plan version (approval mode `revision`,
+bound to the new hash with `parent_plan_hash`), a new versioned FilmCraft project, a re-rendered preview, a re-run QC
+and a change summary (`plans/revisions/revise_rNN.md/.json`); QC regressions are reported, not reverted. The round
+machinery (new version, crash-safe marker, byte-checked rollback, recovery) is shared with the critic in
+`revision_common.py`. Titles, music and the outline are not changed by revisions. Live-model quality is not verified
+(only fake endpoints and the generated fixtures); see the README section "Revisions" and the runbook items below.
+
+Runbook for the first live run (not automated): (1) `llm-check` the `revise` profile; (2) on a real draft, `revise --dry-run`
+with each §16 example and check that the clips and scenes the model names are the ones meant (the plan summary is the only
+context it has); (3) a vague request ("make it better") must produce questions, not operations; (4) a request for something
+outside the operation set (change the music, rewrite a title) must come back as `unsupported`; (5) a request to remove a
+scene or most of the film must be proposed, not applied; (6) the same request twice must hit the response cache; (7) with
+a local-only profile nothing but the loopback endpoint is contacted; (8) open the new `_vNNN.fcproj` and the handoff in Resolve
+and compare with the summary.
+
 ### Phase 7 --- Deferred hardening and polish
 
 Items deferred from earlier phases. None blocks a usable draft; each
@@ -1462,12 +1485,14 @@ trip-vlog-agent/
     story_editor.md
     timeline_planner.md
     critic.md
+    revise.md
   schemas/
     asset.schema.json
     moment.schema.json
     story_outline.schema.json
     selection_plan.schema.json
     edit_plan.schema.json
+    revise_response.schema.json
   tests/
     unit/
     integration/
