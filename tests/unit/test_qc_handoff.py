@@ -158,3 +158,28 @@ def test_compatibility_success_writes_both(tmp_path, monkeypatch):
     summary, note = D._publish_compatibility(tmp_path, lambda: {"a": 1})
     assert summary == {"ok": True} and note is None
     assert (tmp_path / D.COMPAT_JSON).is_file() and (tmp_path / D.COMPAT_MD).read_text(encoding="utf-8") == "md"
+
+
+def test_preview_sheets_survive_corrupt_frame(tmp_path, monkeypatch):
+    from fractions import Fraction
+
+    from PIL import Image
+
+    from trip_vlog.qc import preview as P
+
+    calls = []
+
+    def fake_grab(ffmpeg, video, t, out, width, timeout=60.0):
+        calls.append(t)
+        if len(calls) == 1:
+            out.write_bytes(b"not a jpeg")
+        else:
+            Image.new("RGB", (width, 90), (10, 20, 30)).save(out, "JPEG")
+        return None
+
+    monkeypatch.setattr(P, "grab_frame", fake_grab)
+    fps = Fraction(30)
+    plan = P.plan_tiles([P.CutClip("clip_001", "scene_01", 0, 150), P.CutClip("clip_002", "scene_01", 150, 300)], fps, 300)
+    res = P.build_preview_sheets(Path("ffmpeg"), tmp_path / "p.mp4", tmp_path / "sheet.jpg", plan, fps, duration_frames=300)
+    assert res.written and res.written[0].is_file() and res.frames > 0
+    assert any("unreadable frame" in f for f in res.failed)

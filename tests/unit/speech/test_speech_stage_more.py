@@ -64,6 +64,13 @@ def test_audio_format_and_keep_audio(tmp_path, monkeypatch):
     ctx.config = speech_cfg(speech={"audio_format": "flac", "keep_audio": True, "language": "de"})
     run(ctx, FakeBackend())
     assert len(ex.calls) == 1
+    # a changed chunking removes the stale kept files instead of accumulating them
+    (ctx.workspace.audio_dir / aid / (kept[0].name.split("_")[0] + "_flac_0_deadbeef.flac")).write_bytes(b"x")
+    (ctx.workspace.audio_dir / aid / "other.flac").write_bytes(b"x")
+    ctx.config = speech_cfg(speech={"audio_format": "flac", "keep_audio": True, "language": "fr"})
+    run(ctx, FakeBackend())
+    names = sorted(p.name for p in (ctx.workspace.audio_dir / aid).iterdir())
+    assert kept[0].name in names and "other.flac" in names and not any("deadbeef" in n for n in names)
     # without keep_audio the temporary files and their folder are gone after use
     ctx2 = make_speech_ctx(tmp_path / "x")
     add_av(ctx2, "b.mp4", 6.0)
