@@ -133,3 +133,21 @@ def test_report_claims_verification_only_when_passing(tmp_path):
     ex = HandoffExport([], HandoffReport(str(tmp_path), [], limitations=[]))
     assert "Verified by the user-run script" in render_handoff_report(_inputs(tmp_path, ex, ("passing", "status 'pass'")))
     assert "UNVERIFIED" in render_handoff_report(_inputs(tmp_path, ex, ("not_passing", "status 'fail'")))
+
+
+def test_timeline_sheet_survives_corrupt_frame(tmp_path, monkeypatch):
+    from PIL import Image
+
+    from trip_vlog.qc import preview as P
+
+    def fake_grab(ffmpeg, video, t, out, width, timeout=60.0):
+        if t < 1:
+            out.write_bytes(b"not a jpeg")
+        else:
+            Image.new("RGB", (width, 90), (10, 20, 30)).save(out, "JPEG")
+        return None
+
+    monkeypatch.setattr(P, "grab_frame", fake_grab)
+    res = P.make_timeline_sheet(Path("ffmpeg"), tmp_path / "p.mp4", tmp_path / "sheet.jpg", [5.0], 12.0)
+    assert res.path is not None and res.path.is_file() and res.frames > 0
+    assert any("unreadable frame" in f for f in res.failed)
