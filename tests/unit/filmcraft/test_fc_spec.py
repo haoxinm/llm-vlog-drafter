@@ -161,3 +161,8 @@ def test_incoming_video_without_pre_roll_is_a_handle_issue(spec):
     _, handles = check_media_bounds(base, {"/m/a.mp4": 10.0, "/m/b.mp4": 10.0}) if Path("/m").anchor == "/" else (None, [])
     if handles is not None and Path("/m").anchor == "/":
         assert [h.clip_instance_id for h in handles] == ["b"] and "before its in point" in handles[0].message
+
+
+def test_large_track_number_is_capped(spec):
+    found = issues(replace(spec, tracks=("V1", "V999", "A1", "A2")))
+    assert "at most 32" in found and found.count("contiguous") <= 32

@@ -75,10 +75,20 @@ def make_timeline_sheet(ffmpeg: Path, preview: Path, out: Path, cut_seconds: lis
             if err:
                 failed.append(f"{label} @ {_ts(t)}: {err}")
                 continue
-            with Image.open(f) as im:
-                tiles.append((f"{label}  {_ts(t)}", im.convert("RGB").copy()))
+            try:
+                with Image.open(f) as im:
+                    tiles.append((f"{label}  {_ts(t)}", im.convert("RGB").copy()))
+            except Exception as e:  # truncated/corrupt frame: record it and keep the other tiles
+                failed.append(f"{label} @ {_ts(t)}: unreadable frame ({type(e).__name__})")
     if not tiles:
         return SheetResult(None, 0, failed, "no frames could be extracted from the preview")
+    try:
+        return _compose_sheet(Image, ImageDraw, ImageFont, tiles, out, columns, tile_width, failed)
+    except Exception as e:
+        return SheetResult(None, 0, failed, f"could not compose the timeline sheet: {type(e).__name__}: {e}")
+
+
+def _compose_sheet(Image, ImageDraw, ImageFont, tiles, out: Path, columns: int, tile_width: int, failed: list[str]) -> SheetResult:
     th = max(im.height for _, im in tiles)
     label_h, pad = 18, 6
     rows = -(-len(tiles) // columns)
