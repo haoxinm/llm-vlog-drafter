@@ -80,6 +80,9 @@ trip-vlog transcribe --output /path/to/vlog-project [--media /path/to/trip-media
 # Phase 4a: LLM story outline from the labeled moments, then a stop for your approval (see "Story outline"; runs index ... analyze first)
 trip-vlog outline --output /path/to/vlog-project [--media /path/to/trip-media] [--duration 180] [--dry-run] [--auto-approve]
 
+# Phase 5b: optional LLM critic on a finished draft (see "QC critic"): a review report, or review + localized fixes as a new project version
+trip-vlog critic --output /path/to/vlog-project [--mode report|apply]
+
 # Optional, Resolve Studio only: finish the handoff inside Resolve (see "Finish in Resolve" below)
 trip-vlog resolve-finish --output /path/to/vlog-project [--dry-run] [--project-name NAME] [--keep-on-failure]
 ```
@@ -105,10 +108,10 @@ Invalid values and unsafe paths (workspace inside the media folder, outputs esca
 vlog-project/
   project.yaml  manifest.json  README.md          # manifest: versions, approval, FilmCraft version, per-stage status
   media_index/    catalog.sqlite (authoritative), assets.jsonl, moments.jsonl, transcripts.jsonl, inventory_report.json, thumbnails/, contact_sheets/, analysis/ (sampled frames + per-segment sheets)
-  plans/          edit_plan.json, plan_summary.md, selection_plan.json, *.schema.json, validation_report.json
+  plans/          edit_plan.json, plan_summary.md, selection_plan.json, *.schema.json, validation_report.json, revisions/ (critic fixes: critic_rNN.json/.md + the parent plan)
   filmcraft/      Trip Vlog Draft_v001.fcproj ..., capability_snapshot.json, command_log.jsonl, execution_journal.json, mapping_report.json
   preview/        draft.mp4, qc_report.json/.md, contact_sheet_timeline.jpg (+ _02, _03 ... for many cuts), render_report.json
-  qc/             preview_sheet.json (index of the preview sheets: tile -> record time, clip, scene, side)
+  qc/             preview_sheet.json (index of the preview sheets: tile -> record time, clip, scene, side); critic_report.json/.md (only with qc.critic on)
   resolve_handoff/  timeline.xml, timeline.otio, media_manifest.csv, edit_plan.json, project_reference.json, handoff_report.md, compatibility_report.json/.md,
                     resolve_finish_report.json/.md (only after `resolve-finish`)
   logs/           run.jsonl, errors.jsonl
@@ -433,7 +436,7 @@ trip-vlog resume  --output C:\vlogs\lisbon
 ```
 `trip-vlog outline` followed by `draft --planner llm` on the same workspace reuses the approved outline (cached, no new request). `--auto-approve` runs straight through and records both approvals as automatic.
 
-- **Stages**: `scan, probe, catalog, thumbnails, segment, audio, transcribe, analyze, outline, outline_approval, plan, approval, assemble, preview, qc, handoff`. `plan` is the LLM selection.
+- **Stages**: `scan, probe, catalog, thumbnails, segment, audio, transcribe, analyze, outline, outline_approval, plan, approval, assemble, preview, qc, critic (only with `qc.critic` on), handoff`. `plan` is the LLM selection.
 - **Approval**: the human checkpoint is the **outline** (DESIGN §9.5). A plan made from the approved outline and not touched since is approved automatically and recorded as
   `approval.mode = "derived_from_outline"` (with the outline hash and how the outline was approved), because the selection only follows the story you approved and is validated in code. It stops for
   its own review when you set `workflow.plan_review: true`, and whenever `plans/edit_plan.json` differs from what the plan stage wrote (a hand edit needs `trip-vlog approve` again). Editing the outline withdraws
@@ -460,6 +463,57 @@ trip-vlog resume  --output C:\vlogs\lisbon
   `analyze` sends sampled **frames** (images) plus transcript excerpts and base file names to `llm.vision`; `transcribe` sends **audio** to the speech backend only if you configured a remote one; `outline` sends one text request with all
   candidate records (descriptions, local capture times, speech excerpts, base names; no images, no GPS); `plan` sends one text request (a second only when validation finds something) with the outline and the records of its candidate moments only.
   Everything is cached in `llm/` of the workspace (no repeat cost for unchanged requests). Treat descriptions and transcripts as personal data.
+
+## QC critic (optional)
+
+An LLM can review the finished draft the way a second editor would (DESIGN §9.4, §14 steps 6-8): story clarity, repetition, pacing, awkward cut points, orientation, audio conflicts, missing
+context. It is **off by default**, advisory, and never fails a draft. Deterministic QC stays the authority on objective defects; the critic's findings are kept apart (`qc/critic_report.*`, and the
+`critic` block of `preview/qc_report.json`) and never change the QC status.
+
+```sh
+trip-vlog draft ... --set qc.critic=report        # review as part of a draft (stage `critic`, after `qc`, before `handoff`)
+trip-vlog critic --output ./vlog                  # on a finished draft, this run only (project.yaml is not rewritten); default mode: report
+trip-vlog critic --output ./vlog --mode apply     # also apply the proposals that validate and are local
+#   read ./vlog/qc/critic_report.md, and with apply ./vlog/plans/revisions/critic_r01.md
+```
+
+- **Modes** (`qc.critic`): `off`; `report` (writes `qc/critic_report.json` / `.md`: findings, the evidence checked, each proposed change with its verdict, and the diff of what *would* change); `apply` (as `report`, then
+  applies the proposals described below). Write `"off"` in quotes in YAML (an unquoted `off` is the boolean false; it is accepted as off). Limits: `qc.critic_max_rounds` (1), `qc.critic_max_ops_per_round` (3),
+  `qc.critic_apply_min_severity` (`major`; `minor` also applies minor findings), `qc.critic_images` (true), `qc.critic_max_sheets` (4), `qc.critic_max_tokens` (6000).
+- **Endpoint**: purpose `critic` like `text` and `vision`: `llm.critic: <profile>`. Unset, it uses the `vision` profile (it reads preview sheets), or the `text` profile when no image is sent. The model comes from the profile
+  as always (`model` / `model_env`; no built-in default); keys from the environment variable the profile names. `media.local_only` covers it when the critic is on; `llm-check` checks its profile.
+- **What it is given** (`critic.v2` + `critic_input.v1`): the compact edit plan (scenes; clips with ids, record and source times, durations, usable length of the moment, transitions, sound policy, orientation; titles), the
+  deterministic QC results with their data, the per-clip audio measurements, the tile index (tile id, sheet, record time, cut side, scene, clip) and the **preview sheet images** themselves
+  (`qc.critic_max_sheets` of them, spread over the film). Everything derived from the media (scene wording, descriptions, titles, QC details that can quote speech) is wrapped as untrusted data. With
+  `qc.critic_images: false`, an endpoint with `supports_images: false`, or no sheets (no ffmpeg, preview not rendered), it runs **text only** and the report says so; it then cannot cite tiles. It never gets file
+  names, folders, GPS or the raw media. What leaves the machine: that text plus up to four JPEG sheets of low-resolution preview frames, to the `critic` endpoint (`local` / `remote` is in the report and in `status`).
+- **Response** (`critic_response`, strict schema, also in `schemas/`): `findings[]` with `severity` (`info|minor|major`), `category` (`story_clarity, repetition, pacing, cut_point, orientation, audio_conflict, missing_context, other`),
+  affected `scene_ids` / `clip_instance_ids`, `evidence` and an optional `proposed_change` from a **closed set**: `trim_clip` (new duration in seconds and/or anchor, within the moment), `swap_moment` (another candidate
+  moment of the same scene from the approved outline), `remove_clip`, `move_clip` (inside its scene), `set_transition` (cut, or a dissolve of 0.1-5 s), `set_clip_audio` (`mute`, `keep`, `lower` = the configured ambient gain) and
+  `shorten_scene`. The model writes no timestamps, only durations in seconds; code converts to frames and the existing resolver recomputes the source ranges.
+- **Checked in code**: evidence must name something supplied (a tile whose image was sent, a QC check, a clip or scene of the plan, a clip with audio measurements); other evidence is dropped, and a finding left with none is dropped
+  and listed ("do not claim to have heard or seen content not supplied"). Unknown ids are removed. A proposal is parsed, tried through the resolver and `validate_selection_plan` / `validate_edit_plan`
+  (must_include / must_exclude, total-duration tolerance, transitions and handles, titles, repeats) and judged: a malformed, out-of-bounds or invalid one stays on its finding as a note (`change.status: invalid`) and changes nothing.
+  A dissolve the editor cannot place (it would need a non-centred alignment, which the FilmCraft adapter places as a hard cut) is refused rather than silently weakened.
+- **Applying** (`apply`): only proposals of findings at least `qc.critic_apply_min_severity` that cite evidence about the clip or scene they change (a tile of that clip, its plan entry, its audio, or a check whose data names it; otherwise `change.status: unsupported`) and are **local** (the change is in a scene or clip the finding names, or next to it; a finding spans at most two neighbouring scenes
+  and then only adjacent clips), most severe first, each tried on top of the earlier ones, at most `qc.critic_max_ops_per_round`. The result is a **new** edit plan (`plans/edit_plan.json`; the parent plan, selection plan, summary and QC report are kept under
+  `plans/revisions/critic_rNN.*`), the diff in `plans/revisions/critic_rNN.json` / `.md` (scene and clip level, duration change per scene and in total), a new versioned FilmCraft project
+  (`filmcraft/Trip Vlog Draft_v00N.fcproj`; the earlier one is never touched), a re-rendered preview (the previous one stays as `preview/draft.before_critic_rNN.mp4`), a re-run QC, and the round recorded in `manifest.json`
+  (`critic.rounds`). If the new project cannot be built, the previous plan and approval are put back and the proposed plan stays in `plans/revisions/` (stage `partial`; the same revision is not tried again on `resume`, a different one is). After the last round the final version is reviewed once
+  more (report only), so the report always describes what `handoff` packages.
+  Safety rails: the round limit counts the applied rounds of the plan's lineage (and of the run), and a change that would return the plan to a version an earlier round started from or produced is not applied. Nothing is
+  reverted when QC gets worse, but no further round runs once the new version has a failing check the old one did not, or its preview or QC could not be produced; the report, `status`/`draft` output and `handoff_report.md`
+  say so (`trip-vlog critic` lifts the stop). Before the first file is touched the round re-checks that `edit_plan.json` is still the reviewed plan. A crash or Ctrl-C mid-round leaves a marker (`critic.applying`);
+  the next run puts the saved parent files back (plans, QC and mapping reports, preview; files that did not exist before are deleted). A rebuild that fails for the environment (FilmCraft missing, disk full, timeout) is not
+  remembered and is retried by `resume`. `status` and `handoff_report.md` name the latest project version and the critic report.
+- **Approval**: a fix starts only from an approved plan. It is recorded as `approval.mode = "critic_fix"`, bound to the **new** plan hash, with `parent_plan_hash` (and the `parent_approval` it replaced), the revision file listing exactly the operations
+  applied, the report snapshot `qc/critic_report.rNN.json` that motivated it and its sha256, and `authorization: automatic`. It authorizes those validated operations and nothing else; any later edit changes the hash and needs the usual approval.
+  With `workflow.plan_review: true` nothing is applied automatically: the stage writes the proposed revision (`status: proposed`), stops (exit 3, `awaiting_approval`), and you read `plans/revisions/critic_rNN.md`, then
+  `trip-vlog approve --critic` and `trip-vlog resume` apply exactly that revision (`authorization: manual`). `approve --critic` refuses when the plan has changed since. An approved revision is applied by `resume` even when `qc.critic` is `off` in `project.yaml` by then.
+- **Caching**: keyed by the plan hash, a digest of the QC results, a digest of the sheet index, the whole request text, the images sent, prompt and schema versions, endpoint / model / parameters / mode, the validation and planning settings, the minimum still length, the failed-revision list, the mode and limits and the
+  rounds already applied. Unchanged inputs make no request (the stage is a cache hit; a repeat of the same request is answered by the workspace response cache); a failed or unusable reply is retried by `resume`. A plan made by
+  a critic round is not re-reviewed beyond `qc.critic_max_rounds`. A plan stage that re-plans keeps the critic-fixed plan as a backup (`edit_plan.<hash>.bak.json`) like any hand-edited plan.
+- Changes apply only to a plan that still resolves to itself (a hand-edited `edit_plan.json`, or a catalog changed since, is reviewed but not changed). `swap_moment` needs the approved outline of `--planner llm`; a baseline plan has none.
 
 ## Titles
 
@@ -620,14 +674,14 @@ with Python 3.11 and 3.13. Only Linux has been exercised locally so far; treat W
 
 ## Known limitations
 
-- **Not implemented yet:** the QC critic and natural-language revisions (Phases 5-6). `--planner llm` has only been exercised with fake endpoints and the generated fixtures; try it on your own footage before making it the default.
+- **Not implemented yet:** natural-language revisions (Phase 6; it will reuse `planning/plan_diff.py`). The QC critic (Phase 5b) has only been exercised with fake endpoints and the generated fixtures. `--planner llm` has only been exercised with fake endpoints and the generated fixtures; try it on your own footage before making it the default.
   The baseline planner is chronological with fixed clip lengths, stills at a default duration, no music or narration, hard cuts, and titles only when configured.
 - Titles are one line only; their size and position are fixed defaults; `resolve-finish` titles are still experimental.
 - Resolve import is unverified by this tool (see above). Titles are not carried by any interchange format; audio fades appear as dissolves in OTIO;
   FCPXML drops non-V1 transitions; EDL carries one video track. Only the FilmCraft 0.13.0 / Linux combination has been run; Windows and macOS are unverified until CI has run.
 - Hand-editing `edit_plan.json` requires updating `plan_hash` yourself; there is no helper yet.
 - Interrupted assemblies leave their numbered `.fcproj` in `filmcraft/`; it is not cleaned up automatically.
-- Black-frame detection runs on the preview only and is reported as a warning; subjective checks (speech truncation, audio conflicts) need the Phase 5 critic.
+- Black-frame detection runs on the preview only and is reported as a warning; subjective judgments (does a cut feel abrupt, is the story clear) need the optional QC critic (`qc.critic`).
 - HEIC/HEIF photos need ffprobe support for those formats (Pillow has no HEIC decoder here); without it they are listed as failed, and no thumbnail is made.
 - Fast fingerprints include mtime, so a plain copy that does not preserve mtime is not detected as a duplicate (use `--fingerprint sha256`).
   Switching fingerprint mode refreshes `content_version` without marking assets stale, so a real change made at the same moment goes unnoticed.

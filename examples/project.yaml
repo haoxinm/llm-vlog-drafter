@@ -108,6 +108,15 @@ qc:
   contact_sheet_columns: 4
   contact_sheet_max_frames: 48
   contact_sheet_tile_width: 320
+  # Optional LLM critic (README "QC critic"). off: never runs. report: writes qc/critic_report.md. apply: also applies its validated, local fixes
+  # as a new plan version and a new FilmCraft project (the earlier version is kept).
+  critic: "off"                  # off | report | apply
+  critic_max_rounds: 1           # apply: critic -> fix -> rebuild -> QC rounds per plan
+  critic_max_ops_per_round: 3    # apply: most changes applied in one round
+  critic_apply_min_severity: major   # apply: findings below this severity are reported, never applied (minor | major)
+  critic_images: true            # send the preview sheets to a vision-capable endpoint; false (or an endpoint without images) = text only
+  critic_max_sheets: 4           # most preview sheet images in one request
+  critic_max_tokens: 6000        # upper bound on the reply (also capped by the endpoint's max_tokens)
 
 outputs:                         # relative to the output workspace
   project_file: "filmcraft/TripVlog.fcproj"
@@ -120,6 +129,7 @@ llm:
   mode: live                     # live | record | replay (env TRIP_VLOG_LLM_MODE overrides)
   text: main                     # endpoint profile for text/planning calls
   vision: main                   # endpoint profile for vision calls
+  critic: null                   # endpoint profile for the QC critic; null = the vision profile (or the text profile when no image is sent)
   endpoints:
     main:
       api: anthropic_messages    # anthropic_messages | openai_chat | openai_responses

@@ -1357,6 +1357,14 @@ Deliver: - preview contact sheet and critic report, - localized
 critic-driven fixes, - handoff compatibility results recorded from the
 fixture round-trip, - explicit compatibility report.
 
+*Status note (Phase 5b).* The critic is optional (`qc.critic: off | report | apply`, off by
+default) and advisory. Its findings are checked in code (evidence must name something that
+was supplied; proposals are tried through the resolver and validators) and are kept apart from
+the deterministic QC status. Fixes come from a closed set of operations in
+`planning/plan_diff.py` (shared with the Phase 6 revision loop), are applied as a new plan
+version and a new versioned FilmCraft project with approval mode `critic_fix`, and never
+overwrite the previous version. See the README section "QC critic".
+
 ### Phase 6 --- Revision loop
 
 Deliver: - natural-language revision parser, - localized plan diffs, -

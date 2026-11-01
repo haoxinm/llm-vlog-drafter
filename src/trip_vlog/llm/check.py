@@ -81,6 +81,10 @@ def endpoints_to_check(config: Config, name: str | None) -> list[str]:
         n = getattr(config.llm, purpose)
         if n not in out:
             out.append(n)
+    if config.qc.critic != "off":
+        n = config.llm.endpoint_for("critic", images=config.qc.critic_images)[0]
+        if n not in out:
+            out.append(n)
     return out
 
 
