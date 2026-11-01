@@ -95,6 +95,9 @@ COMMAND_RULES: dict[str, CommandRule] = {
     "graphics.newText": _rule("text position size seconds time track", "text"),
     "markers.add": _rule("time name comment color target durationFrames", "time"),
     "clip.audioGain": _rule("clips mode db", "clips db"),
+    "clip.fitToFrame": _rule("clips", "clips"),
+    "effects.setParam": _rule("clip effect param value time keyframe", "clip effect param value"),
+    "mixer.setStrip": _rule("strip muted", "strip muted"),
     "media.status": _rule("item"),
     "file.exportMedia": _rule("path format wait scale sequence audio", "path", write="path"),
     "file.exportInterchange": _rule("format path sequence", "format path", write="path"),
@@ -108,7 +111,7 @@ _TOOL_ARGS: dict[str, frozenset[str]] = {
     "media_import": frozenset({"paths"}), "render_frame": frozenset({"seconds", "max_side"}),
 }
 EXPORT_FORMATS = frozenset({"edl", "xml", "fcpxml", "otio", "aaf", "omf"})
-EXPORT_MEDIA_FORMATS = frozenset({"h264"})
+EXPORT_MEDIA_FORMATS = frozenset({"h264", "wav"})
 
 
 def _is_int(v: Any) -> bool:
@@ -158,6 +161,24 @@ def validate_command(cid: str, params: Mapping[str, Any] | None, policy: PathPol
             raise ParameterError("clip.audioGain.clips must be a non-empty list of clip ids")
         if params.get("mode", "set") != "set":
             raise ParameterError("clip.audioGain: only mode 'set' is allowed")
+    if cid == "clip.fitToFrame":
+        c = params["clips"]
+        if not (isinstance(c, list) and c and all(_is_int(x) for x in c)):
+            raise ParameterError("clip.fitToFrame.clips must be a non-empty list of clip ids")
+    if cid == "effects.setParam":
+        # the only use: a keyframe on a clip's Volume level (ducking)
+        if params["effect"] != "volume" or params["param"] != "level":
+            raise ParameterError("effects.setParam: only effect 'volume', param 'level' is allowed")
+        v = params["value"]
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not (-96 <= v <= 15):
+            raise ParameterError("effects.setParam.value must be a level in dB between -96 and 15")
+        if "keyframe" in params and not isinstance(params["keyframe"], bool):
+            raise ParameterError("effects.setParam.keyframe must be a boolean")
+    if cid == "mixer.setStrip":
+        import re as _re
+
+        if not (isinstance(params["strip"], str) and _re.fullmatch(r"A[1-9][0-9]{0,2}", params["strip"])) or params["muted"] is not True:
+            raise ParameterError("mixer.setStrip: only muting an audio track strip ('A1'...) is allowed")
     if cid == "file.exportInterchange" and params["format"] not in EXPORT_FORMATS:
         raise ParameterError(f"file.exportInterchange.format must be one of {sorted(EXPORT_FORMATS)}")
     if cid == "file.exportMedia" and params.get("format", "h264") not in EXPORT_MEDIA_FORMATS:

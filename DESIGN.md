@@ -242,6 +242,10 @@ media:
   vision_sampling_fps: 1.0       # frames per second sent to the vision model
   fine_sampling_fps: 4.0         # optional dense pass for boundary refinement
   fine_sampling_enabled: false
+  fine_sampling_min_score: 0.7   # Phase 7c: moments with interest >= this are refined
+  fine_sampling_window_seconds: 1.0
+  fine_sampling_max_per_asset: 3
+  fine_sampling_max_moments: 30
   segment_window_seconds: 6.0    # max length of a deterministic candidate segment
   transcribe_speech: true
   local_only: false              # every LLM endpoint used must be loopback (§22)
@@ -1402,28 +1406,240 @@ ships with tests like any other phase. Deliver:
     from the timeline read back from FilmCraft when its native export
     is missing or lossy, with the cross-check diff in the handoff
     report. Not needed so far: FilmCraft 0.13's native FCP7 XML
-    passed every check in Resolve.
+    passed every check in Resolve. *Status: done for FCP7 XML (Phase 7b);
+    OTIO is not generated.*
 -   **Plan re-seal helper:** a command that re-validates a hand-edited
     `edit_plan.json` / outline and recomputes its seal (hash), so
     manual edits are accepted explicitly instead of failing the hash
-    check.
+    check. *Status: done (Phase 7a), see the note below.*
 -   **Failed-assembly cleanup:** when a FilmCraft build fails midway,
     mark the partial `_vNNN.fcproj` as failed in the journal and keep
-    it out of `resume`/handoff, without deleting user data.
+    it out of `resume`/handoff, without deleting user data. *Status:
+    done (Phase 7a).*
 -   **Portrait and mixed-aspect framing:** scale-to-fit portrait clips
     and stills in a landscape sequence (and the reverse), if FilmCraft
-    supports it and the result is verified.
+    supports it and the result is verified. *Status: done (Phase 7b,
+    `filmcraft.fit_mixed_aspect`, off by default).*
 -   **Audio ducking:** lower music under natural sound or speech
-    (§13.3), verified in the read-back and the preview.
+    (§13.3), verified in the read-back and the preview. *Status: done
+    (Phase 7b, `filmcraft.duck_music`, off by default).*
 -   **Fine sampling refinement (§7.2 step 5):** when
     `fine_sampling_enabled`, resample at `fine_sampling_fps` around the
     best-frame boundaries of high-scoring moments and tighten them with
-    a second, smaller request (own prompt, schema and cache). Phase 3
-    ships without it; enabling it only adds a warning.
+    a second, smaller request (own prompt, schema and cache). *Status:
+    done (Phase 7c), see the note below; Phase 3 shipped without it.*
 -   **Captions and subtitles from transcripts (§13.4):** captions only
     from transcript text, never paraphrased, exported in a form the
     handoff can carry (e.g. an SRT alongside the timeline) and verified
-    in Resolve.
+    in Resolve. *Status: the SRT export is done (Phase 7a); the
+    Resolve import is a manual step and is not verified live.*
+
+**Phase 7a status (plan re-seal, failed-assembly cleanup, captions).**
+Built and covered by tests with the fake and the real FilmCraft CLI;
+nothing here was run in Resolve.
+
+-   *Re-seal* (`trip-vlog reseal --output WS [--plan|--outline]`,
+    `reseal.py`). It runs the full plan validators (the assemble-time
+    ones, with the effective target and waived references of accepted
+    revisions) or the outline validator on the file as the person left
+    it, with only the `plan_hash` comparison skipped; any error refuses
+    the seal (exit 4) and changes nothing. A valid file is copied to
+    `<stem>.<hash12>.bak.json` (the naming of the plan and outline
+    stages), then written back sealed (plan: recomputed `plan_hash` and
+    the validators' frame repairs; outline: canonical form), the
+    derived summaries are refreshed, and `manifest.reseal` records it.
+    Approval semantics are those of any hand edit: approvals are bound
+    to the content hash, a changed content invalidates an earlier
+    approval (the record the approval stage would write), nothing is
+    approved by reseal, a sealed plan is not eligible for the
+    outline-derived automatic approval, and the manifest's recorded
+    hash of the generated plan/outline is left alone so that a later
+    re-plan still backs the edit up. Refused while a critic/revision
+    round is half-applied. Decision to confirm: reseal applies the
+    validators' frame-boundary repairs to the person's file (listed in
+    the output) rather than refusing it.
+-   *Failed assembly*. The journal already recorded `failed` runs; now a
+    run left `running` by a dead process (pid, host and start time are
+    recorded per run) is marked `failed` + `abandoned` by the next
+    build; a live build of another process is never touched and a
+    second build is refused; the journal is updated under a short OS
+    file lock and reloaded before each write; `--abandon-running` is the
+    escape hatch for a build of an unreachable host; failed/interrupted builds are listed
+    in `manifest.filmcraft.failed_versions`, `status` and the handoff
+    report, `latest_run` documents that only completed builds are
+    returned (so `resume`, preview, QC, critic, revisions and handoff
+    never use a failed one), and version numbers are reserved by the
+    journal, the `.fcproj` and the `.timeline_spec.json` so a number is
+    never reused even if the journal is lost. Failed `.fcproj` files are
+    kept; nothing is deleted.
+-   *Captions* (`captions.*`, `handoff/captions.py`). Off by default
+    (`project.include_subtitles` is its older alias). `timeline.srt`
+    beside `timeline.xml`, built from catalog transcripts of the current
+    asset content only; verbatim words; source time mapped to record
+    time through the edit plan and clipped to the clip's used range;
+    only `natural_sound` clips on speech tracks at normal speed (the
+    plan has no speed field, so this is a source-length-versus-clip-
+    length guard); coarse-timestamp segments are skipped. Word positions
+    inside a segment are estimated from character position (the
+    transcript has segment timing only) and are used for splitting into
+    cues and for cutting a segment at a clip boundary. UTF-8 without
+    BOM, CRLF line endings. A hand-edited SRT is backed up before being
+    replaced; a stale one the tool wrote is set aside (`timeline.<hash12>.stale.srt`). Overlay clips are not captioned (their audio is not in the timeline) and overlapping cues are kept. The
+    handoff report and its import notes say that importing the SRT in
+    Resolve is a manual step; `resolve-finish` does not import it.
+
+Runbook items for the first live run (not automated): (1) open
+`timeline.xml` and import `timeline.srt` in Resolve (File > Import >
+Subtitle...) and check that the cues line up with the speech, in
+particular against the timeline's start timecode (an offset of one hour
+means the SRT is read relative to timecode zero); (2) check the CRLF /
+no-BOM file with non-ASCII text (accents, CJK) on Windows and macOS
+Resolve; (3) compare a few captions with the audio where a clip cuts
+through a transcript segment (the estimated word positions); (4) hand
+edit a plan on Windows with Notepad (BOM) and `reseal` it; (5) kill a
+`resume` during a FilmCraft build and confirm the next run builds the
+next version and `status` lists the failed one.
+
+**Phase 7b status (read-back interchange, mixed-aspect framing, ducking).**
+Built and covered by tests with the fake and the real FilmCraft CLI
+(0.13.0, Linux); nothing here was run in Resolve. All new options are
+off by default except the fallback, which only acts on a failure.
+
+-   *What FilmCraft supports* (checked in the CLI and its source, not
+    assumed): `clip.fitToFrame` (answers with the scale it chose; the
+    Motion scale is readable in `sequence_inspect`, 100 = native size, so
+    a portrait or 4K clip is cropped without it); `effects.setParam`
+    with `keyframe: true` on a clip's `volume.level` (dB, hard range
+    -287.5..15, added to the clip gain; the read-back reports only the
+    keyframe count, not the times and values); `mixer.setStrip` to mute a
+    track in a session that is never saved; `file.exportMedia` with
+    `format: wav`. FilmCraft's FCP7 XML carries the Basic Motion scale and
+    the Audio Levels keyframes (`when` = source frame, level linear,
+    clip gain folded in). Track-level automation (`mixer.setKeyframe`)
+    and Essential Sound ducking (`essentialSound.generateDucking`) exist
+    but are not used: the first is lost in every interchange format, the
+    second needs clips tagged in the UI.
+-   *Framing* (`filmcraft.fit_mixed_aspect`): the mapping marks every
+    video or still placement whose display size differs from the sequence
+    (`Placement.fit_source_size`); the adapter fits them in one command;
+    read-back verification requires the scale `min(W/w, H/h)*100`
+    (+-0.5), the XML round trip compares the Basic Motion scale, and the
+    QC `framing` check looks for black bars in a preview frame of scaled
+    clips that are alone on screen. Without the option the compatibility
+    report keeps the manual framing step and now says the clips are
+    cropped. Rotation metadata is honoured by FilmCraft (a rotated phone
+    clip reports the rotated size).
+-   *Ducking* (`filmcraft.duck_music`, `duck_mode`, `duck_db`,
+    `duck_ramp_seconds`, `duck_merge_gap_seconds`; `qc/ducking.py`):
+    windows from transcript segments (or the whole clip when the
+    transcript is coarse, or, in `natural_sound` mode, active measured
+    sound), merged, with linear ramps; keyframes are absolute Volume
+    levels on the music placement (`Placement.gain_keys`). Verified by
+    keyframe count after reopening, by times and levels in the native
+    FCP7 XML, and in the preview by rendering the music tracks alone
+    (other audio tracks muted in a throw-away FilmCraft process; the
+    project hash is compared afterwards) and comparing each window with
+    the music source over the same range (+-2 dB). QC `music_ducking`
+    warns, never fails. The stage cache keys include the new settings
+    and, for ducking, the transcripts, only when the feature is on.
+-   *Read-back fallback* (`filmcraft.readback_interchange: auto|off`,
+    `handoff/readback.py`): decision by the same round trip as the
+    compatibility report; generated from `SequenceSnapshot` and
+    `ProjectSnapshot` after a fresh reopen, in FilmCraft's own xmeml
+    structure; accepted only if it round-trips exactly (keyframes
+    excluded: values are not readable) and recorded in
+    `readback_interchange.json` and the handoff report with the
+    plan-versus-readback diff and the list of what it cannot carry. A
+    lossy native file is kept as `timeline.native.xml`; a good one is
+    never touched; stale provenance is set aside as `.stale`.
+    Decision to confirm: the generated file takes the name
+    `timeline.xml` so that `resolve-finish` and the user's import step
+    need no change.
+
+Runbook items for the first live run (not automated): (1) import a
+generated `timeline.xml` (needs a FilmCraft whose FCP7 XML export is
+missing or wrong; the tests simulate that) and compare it with the
+native one in Resolve; (2) with `fit_mixed_aspect` on, import a plan with a
+portrait clip and a 4K clip and check Inspector > Transform > Zoom
+equals the planned scale and that Resolve's own "Image scaling" setting
+does not scale it a second time; (3) with `duck_music` on and a music
+clip, check that the Audio Levels keyframes arrive as clip volume
+automation in Fairlight and that the dips line up with the speech;
+(4) on Windows and macOS check that the music-bed render (WAV export in
+a muted throw-away session) works and leaves the `.fcproj` untouched.
+
+**Phase 7c status (fine sampling refinement, §7.2 step 5).** Built and
+covered by unit tests, a stub vision transport with real ffmpeg frame
+extraction on the generated clips; nothing here was run against a real
+model.
+
+-   *Where:* `analysis/refine.py`, called from the `analyze` stage after
+    labeling (and after any cached labels are loaded). Off unless
+    `media.fine_sampling_enabled`; the former "not implemented" warning
+    is gone.
+-   *Which moments:* labeled video moments of at least 1 s with
+    `interest >= fine_sampling_min_score`, best first (ties by
+    confidence, then ID), at most `fine_sampling_max_per_asset` per
+    asset and `fine_sampling_max_moments` per run. The cached refinement
+    of a moment outside the selection is ignored, not deleted.
+-   *Windows:* `fine_sampling_window_seconds` either side of the
+    moment's start and of its end, in integer frames, clipped to the
+    moment's segment and the asset and split at the moment's midpoint so
+    the two never overlap. Decision: clipping to the segment (stricter
+    than "the asset") keeps a refined moment from reaching into a
+    neighbouring scene cut or overlapping the neighbouring moment.
+    Frames are sampled with the existing sampler at `fine_sampling_fps`
+    (capped per window by `vision_max_frames_per_segment` and half of
+    `vision_batch_max_images`) and extracted by the existing extractor
+    (same seek formula and `FRAMES_VERSION`) into
+    `media_index/analysis/fine/`; with `vision_input: contact_sheet` one
+    sheet per window goes to `fine_sheets/`. Original media is only read.
+-   *Request:* prompt `boundary_refine.v1` (front matter version) on top
+    of `media_analyst.v1`, schema `schemas/boundary_refine_response.schema.json`
+    (strict: `moment_id`, `start_frame_index`, `end_frame_index`, both
+    nullable). Like labeling, the model names frame indices, not
+    seconds; an index stands for the stretch halfway to its neighbours
+    (the `best_frames` rule). No file names or other media text are sent.
+    It uses the `llm.vision` profile through `make_gateway`, so
+    record/replay, the response cache (which never stores failed replies;
+    a schema-valid but unusable one is evicted), `media.local_only`,
+    `llm-check` and the 3-consecutive-400s breaker apply (the breaker
+    counts successes of the labeling requests of the same run too).
+-   *Clamping:* an index outside the frames shown, a non-integer or a
+    missing moment makes that moment keep its labeled range (not cached,
+    response evicted, asked again next run). Two valid indices that
+    would leave under 0.5 s are a cached "no better boundary" answer
+    (`applied: false`, with a `reason`). The range is always inside the
+    windows and the asset. Selected moments with no room for windows
+    are counted in the summary's `fine_sampling.skipped`.
+-   *Storage:* the refined range replaces `source_in/out_seconds` of the
+    moment (the table columns and `moments.jsonl`), so selection,
+    planning, validation and every cache key that fingerprints the
+    planning catalog use it unchanged; the labeled range, windows,
+    frame artifacts, indices, model and prompt are in the moment's
+    `refinement` record (`version`, `applied`, `original_*`,
+    `refined_*`). The record is cached in `analysis_cache`
+    (`vision_refine:<segment>`) under a key of the labeled range, prompt
+    and schema hashes, model, endpoint params, fine sampling settings
+    (fps, cap, image size, `FRAMES_VERSION`, sheet version), window span
+    and input mode; the selection settings are in the stage input hash
+    but not in the item key. Turning the option off rebuilds the moments
+    from the labels but keeps the rows (toggling back on re-pays
+    nothing); stale rows are pruned only while it is on.
+
+Runbook items for the first live run (not automated): (1) on a real
+trip with `fine_sampling_enabled`, compare refined and labeled ranges in
+the contact sheets / a preview: do the new cuts drop the blur, the
+camera swing and the dead frames, and is nothing good lost; (2) check
+the model really uses the null answer when the boundary is already
+good (the share of `applied: false`), and that start/end frame indices
+are not biased towards the first or last frame; (3) try `fine_sampling_fps`
+2 / 4 / 8 and the window 0.5 / 1 / 2 s for cost against quality; (4)
+check `contact_sheet` input against `frames` for index accuracy; (5)
+check the moment is not made too short for the planner (the 0.5 s
+floor) and that the extra requests fit the
+endpoint's image-count and rate limits; (6) with a local endpoint,
+confirm nothing leaves the machine (`media.local_only`).
 
 ## 21. Suggested repository structure
 

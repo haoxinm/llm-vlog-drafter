@@ -64,6 +64,8 @@ FEATURES: tuple[tuple[str, str, str], ...] = (
     (X.F_MUTE, "Video clips placed without their audio", "place_clip"),
     (X.F_MUSIC, "Music track (A2)", "place_clip"),
     (X.F_AUDIO, "Other stand-alone audio clips", "place_clip"),
+    (X.F_FRAMING, "Clips scaled to fit the frame (portrait / mixed-size sources)", "fit_to_frame"),
+    (X.F_DUCKING, "Music ducking (Volume keyframes on the music clip)", "clip_keyframe"),
     ("mixed_fps", "Source clips with a frame rate different from the sequence", "place_clip"),
     ("mixed_resolution", "Source clips with an aspect ratio or orientation different from the sequence", "place_clip"),
     (X.F_SPEED, "Speed changes", ""),
@@ -124,6 +126,11 @@ def plan_usage(plan: EditPlan, spec: TimelineSpec, catalog: PlanningCatalog) -> 
     digits = [catalog.assets[c.asset_id].relative_path for c in stills if c.asset_id in catalog.assets
               and re.search(r"\d", Path(catalog.assets[c.asset_id].relative_path).stem)]
     use[X.F_STILLS].data["with_digits_in_name"] = len(digits)
+    turned = [c.clip_instance_id for c in stills if c.asset_id in catalog.assets and catalog.assets[c.asset_id].rotation_degrees % 360]
+    if turned:
+        use[X.F_STILLS].data["exif_rotated"] = len(turned)
+        use[X.F_STILLS].notes.append(f"{len(turned)} still(s) carry EXIF orientation, which FilmCraft ignores: they show sideways or upside down "
+                                     "in the timeline until rotated (Inspector > Transform > Rotation, or re-export the file)")
     use[X.F_OVERLAYS].count = sum(1 for c in clips if c.track_role == "overlay" and c.media_type in ("video", "image"))
     use[X.F_TITLES].count = len(plan.titles)
     use[X.F_MARKERS].count = len(plan.markers)
@@ -148,6 +155,16 @@ def plan_usage(plan: EditPlan, spec: TimelineSpec, catalog: PlanningCatalog) -> 
                 continue
             res_off.append(c.clip_instance_id)
             orient_off += a.orientation not in (None, "square") and a.orientation != ("portrait" if plan.sequence.height > plan.sequence.width else "landscape")
+    fitted = {p.clip_instance_id for p in spec.placements if p.fit_source_size is not None}
+    use[X.F_FRAMING].count = len(fitted)
+    use[X.F_FRAMING].ids = sorted(fitted)
+    use[X.F_DUCKING].count = sum(1 for p in spec.placements if p.gain_keys)
+    use[X.F_DUCKING].data["keyframes"] = sum(len(p.gain_keys) for p in spec.placements)
+    unfitted = [c for c in res_off if c not in fitted]
+    use["mixed_resolution"].data.update(fitted=len(res_off) - len(unfitted), unfitted=len(unfitted))
+    if unfitted:
+        use["mixed_resolution"].notes.append(f"{len(unfitted)} clip(s) are not scaled to the frame (filmcraft.fit_mixed_aspect is off, or this FilmCraft "
+                                             "cannot): FilmCraft places them at native size, so a portrait clip in a landscape timeline is cropped")
     use["mixed_fps"].ids, use["mixed_resolution"].ids = fps_off, res_off
     use["mixed_fps"].count = len(fps_off)
     use["mixed_fps"].data["clips"] = fps_off[:MAX_LISTED]
@@ -164,13 +181,15 @@ class CompatInputs:
     spec: TimelineSpec                       # effective spec: what was sent to FilmCraft (dissolves already downgraded where needed)
     catalog: PlanningCatalog
     capabilities: Mapping[str, bool] | None  # FilmCraft capability name -> usable (None: no capability snapshot)
-    xml_path: Path | None                    # exported timeline.xml (None: FCP7 XML was not exported)
+    xml_path: Path | None                    # the FCP7 XML the handoff is imported from (None: none was exported or generated)
     filmcraft_version: str | None = None
     verified_after_reopen: bool | None = None
     mapping_warnings: list[dict[str, Any]] = field(default_factory=list)
     finish_report: Mapping[str, Any] | None = None
     tool_version: str = ""
     fold_case: bool | None = None
+    xml_origin: str = "native"               # native | readback (generated from the FilmCraft read-back: it carries no volume keyframes)
+    readback: Mapping[str, Any] | None = None   # summary of the read-back fallback, when one was made
 
 
 def sha256_of(path: Path) -> str:
@@ -294,6 +313,10 @@ def _resolve_block(feature: str, usage: Usage, finish: Mapping[str, Mapping[str,
                 block.update(status=RE.PROVEN, summary=f"resolve-finish ({res}) imported this workspace's timeline and the read-back checks "
                              f"{', '.join(got)} passed.")
                 manual = None
+    if feature == "mixed_resolution" and usage.count and not usage.data.get("unfitted"):
+        manual = None      # every clip of a different aspect or size was scaled to fit (FilmCraft clip.fitToFrame): nothing to frame by hand
+        summary += " Every such clip in this plan was scaled to fit the frame by FilmCraft (see the framing row); that import is not recorded."
+        block["summary"] = summary
     block["manual"] = manual
     return block
 
@@ -315,6 +338,10 @@ def _verdict(feature: str, fc: Mapping[str, Any], xml: Mapping[str, Any], rs: Ma
         return "unsupported", f"the exported XML does not carry it as planned ({n} mismatch(es))", None
     if xml["status"] == "unreadable":
         return "unsupported", "the exported FCP7 XML could not be read", None
+    if xml["status"] == "not_carried":
+        return ("manual", "the XML was generated from the FilmCraft read-back, which cannot read keyframe values, so the music ducking is not in it",
+                "The music is not ducked in the imported timeline. Lower the music under the speech windows listed in music_ducking in "
+                "compatibility_report.json (Fairlight or the Inspector), or use FilmCraft's own timeline.xml once its export works.")
     if feature == X.F_DISSOLVES and usage is not None and usage.ids:
         # asked != placed: the XML (matching what was sent to FilmCraft) holds hard cuts, so it does not carry the plan's dissolves
         return "manual", f"{len(usage.ids)} of {usage.count} planned dissolve(s) became hard cuts in the handoff", _downgrade_instruction(usage)
@@ -342,7 +369,7 @@ def build_compatibility_report(i: CompatInputs) -> dict[str, Any]:
         xml_sha = sha256_of(Path(i.xml_path))
         try:
             tl = parse_fcp7_xml(Path(i.xml_path))
-            rt = X.compare_timeline_xml(tl, exp, fold_case=i.fold_case)
+            rt = X.compare_timeline_xml(tl, exp, fold_case=i.fold_case, keyframes_carried=i.xml_origin != "readback")
             xml_state = "ok"
         except XmlReadError as e:
             xml_state, xml_error = "unreadable", str(e)
@@ -356,6 +383,8 @@ def build_compatibility_report(i: CompatInputs) -> dict[str, Any]:
             continue
         fc = _filmcraft(i, feature, u)
         xb = _xml_block(feature, u, tl, rt, xml_state)
+        if feature == X.F_DUCKING and i.xml_origin == "readback" and u.count and xml_state == "ok":
+            xb = {"status": "not_carried", "expected": u.count, "matched": None, "mismatches": [], "mismatch_count": 0}
         rs = _resolve_block(feature, u, finish, finish_info)
         verdict, reason, instruction = _verdict(feature, fc, xb, rs, u)
         rows.append({"feature": feature, "label": label, "plan_count": u.count, "details": u.data, "notes": u.notes,
@@ -368,7 +397,8 @@ def build_compatibility_report(i: CompatInputs) -> dict[str, Any]:
         "resolve_evidence": {"evidence_version": RE.EVIDENCE_VERSION, "resolve": dict(RE.RESOLVE_TARGET),
                              "note": "Recorded results only (DESIGN §15.5, §15.6). Everything not recorded is 'unverified'."},
         "resolve_finish_report": finish_info,
-        "xml": {"path": Path(i.xml_path).name if i.xml_path else None, "sha256": xml_sha, "status": xml_state, "error": xml_error,
+        "xml": {"origin": i.xml_origin, "readback": dict(i.readback) if i.readback else None,
+                "path": Path(i.xml_path).name if i.xml_path else None, "sha256": xml_sha, "status": xml_state, "error": xml_error,
                 "sequence": None if tl is None else {"fps": str(tl.fps), "width": tl.width, "height": tl.height, "duration": tl.duration},
                 "counts": tl.counts() if tl else None,
                 "roundtrip": None if rt is None else {**rt.to_dict(), "plan_clips": sum(1 for e in exp.clips if e.kind == "video" and not e.is_title)}},

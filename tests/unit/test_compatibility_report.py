@@ -204,3 +204,49 @@ def test_markdown_lists_rows_manual_steps_and_roundtrip(tmp_path):
     md = K.render_compatibility_markdown(doc)
     assert "# Handoff compatibility report" in md and "| Titles (text on V2) | 1 | supported | ok (1/1) |" in md and "## Manual steps in Resolve" in md
     assert "**identical**" in md and "21.1.1.10" in md and "unverified" in md
+
+
+def phase7b_world(tmp_path):
+    from dataclasses import replace
+
+    from trip_vlog.filmcraft.timeline_spec import GainKey, Placement
+
+    plan, cat, spec = world(tmp_path)
+    pl = tuple(replace(p, fit_source_size=(1080, 1920)) if p.clip_instance_id == "c1" else p for p in spec.placements)
+    music = Placement("m1", str(tmp_path / "music.wav"), "audio", "A2", 0, 150, 0.0, 5.0, False, None, gain_keys=(GainKey(30, 0.0), GainKey(36, -12.0)))
+    return plan, cat, replace(spec, placements=pl + (music,))
+
+
+def test_framing_and_ducking_rows_and_the_readback_xml(tmp_path):
+    plan, cat, spec = phase7b_world(tmp_path)
+    caps = {**CAPS, "fit_to_frame": True, "clip_keyframe": True}
+    xp = tmp_path / "timeline.xml"
+    xp.write_text(xml_for_spec(spec), encoding="utf-8")
+    doc = K.build_compatibility_report(K.CompatInputs(plan, spec, cat, caps, xp, "0.13.0", True, tool_version="t"))
+    r = rows(doc)
+    assert r["framing_fit"]["plan_count"] == 1 and r["framing_fit"]["verdict"] == "expected" and r["framing_fit"]["xml"]["matched"] == 1
+    assert r["music_ducking"]["plan_count"] == 1 and r["music_ducking"]["verdict"] == "expected" and r["music_ducking"]["details"]["keyframes"] == 2
+    assert doc["xml"]["roundtrip"]["ok"] and doc["xml"]["origin"] == "native"
+    # an XML generated from the read-back cannot hold the keyframes: reported as a manual step, not as a mismatch
+    nokeys = xml_for_spec(spec, mutate=lambda d: [i.__setitem__("keys", ()) for i in d["items"]])
+    xp.write_text(nokeys, encoding="utf-8")
+    doc = K.build_compatibility_report(K.CompatInputs(plan, spec, cat, caps, xp, "0.13.0", True, tool_version="t", xml_origin="readback",
+                                                      readback={"status": "generated"}))
+    d = rows(doc)["music_ducking"]
+    assert d["xml"]["status"] == "not_carried" and d["verdict"] == "manual" and "Lower the music" in d["instruction"]
+    assert doc["xml"]["roundtrip"]["ok"] and doc["xml"]["origin"] == "readback"
+    # the same XML offered as a native export IS a mismatch
+    doc = K.build_compatibility_report(K.CompatInputs(plan, spec, cat, caps, xp, "0.13.0", True, tool_version="t"))
+    assert rows(doc)["music_ducking"]["verdict"] == "unsupported" and not doc["xml"]["roundtrip"]["ok"]
+
+
+def test_unfitted_mixed_aspect_clips_stay_a_manual_framing_step(tmp_path):
+    from fractions import Fraction
+
+    plan, cat, spec = world(tmp_path)
+    cat2 = PlanningCatalog([AssetInfo(A1, "a/clip.mp4", "video", 20.0, Fraction(30), 1080, 1920, 1080, 1920, 1), cat.assets[A2]], [])
+    xp = tmp_path / "timeline.xml"
+    xp.write_text(xml_for_spec(spec), encoding="utf-8")
+    doc = K.build_compatibility_report(K.CompatInputs(plan, spec, cat2, CAPS, xp, "0.13.0", True, tool_version="t"))
+    m = rows(doc)["mixed_resolution"]
+    assert m["verdict"] == "manual" and m["details"]["unfitted"] == 1 and "cropped" in " ".join(m["notes"])

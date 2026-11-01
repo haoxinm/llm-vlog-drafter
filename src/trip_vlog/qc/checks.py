@@ -381,11 +381,13 @@ def _gain_db(c: Any, ambient_gain_db: float) -> float:
 
 def check_music_vs_speech(plan: EditPlan, clip_audio: Mapping[str, Mapping[str, Any]],
                           transcripts: Mapping[str, Sequence[TranscriptSpan]] | None = None, *, ambient_gain_db: float = -12.0,
-                          active_ratio_min: float = 0.5, max_gain_db: float = -6.0) -> CheckResult:
+                          active_ratio_min: float = 0.5, max_gain_db: float = -6.0,
+                          duck_windows: Sequence[tuple[int, int]] = (), duck_db: float = 0.0) -> CheckResult:
     """Warn when a music clip plays under a video clip with speech (transcript) or active natural sound (audio features) and the
     plan's own levels do not put the music at least `-max_gain_db` dB below that clip: music level minus natural level, where an
     `ambient_low` clip has the constant gain `ambient_gain_db` and anything else unity. Nothing is invented: the plan generates no
-    ducking, so `audio.duck_music_under_speech` does not count as lowering the music."""
+    ducking, so `audio.duck_music_under_speech` does not count as lowering the music. When ducking IS generated (`filmcraft.duck_music`),
+    the caller passes the duck windows (sequence frames) and depth: an overlap that lies inside one window counts as lowered by `duck_db`."""
     name = "music_vs_speech"
     music = [(s.scene_id, c) for s in plan.scenes for c in s.clips if c.track_role == "music" and c.media_type == "audio"]
     if not music:
@@ -421,6 +423,8 @@ def check_music_vs_speech(plan: EditPlan, clip_audio: Mapping[str, Mapping[str, 
             if reason is None:
                 continue
             rel = _gain_db(m, ambient_gain_db) - _gain_db(v, ambient_gain_db)
+            if duck_db and any(a <= lo and hi <= b for a, b in duck_windows):
+                rel += duck_db
             if rel > max_gain_db:
                 found.append({"music_clip_instance_id": m.clip_instance_id, "music_scene_id": ms, **_clip_ref(vs, v), "reason": reason,
                               "overlap_seconds": round(float((hi - lo) / fps), 2), "music_gain_db": _gain_db(m, ambient_gain_db),
@@ -432,7 +436,7 @@ def check_music_vs_speech(plan: EditPlan, clip_audio: Mapping[str, Mapping[str, 
                            {"overlaps_checked": checked, **({"coarse_transcript_assets": coarse_assets} if coarse_assets else {})})
     f = found[0]
     return CheckResult(name, WARN, f"music {f['music_clip_instance_id']} plays over {f['reason'].replace('_', ' ')} in {f['clip_instance_id']} "
-                       f"without being lowered ({len(found)} overlap(s)); lower the music or the clip gain in the edit, no ducking is generated" + note,
+                       f"without being lowered ({len(found)} overlap(s)); lower the music or the clip gain in the edit" + ("" if duck_db else ", no ducking is generated") + note,
                        {"findings": found[:30], "total": len(found), "max_relative_db": max_gain_db,
                         **({"coarse_transcript_assets": coarse_assets} if coarse_assets else {})})
 

@@ -55,3 +55,15 @@ llm:
     assert ok.speech.backend == "none"
     with pytest.raises(ConfigError):
         _load(tmp_path, base + "speech:\n  backend: openai_transcriptions\n  endpoint: {base_url: \"https://api.openai.com\"}\n")
+
+
+def test_phase7b_filmcraft_options_are_off_by_default_and_validated():
+    from pydantic import ValidationError
+
+    from trip_vlog.config import FilmCraftConfig
+
+    c = FilmCraftConfig()
+    assert (c.fit_mixed_aspect, c.duck_music, c.duck_mode, c.duck_db, c.readback_interchange) == (False, False, "speech", -12.0, "auto")
+    for bad in ({"duck_db": 3}, {"duck_db": -100}, {"duck_mode": "loud"}, {"duck_ramp_seconds": 0}, {"readback_interchange": "always"}):
+        with pytest.raises(ValidationError):
+            FilmCraftConfig(**bad)

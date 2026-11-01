@@ -22,12 +22,17 @@ MANIFEST_SCHEMA = 1
 
 def atomic_write_text(path: Path, text: str) -> None:
     """Write UTF-8 with '\\n' newlines via temp file + os.replace (retries briefly on Windows locks)."""
+    atomic_write_bytes(path, text.encode("utf-8"))
+
+
+def atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Write exactly `data` (no newline translation) via temp file + os.replace (retries briefly on Windows locks)."""
     path = Path(path)
     long_path(path.parent).mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
-        with open(long_path(tmp), "w", encoding="utf-8", newline="\n") as f:
-            f.write(text)
+        with open(long_path(tmp), "wb") as f:
+            f.write(data)
             f.flush()
             os.fsync(f.fileno())
         for attempt in range(8):

@@ -9,7 +9,7 @@ project:
   style: "personal, cinematic, authentic"
   audience: "friends and family"
   include_narration: false
-  include_subtitles: false
+  include_subtitles: false       # older name of captions.enabled (below); true turns captions on
   music_policy: "user_supplied_only"   # none | user_supplied_only
   preserve_natural_audio: true
   target_loudness_lufs: null
@@ -38,8 +38,12 @@ media:
   fingerprint: "fast"            # fast | sha256
   proxy_policy: "on_demand"      # on_demand | always | never
   vision_sampling_fps: 1.0
-  fine_sampling_fps: 4.0
-  fine_sampling_enabled: false
+  fine_sampling_enabled: false       # true: tighten the cut points of high-scoring moments with a second, smaller request (one more request per batch)
+  fine_sampling_fps: 4.0             # frames per second inside the refinement windows (>= vision_sampling_fps)
+  fine_sampling_min_score: 0.7       # only moments whose `interest` is at least this are refined
+  fine_sampling_window_seconds: 1.0  # resampled span either side of each boundary (clipped to the segment)
+  fine_sampling_max_per_asset: 3
+  fine_sampling_max_moments: 30      # most moments refined per run
   vision_max_frames_per_segment: 8   # frames beyond this are thinned evenly
   vision_input: frames               # frames | contact_sheet
   vision_batch_max_images: 16
@@ -99,6 +103,13 @@ filmcraft:
   preview_scale: 1.0             # 1.0 = full size; e.g. 0.5 renders a smaller draft
   handle_policy: "error"         # dissolve without source handles: error | cut (downgrade, recorded)
   ambient_low_gain_db: -12       # gain applied to clips with audio_policy "ambient_low"
+  fit_mixed_aspect: false        # true: scale clips/stills whose size differs from the sequence to fit the frame (portrait in landscape, 4K in 1080p); bars, no crop
+  duck_music: false              # true: lower the music under speech / natural sound (Volume keyframes on the music clip); needs the plan's audio.duck_music_under_speech
+  duck_mode: "speech"            # speech (transcript segments) | natural_sound (also clips with measured active sound)
+  duck_db: -12                   # music level inside a duck window, relative to the music clip's own gain
+  duck_ramp_seconds: 0.3         # fade down in front of a window and back up behind it
+  duck_merge_gap_seconds: 1.0    # windows closer than this are joined
+  readback_interchange: "auto"   # auto | off: FCP7 XML from the read-back timeline when FilmCraft's own export is missing or lossy (never replaces a good one)
 
 qc:
   min_still_seconds: 1.5
@@ -131,6 +142,13 @@ revise:
   confirm_removed_clips: 3       # removing more clips than this needs confirmation (a removed scene counts all its clips)
   confirm_scene_removal: true    # removing a whole scene always needs confirmation
   max_duration_change_pct: 50.0  # hard bound: operations that change the length by more than this are refused
+
+captions:                        # optional SRT from the speech transcript, next to the timeline in the handoff (README "Captions"); run `trip-vlog transcribe` first
+  enabled: false                 # off by default. Words are the transcript's own, never rewritten
+  max_chars_per_line: 42         # lines break between words only
+  max_lines: 2                   # more text becomes more cues
+  min_duration_seconds: 1.0      # a shorter cue stays up longer when its clip has room
+  # importing timeline.srt is a manual step in Resolve (File > Import > Subtitle...)
 
 outputs:                         # relative to the output workspace
   project_file: "filmcraft/TripVlog.fcproj"
