@@ -1198,6 +1198,16 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+def _rel_to_report(f: Any, out_path: Path) -> str:
+    """Path of an input relative to the folder holding the report (POSIX separators), so the report stays valid
+    wherever the handoff folder is copied. Falls back to the absolute path across drives."""
+    try:
+        rel = os.path.relpath(os.path.abspath(str(f)), os.path.abspath(str(out_path.parent)))
+    except ValueError:
+        return str(f)
+    return Path(rel).as_posix()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if not (args.handoff or args.spike_out or args.timeline):
@@ -1221,8 +1231,8 @@ def main(argv: list[str] | None = None) -> int:
     report: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION, "tool": "tools/resolve_verify.py", "os": os_info(),
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "inputs": [str(f) for f in files],
-        "input_sha256": {str(f): hashlib.sha256(Path(f).read_bytes()).hexdigest() for f in files},
+        "inputs": [_rel_to_report(f, out_path) for f in files],
+        "input_sha256": {_rel_to_report(f, out_path): hashlib.sha256(Path(f).read_bytes()).hexdigest() for f in files},
         "expected_source": exp_src, "expected": expected,
     }
     resolve, info = connect_resolve()

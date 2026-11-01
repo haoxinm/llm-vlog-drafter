@@ -315,7 +315,9 @@ def _execute(media: Path | str | None, output: Path | str, config_path: Path | s
     config = load_config(cfg_file, overrides, implicit=implicit, warn=echo)
     # project.yaml records the user's file config plus durable overrides; one-shot flags (approval mode, executables)
     # must not leak into later runs.
-    saved = load_config(cfg_file, {k: v for k, v in overrides.items() if k not in NON_PERSISTENT_OVERRIDES}, implicit=implicit)
+    # Loaded with implicit=False: the stripping of executable paths applies to the config in effect, never to what
+    # is written back, so a user's own hand-edited paths in project.yaml survive.
+    saved = load_config(cfg_file, {k: v for k, v in overrides.items() if k not in NON_PERSISTENT_OVERRIDES})
     if pipeline == "draft" and config.workflow.planner != "baseline":
         raise ConfigError(f"workflow.planner={config.workflow.planner!r} is not implemented yet (LLM planning arrives in Phase 3/4); use 'baseline'")
     manifest = Manifest.load(ws.manifest_path)
