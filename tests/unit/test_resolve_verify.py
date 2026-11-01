@@ -885,3 +885,24 @@ def test_overall_verdict_requires_the_primary_shipped_file_to_pass():
     assert rv.overall_verdict({"fcp7xml": ok, "otio[original]": ok, "otio[bare]": bad}) == (True, "otio[original]")
     assert rv.overall_verdict({"fcp7xml": ok, "edl": {"passed": False, "skipped": True}}) == (True, "fcp7xml")
     assert rv.overall_verdict({}) == (False, None)
+
+
+def test_inputs_recorded_relative_to_report_and_read_back(tmp_path, monkeypatch):
+    from trip_vlog.handoff.report import read_resolve_verification
+    monkeypatch.setattr(rv, "connect_resolve", lambda *a, **k: (None, {"diagnosis": ["x"]}))
+    handoff = tmp_path / "out" / "resolve_handoff"; handoff.mkdir(parents=True)
+    (handoff / "timeline.xml").write_text("<xmeml/>")
+    (handoff / "expected_timeline.json").write_text(json.dumps(make_expected(tmp_path)))
+    monkeypatch.chdir(tmp_path)
+    rv.main(["--handoff", "out/resolve_handoff"])  # relative path, as a user would type it
+    rep_path = handoff / "resolve_verification.json"
+    rep = json.loads(rep_path.read_text())
+    assert rep["inputs"] == ["timeline.xml"] and set(rep["input_sha256"]) == {"timeline.xml"}
+    rep.update(status="pass")
+    rep_path.write_text(json.dumps(rep))
+    assert read_resolve_verification(rep_path)[0] == "passing"
+    # report copied back from another machine with absolute paths that do not exist here: basename fallback
+    rep["inputs"] = ["C:\\Users\\x\\out\\timeline.xml"]
+    rep["input_sha256"] = {rep["inputs"][0]: next(iter(rep["input_sha256"].values()))}
+    rep_path.write_text(json.dumps(rep))
+    assert read_resolve_verification(rep_path)[0] == "passing"

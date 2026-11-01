@@ -410,7 +410,9 @@ def _execute(media: Path | str | None, output: Path | str, config_path: Path | s
     config = load_config(cfg_file, overrides, implicit=implicit, warn=echo)
     # project.yaml records the user's file config plus durable overrides; one-shot flags (approval mode, executables)
     # must not leak into later runs.
-    saved = load_config(cfg_file, {k: v for k, v in overrides.items() if k not in NON_PERSISTENT_OVERRIDES}, implicit=implicit)
+    # Loaded with implicit=False: the stripping of executable paths applies to the config in effect, never to what
+    # is written back, so a user's own hand-edited paths in project.yaml survive.
+    saved = load_config(cfg_file, {k: v for k, v in overrides.items() if k not in NON_PERSISTENT_OVERRIDES})
     manifest = Manifest.load(ws.manifest_path)
     if media is None:
         media = manifest.get("media_root")
@@ -447,7 +449,9 @@ def _execute(media: Path | str | None, output: Path | str, config_path: Path | s
         manifest.set(pipeline="outline")
     if pipeline in ("analyze", "transcribe") and manifest.get("pipeline") == pipeline:
         # remembered so `resume` never silently widens a limited/dry run
-        manifest.set(run_limit=analyze_limit, run_dry_run=bool(dry_run))
+        # a dry run only seeds the values: it never overwrites those of an earlier (possibly interrupted) real run
+        if not dry_run or manifest.get("run_dry_run") is None:
+            manifest.set(run_limit=analyze_limit, run_dry_run=bool(dry_run))
     manifest.save()
     atomic_write_text(ws.readme, WORKSPACE_README.format(version=__version__))
     logger.event("run", Status.RUNNING, command=command, tool_version=__version__)
