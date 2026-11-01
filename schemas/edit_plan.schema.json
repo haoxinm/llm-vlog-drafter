@@ -1,0 +1,490 @@
+{
+  "$defs": {
+    "AudioSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "duck_music_under_speech": {
+          "title": "Duck Music Under Speech",
+          "type": "boolean"
+        },
+        "music_policy": {
+          "enum": [
+            "none",
+            "user_supplied_only"
+          ],
+          "title": "Music Policy",
+          "type": "string"
+        },
+        "preserve_natural_audio": {
+          "title": "Preserve Natural Audio",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "music_policy",
+        "preserve_natural_audio",
+        "duck_music_under_speech"
+      ],
+      "title": "AudioSettings",
+      "type": "object"
+    },
+    "EditClip": {
+      "additionalProperties": false,
+      "properties": {
+        "anchor": {
+          "enum": [
+            "start",
+            "center",
+            "end",
+            "best"
+          ],
+          "title": "Anchor",
+          "type": "string"
+        },
+        "asset_id": {
+          "pattern": "^asset_[0-9a-f]{16}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "audio_policy": {
+          "enum": [
+            "natural_sound",
+            "ambient_low",
+            "muted"
+          ],
+          "title": "Audio Policy",
+          "type": "string"
+        },
+        "clip_instance_id": {
+          "pattern": "^[A-Za-z0-9_.-]{1,80}$",
+          "title": "Clip Instance Id",
+          "type": "string"
+        },
+        "duration_frames": {
+          "minimum": 1,
+          "title": "Duration Frames",
+          "type": "integer"
+        },
+        "intentional_repeat_reason": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Intentional Repeat Reason"
+        },
+        "media_type": {
+          "enum": [
+            "video",
+            "image",
+            "audio"
+          ],
+          "title": "Media Type",
+          "type": "string"
+        },
+        "moment_id": {
+          "pattern": "^[A-Za-z0-9_.-]{1,80}$",
+          "title": "Moment Id",
+          "type": "string"
+        },
+        "rationale": {
+          "maxLength": 2000,
+          "title": "Rationale",
+          "type": "string"
+        },
+        "requested_duration_seconds": {
+          "exclusiveMinimum": 0,
+          "maximum": 3600,
+          "title": "Requested Duration Seconds",
+          "type": "number"
+        },
+        "resolver_notes": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 50,
+          "title": "Resolver Notes",
+          "type": "array"
+        },
+        "source_in_frame": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source In Frame"
+        },
+        "source_in_seconds": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source In Seconds"
+        },
+        "source_out_frame": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source Out Frame"
+        },
+        "source_out_seconds": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source Out Seconds"
+        },
+        "timeline_start_frame": {
+          "minimum": 0,
+          "title": "Timeline Start Frame",
+          "type": "integer"
+        },
+        "track_role": {
+          "enum": [
+            "primary_video",
+            "overlay",
+            "natural_audio",
+            "music",
+            "narration"
+          ],
+          "title": "Track Role",
+          "type": "string"
+        },
+        "transition_in": {
+          "$ref": "#/$defs/EditTransition"
+        }
+      },
+      "required": [
+        "clip_instance_id",
+        "asset_id",
+        "moment_id",
+        "media_type",
+        "anchor",
+        "track_role",
+        "audio_policy",
+        "requested_duration_seconds",
+        "source_in_seconds",
+        "source_out_seconds",
+        "source_in_frame",
+        "source_out_frame",
+        "timeline_start_frame",
+        "duration_frames",
+        "transition_in",
+        "resolver_notes",
+        "rationale"
+      ],
+      "title": "EditClip",
+      "type": "object"
+    },
+    "EditScene": {
+      "additionalProperties": false,
+      "properties": {
+        "clips": {
+          "items": {
+            "$ref": "#/$defs/EditClip"
+          },
+          "maxItems": 500,
+          "minItems": 1,
+          "title": "Clips",
+          "type": "array"
+        },
+        "duration_frames": {
+          "minimum": 0,
+          "title": "Duration Frames",
+          "type": "integer"
+        },
+        "purpose": {
+          "maxLength": 500,
+          "title": "Purpose",
+          "type": "string"
+        },
+        "scene_id": {
+          "pattern": "^[A-Za-z0-9_.-]{1,80}$",
+          "title": "Scene Id",
+          "type": "string"
+        },
+        "start_frame": {
+          "minimum": 0,
+          "title": "Start Frame",
+          "type": "integer"
+        },
+        "target_duration_seconds": {
+          "exclusiveMinimum": 0,
+          "maximum": 7200,
+          "title": "Target Duration Seconds",
+          "type": "number"
+        },
+        "title": {
+          "maxLength": 200,
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "scene_id",
+        "title",
+        "purpose",
+        "target_duration_seconds",
+        "start_frame",
+        "duration_frames",
+        "clips"
+      ],
+      "title": "EditScene",
+      "type": "object"
+    },
+    "EditTransition": {
+      "additionalProperties": false,
+      "properties": {
+        "alignment": {
+          "enum": [
+            "center",
+            "start_at_cut",
+            "end_at_cut"
+          ],
+          "title": "Alignment",
+          "type": "string"
+        },
+        "duration_frames": {
+          "minimum": 0,
+          "title": "Duration Frames",
+          "type": "integer"
+        },
+        "duration_seconds": {
+          "maximum": 5,
+          "minimum": 0,
+          "title": "Duration Seconds",
+          "type": "number"
+        },
+        "type": {
+          "enum": [
+            "cut",
+            "dissolve"
+          ],
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "duration_seconds",
+        "duration_frames",
+        "alignment"
+      ],
+      "title": "EditTransition",
+      "type": "object"
+    },
+    "ProjectSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "aspect_ratio": {
+          "pattern": "^[1-9][0-9]{0,2}:[1-9][0-9]{0,2}$",
+          "title": "Aspect Ratio",
+          "type": "string"
+        },
+        "frame_rate": {
+          "pattern": "^[0-9]+([./][0-9]+)?$",
+          "title": "Frame Rate",
+          "type": "string"
+        },
+        "target_duration_seconds": {
+          "exclusiveMinimum": 0,
+          "maximum": 14400,
+          "title": "Target Duration Seconds",
+          "type": "number"
+        },
+        "title": {
+          "maxLength": 200,
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "target_duration_seconds",
+        "aspect_ratio",
+        "frame_rate"
+      ],
+      "title": "ProjectSettings",
+      "type": "object"
+    },
+    "SceneMarker": {
+      "additionalProperties": false,
+      "properties": {
+        "frame": {
+          "minimum": 0,
+          "title": "Frame",
+          "type": "integer"
+        },
+        "marker_id": {
+          "pattern": "^[A-Za-z0-9_.-]{1,80}$",
+          "title": "Marker Id",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 200,
+          "title": "Name",
+          "type": "string"
+        },
+        "scene_id": {
+          "pattern": "^[A-Za-z0-9_.-]{1,80}$",
+          "title": "Scene Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "marker_id",
+        "name",
+        "frame",
+        "scene_id"
+      ],
+      "title": "SceneMarker",
+      "type": "object"
+    },
+    "SequenceSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "aspect_ratio": {
+          "pattern": "^[1-9][0-9]{0,2}:[1-9][0-9]{0,2}$",
+          "title": "Aspect Ratio",
+          "type": "string"
+        },
+        "fps": {
+          "pattern": "^[1-9][0-9]{0,5}(/[1-9][0-9]{0,6})?$",
+          "title": "Fps",
+          "type": "string"
+        },
+        "height": {
+          "maximum": 16384,
+          "minimum": 16,
+          "title": "Height",
+          "type": "integer"
+        },
+        "still_duration_seconds": {
+          "exclusiveMinimum": 0,
+          "maximum": 600,
+          "title": "Still Duration Seconds",
+          "type": "number"
+        },
+        "width": {
+          "maximum": 16384,
+          "minimum": 16,
+          "title": "Width",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "width",
+        "height",
+        "fps",
+        "aspect_ratio",
+        "still_duration_seconds"
+      ],
+      "title": "SequenceSettings",
+      "type": "object"
+    }
+  },
+  "$id": "urn:trip-vlog:schema:edit_plan:1.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Resolved edit plan: exact source ranges, frame counts and timeline positions. Application-independent.",
+  "properties": {
+    "audio": {
+      "$ref": "#/$defs/AudioSettings"
+    },
+    "markers": {
+      "items": {
+        "$ref": "#/$defs/SceneMarker"
+      },
+      "title": "Markers",
+      "type": "array"
+    },
+    "plan_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Plan Hash",
+      "type": "string"
+    },
+    "project": {
+      "$ref": "#/$defs/ProjectSettings"
+    },
+    "scenes": {
+      "items": {
+        "$ref": "#/$defs/EditScene"
+      },
+      "maxItems": 200,
+      "minItems": 1,
+      "title": "Scenes",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "selection_plan_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Selection Plan Hash",
+      "type": "string"
+    },
+    "sequence": {
+      "$ref": "#/$defs/SequenceSettings"
+    },
+    "total_duration_frames": {
+      "minimum": 1,
+      "title": "Total Duration Frames",
+      "type": "integer"
+    },
+    "total_duration_seconds": {
+      "exclusiveMinimum": 0,
+      "title": "Total Duration Seconds",
+      "type": "number"
+    },
+    "uncertainties": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 200,
+      "title": "Uncertainties",
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "plan_hash",
+    "selection_plan_hash",
+    "project",
+    "sequence",
+    "scenes",
+    "markers",
+    "audio",
+    "total_duration_frames",
+    "total_duration_seconds",
+    "uncertainties"
+  ],
+  "title": "EditPlan",
+  "type": "object"
+}

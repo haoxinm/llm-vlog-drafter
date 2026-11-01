@@ -1,0 +1,398 @@
+"""Phase 2c stages: segment -> plan -> approval gate -> assemble -> preview -> qc -> handoff (DESIGN §9.5, §12-§15, §18).
+
+Rules this module enforces
+  * Nothing touches FilmCraft before the plan is approved (the approval stage stops the run with ``awaiting_approval``).
+  * The plan on disk (``plans/edit_plan.json``) is the unit of approval and of execution. It is re-validated at assemble
+    time, so a hand-edited or corrupted plan is rejected before any FilmCraft call.
+  * Approval is bound to the plan hash recomputed from the file content; a changed plan invalidates it.
+  * Stages cache on their inputs plus an artifact check, so an unchanged re-run does no work and cannot duplicate clips.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable
+
+from pydantic import ValidationError
+
+from trip_vlog import __version__
+from trip_vlog.config import Config
+from trip_vlog.filmcraft.adapter import FilmCraftAdapter
+from trip_vlog.filmcraft.execution import latest_complete_project, load_journal, sha256_file
+from trip_vlog.filmcraft.mappings import MediaMap
+from trip_vlog.filmcraft.plan_mapping import MappingError, MappingResult, MappingSettings, edit_plan_to_spec
+from trip_vlog.filmcraft.timeline_spec import TimelineSpec, downgrade_dissolves
+from trip_vlog.handoff.interchange import export_handoff
+from trip_vlog.handoff.media_manifest import manifest_rows, missing_used_media, write_media_manifest
+from trip_vlog.handoff.report import HandoffReportInputs, read_resolve_verification, render_handoff_report
+from trip_vlog.logging_utils import Status, utc_now_iso
+from trip_vlog.media.segment import segment_assets, segment_inputs
+from trip_vlog.planning.catalog_view import PlanningCatalog
+from trip_vlog.planning.models import EditPlan, edit_plan_hash, to_json_dict
+from trip_vlog.planning.pipeline import PlanPaths, plan_baseline_stage, plan_inputs, plan_paths
+from trip_vlog.planning.validate import ValidationReport, ValidationSettings, validate_edit_plan
+from trip_vlog.qc.report import QcInputs, run_qc
+from trip_vlog.state import StageResult, StageRunner, atomic_write_json, atomic_write_text, stable_hash
+
+if TYPE_CHECKING:  # pragma: no cover
+    from trip_vlog.orchestrator import RunContext
+
+DRAFT_STAGES = ("scan", "probe", "catalog", "thumbnails", "segment", "plan", "approval", "assemble", "preview", "qc", "handoff")
+
+# Test hook: replace to drive a fake FilmCraft server (``lambda ctx: FilmCraftAdapter(..., argv_prefix=...)``).
+adapter_factory: Callable[["RunContext"], FilmCraftAdapter] | None = None
+
+
+class PlanRejected(ValueError):
+    """The on-disk edit plan failed validation; ``report`` has the findings."""
+
+    def __init__(self, message: str, report: ValidationReport | None = None):
+        super().__init__(message)
+        self.report = report
+
+
+@dataclass
+class Prepared:
+    plan: EditPlan
+    mapping: MappingResult
+    validation: ValidationReport
+    plan_hash: str
+
+    @property
+    def spec(self) -> TimelineSpec:
+        return self.mapping.spec
+
+
+# ---- plan file, approval -----------------------------------------------------------------------------------
+
+def _pp(ctx: Any) -> PlanPaths:
+    return plan_paths(ctx.workspace, ctx.config, dict(ctx.paths.outputs))
+
+
+def load_plan_json(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def plan_file_hash(path: Path) -> str:
+    """Hash of the plan *content* (not the recorded plan_hash field), so edits are always noticed."""
+    doc = load_plan_json(path)
+    try:
+        return edit_plan_hash(EditPlan.model_validate(doc))
+    except ValidationError:
+        return "invalid-" + stable_hash(doc)[:48]
+
+
+def validate_plan_file(ctx: Any) -> tuple[EditPlan, ValidationReport]:
+    path = _pp(ctx).edit_plan
+    if not path.is_file():
+        raise PlanRejected(f"{path} does not exist; run the plan stage first")
+    try:
+        doc = load_plan_json(path)
+    except (OSError, ValueError) as e:
+        raise PlanRejected(f"{path.name} is not readable JSON: {e}") from None
+    view = PlanningCatalog.from_catalog(ctx.catalog)
+    report = validate_edit_plan(doc, view, ValidationSettings.from_config(ctx.config))
+    if not report.ok:
+        atomic_write_json(_pp(ctx).plans_dir / "assemble_validation_report.json", report.to_dict())
+        raise PlanRejected("edit plan rejected before any FilmCraft change:\n" + report.format(), report)
+    assert report.plan is not None
+    return report.plan, report
+
+
+def approval_record(manifest: Any) -> dict[str, Any] | None:
+    ap = manifest.get("approval")
+    return ap if isinstance(ap, dict) else None
+
+
+def approve_current_plan(manifest: Any, plan_hash: str, mode: str) -> dict[str, Any]:
+    ap = {"status": "approved", "mode": mode, "plan_hash": plan_hash, "approved_at": utc_now_iso()}
+    manifest.set(approval=ap)
+    manifest.save()
+    return ap
+
+
+def approval_stage(ctx: Any) -> StageResult:
+    path = _pp(ctx).edit_plan
+    cur = plan_file_hash(path)
+    m = ctx.manifest
+    if ctx.config.workflow.approval == "auto_approve":
+        approve_current_plan(m, cur, "automatic")
+        return StageResult(Status.SUCCEEDED, {"mode": "automatic", "plan_hash": cur})
+    ap = approval_record(m)
+    if ap and ap.get("status") == "approved" and ap.get("plan_hash") == cur:
+        return StageResult(Status.SUCCEEDED, {"mode": ap.get("mode"), "plan_hash": cur})
+    summary: dict[str, Any] = {"plan_hash": cur, "plan_summary": _rel(ctx, _pp(ctx).summary), "edit_plan": _rel(ctx, path)}
+    if ap and ap.get("status") == "approved":
+        summary["invalidated"] = f"plan changed since approval (approved {str(ap.get('plan_hash'))[:12]}, now {cur[:12]})"
+        m.set(approval={"status": "invalidated", "previous_plan_hash": ap.get("plan_hash"), "plan_hash": cur, "at": utc_now_iso()})
+    else:
+        m.set(approval={"status": "pending", "plan_hash": cur, "at": utc_now_iso()})
+    m.save()
+    return StageResult(Status.AWAITING_APPROVAL, summary)
+
+
+def _rel(ctx: Any, p: Path) -> str:
+    try:
+        return Path(p).resolve().relative_to(ctx.workspace.root).as_posix()
+    except ValueError:
+        return str(p)
+
+
+# ---- prepare (validate + map) ------------------------------------------------------------------------------
+
+def _prepare(ctx: Any) -> Prepared:
+    path = _pp(ctx).edit_plan
+    key = plan_file_hash(path)
+    cached = ctx.data.get("prepared")
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    plan, report = validate_plan_file(ctx)
+    view = PlanningCatalog.from_catalog(ctx.catalog)
+    cfg = ctx.config
+    try:
+        mapping = edit_plan_to_spec(plan, view, ctx.paths.media_root,
+                                    MappingSettings(sequence_name=cfg.filmcraft.sequence_name, ambient_gain_db=cfg.filmcraft.ambient_low_gain_db))
+    except MappingError as e:
+        raise PlanRejected(f"edit plan cannot be mapped to a FilmCraft timeline: {e}", report) from None
+    prep = Prepared(plan, mapping, report, key)
+    ctx.data["prepared"] = (key, prep)
+    return prep
+
+
+def get_adapter(ctx: Any) -> FilmCraftAdapter:
+    ad = ctx.data.get("adapter")
+    if ad is None:
+        if adapter_factory is not None:
+            ad = adapter_factory(ctx)
+        else:
+            c = ctx.config.filmcraft
+            ad = FilmCraftAdapter(ctx.workspace.root, ctx.paths.media_root, config=c, executable=c.executable,
+                                  request_timeout=c.request_timeout_seconds, ffprobe_path=str(ctx.ffprobe) if ctx.ffprobe else None,
+                                  handle_policy=c.handle_policy, preview_file=ctx.config.outputs.preview_file,
+                                  interchange_dir=ctx.config.outputs.interchange_dir)
+        ctx.data["adapter"] = ad
+    return ad
+
+
+def latest_run(ctx: Any) -> dict[str, Any] | None:
+    jp = ctx.workspace.root / "filmcraft" / "execution_journal.json"
+    if not jp.is_file():
+        return None
+    doc = load_journal(jp)
+    runs = [r for r in doc["runs"] if r.get("project_name") == ctx.config.filmcraft.project_name and r.get("status") == "complete"]
+    if not runs:
+        return None
+    r = sorted(runs, key=lambda r: r["version"])[-1]
+    return r if (ctx.workspace.root / r["project_path"]).is_file() else None
+
+
+def _project_sha(ctx: Any) -> str | None:
+    r = latest_run(ctx)
+    return r.get("project_sha256") if r else None
+
+
+# ---- stages ----------------------------------------------------------------------------------------------
+
+def plan_stage(ctx: Any) -> StageResult:
+    res = plan_baseline_stage(ctx)
+    ctx.data.pop("prepared", None)
+    if res.status != Status.FAILED:
+        ctx.manifest.set(planner=ctx.config.workflow.planner, plan={
+            "path": _rel(ctx, _pp(ctx).edit_plan), "summary": _rel(ctx, _pp(ctx).summary), "plan_hash": res.summary.get("plan_hash")})
+        ctx.manifest.save()
+    return res
+
+
+def _assemble_inputs(ctx: Any) -> Any:
+    c = ctx.config.filmcraft
+    return {"plan": plan_file_hash(_pp(ctx).edit_plan),
+            "fc": [c.project_name, c.sequence_name, c.handle_policy, c.ambient_low_gain_db, c.executable],
+            "assets": [(a["asset_id"], a["content_version"]) for a in ctx.catalog.list_assets()]}
+
+
+def _assemble_verify(ctx: Any) -> bool:
+    r = latest_run(ctx)
+    if not r:
+        return False
+    p = ctx.workspace.root / r["project_path"]
+    return r["spec_hash"] == _prepare(ctx).spec.spec_hash() and r.get("project_sha256") == sha256_file(p)
+
+
+def assemble_stage(ctx: Any) -> StageResult:
+    try:
+        prep = _prepare(ctx)
+    except PlanRejected as e:
+        return StageResult(Status.FAILED, {"errors": [i.to_dict() for i in (e.report.errors if e.report else [])]}, str(e))
+    atomic_write_json(ctx.workspace.root / "filmcraft" / "mapping_report.json", prep.mapping.to_dict())
+    ad = get_adapter(ctx)
+    cfg = ctx.config
+    try:
+        build = ad.build_project(prep.spec, cfg.filmcraft.project_name)
+    except Exception as e:  # noqa: BLE001 - FilmCraft, path policy, spec and verification errors all stop assembly
+        return StageResult(Status.FAILED, {"mapping_warnings": len(prep.mapping.warnings)}, f"{type(e).__name__}: {e}")
+    run = build.run
+    ctx.manifest.set(filmcraft={
+        "version": run.get("filmcraft_version"), "capability_snapshot": "filmcraft/capability_snapshot.json",
+        "executable": str(getattr(ad.capabilities, "executable", "") or "") or None,
+        "project": run["project_path"], "project_version": build.version, "spec_hash": build.spec_hash,
+        "journal": "filmcraft/execution_journal.json"})
+    ctx.manifest.save()
+    n_clips = sum(len(s.clips) for s in prep.plan.scenes)
+    summary = {"project": run["project_path"], "version": build.version, "noop": build.noop, "clips": n_clips,
+               "placements": len(prep.spec.placements), "verified_after_reopen": bool(run.get("verified_after_reopen")),
+               "filmcraft_version": run.get("filmcraft_version"), "mapping_warnings": [w.to_dict() for w in prep.mapping.warnings],
+               "warnings": list(build.warnings)}
+    return StageResult(Status.SUCCEEDED, summary)  # warnings are recorded in the summary and the handoff report
+
+
+def _preview_path(ctx: Any) -> Path:
+    return Path(ctx.paths.outputs["preview_file"])
+
+
+def _preview_inputs(ctx: Any) -> Any:
+    return {"project": _project_sha(ctx), "scale": ctx.config.filmcraft.preview_scale}
+
+
+def preview_stage(ctx: Any) -> StageResult:
+    run = latest_run(ctx)
+    if run is None:
+        return StageResult(Status.FAILED, {}, "no completed FilmCraft project to render")
+    ad = get_adapter(ctx)
+    out = _preview_path(ctx)
+    try:
+        rep = ad.render_preview(out, project_path=ctx.workspace.root / run["project_path"], scale=ctx.config.filmcraft.preview_scale)
+    except Exception as e:  # noqa: BLE001
+        return StageResult(Status.FAILED, {}, f"{type(e).__name__}: {e}")
+    atomic_write_json(out.parent / "render_report.json", rep.to_dict())
+    summary = {"preview": _rel(ctx, out), "duration_seconds": rep.duration_seconds, "size": f"{rep.width}x{rep.height}",
+               "render_seconds": rep.render_seconds, "checks_failed": [c.name for c in rep.failures]}
+    return StageResult(Status.SUCCEEDED if rep.ok else Status.PARTIAL, summary)
+
+
+def _qc_paths(ctx: Any) -> tuple[Path, Path]:
+    d = _preview_path(ctx).parent
+    return d / "qc_report.json", d / "contact_sheet_timeline.jpg"
+
+
+def _file_sha(p: Path) -> str | None:
+    return sha256_file(p) if p.is_file() else None
+
+
+def _qc_inputs(ctx: Any) -> Any:
+    return {"project": _project_sha(ctx), "preview": _file_sha(_preview_path(ctx)), "plan": plan_file_hash(_pp(ctx).edit_plan),
+            "qc": ctx.config.qc.model_dump(), "tol": [ctx.config.project.duration_tolerance_pct, ctx.config.project.duration_tolerance_seconds]}
+
+
+def qc_stage(ctx: Any) -> StageResult:
+    run = latest_run(ctx)
+    if run is None:
+        return StageResult(Status.FAILED, {}, "no completed FilmCraft project to check")
+    try:
+        prep = _prepare(ctx)
+    except PlanRejected as e:
+        return StageResult(Status.FAILED, {}, str(e))
+    ad = get_adapter(ctx)
+    proj_path = ctx.workspace.root / run["project_path"]
+    seq = project = None
+    mism: list[str] = []
+    err = None
+    try:
+        ad.close()  # a fresh server process proves the saved file reopens
+        project = ad.open_project(proj_path)
+        seq = ad.inspect_sequence()
+        eff: TimelineSpec = downgrade_dissolves(prep.spec, run.get("downgraded_dissolves") or [])
+        mism = [str(m) for m in ad.verify(eff, MediaMap.from_dict(run.get("media_mapping", {}))).mismatches]
+    except Exception as e:  # noqa: BLE001
+        err = f"{type(e).__name__}: {e}"
+        seq = None
+    report_path, sheet = _qc_paths(ctx)
+    doc = run_qc(QcInputs(
+        plan=prep.plan, catalog=PlanningCatalog.from_catalog(ctx.catalog), source_paths=prep.spec.asset_paths, sequence=seq,
+        project=project, reopen_error=err, mismatches=mism, preview=_preview_path(ctx), report_path=report_path, contact_sheet=sheet,
+        ffmpeg=ctx.ffmpeg, ffprobe=str(ctx.ffprobe) if ctx.ffprobe else None, config=ctx.config))
+    summary = {"status": doc["status"], **doc["counts"], "report": _rel(ctx, report_path),
+               "contact_sheet": _rel(ctx, sheet) if doc["contact_sheet"]["path"] else None,
+               "failed_checks": [c["name"] for c in doc["checks"] if c["status"] == "fail"],
+               "warned_checks": [c["name"] for c in doc["checks"] if c["status"] == "warn"]}
+    return StageResult(Status.SUCCEEDED, summary)  # QC findings are reported in the summary, they do not fail the stage
+
+
+def _handoff_dir(ctx: Any) -> Path:
+    return Path(ctx.paths.outputs["interchange_dir"])
+
+
+def _handoff_inputs(ctx: Any) -> Any:
+    out = _handoff_dir(ctx)
+    return {"project": _project_sha(ctx), "plan": plan_file_hash(_pp(ctx).edit_plan),
+            "formats": list(ctx.config.filmcraft.interchange_formats), "qc": _file_sha(_qc_paths(ctx)[0]),
+            "resolve_verification": _file_sha(out / "resolve_verification.json"),
+            "assets": [(a["asset_id"], a["content_version"]) for a in ctx.catalog.list_assets()]}
+
+
+def handoff_stage(ctx: Any) -> StageResult:
+    run = latest_run(ctx)
+    if run is None:
+        return StageResult(Status.FAILED, {}, "no completed FilmCraft project to hand off")
+    try:
+        prep = _prepare(ctx)
+    except PlanRejected as e:
+        return StageResult(Status.FAILED, {}, str(e))
+    cfg: Config = ctx.config
+    out = _handoff_dir(ctx)
+    out.mkdir(parents=True, exist_ok=True)
+    proj = ctx.workspace.root / run["project_path"]
+    eff = downgrade_dissolves(prep.spec, run.get("downgraded_dissolves") or [])
+    notes: list[str] = []
+    export = export_handoff(get_adapter(ctx), eff, cfg.filmcraft.interchange_formats, out, proj)
+    if export.error:
+        notes.append(f"interchange export failed: {export.error}")
+    rows = manifest_rows(ctx.catalog.list_assets(), ctx.paths.media_root, prep.mapping.used_asset_ids)
+    write_media_manifest(out / "media_manifest.csv", rows)
+    atomic_write_json(out / "edit_plan.json", to_json_dict(prep.plan))
+    ref = {"project_path": str(proj), "project_relative_to_workspace": run["project_path"], "project_version": run["version"],
+           "sha256": run.get("project_sha256"), "filmcraft_version": run.get("filmcraft_version"),
+           "note": "The .fcproj is referenced, not copied. Media is referenced by absolute path and was not copied."}
+    atomic_write_json(out / "project_reference.json", ref)
+    qc_status = None
+    qp = _qc_paths(ctx)[0]
+    if qp.is_file():
+        try:
+            qc_status = load_plan_json(qp).get("status")
+        except (OSError, ValueError):
+            qc_status = None
+    preview = _preview_path(ctx)
+    missing = missing_used_media(rows)
+    text = render_handoff_report(HandoffReportInputs(
+        title=prep.plan.project.title, filmcraft_version=run.get("filmcraft_version"), tool_version=__version__,
+        platform=f"{ctx.manifest.get('platform', {}).get('system', '?')} {ctx.manifest.get('platform', {}).get('machine', '')}".strip(),
+        out_dir=out, export=export, project_ref=ref, preview_path=str(preview) if preview.is_file() else None,
+        plan_hash=prep.plan.plan_hash, qc_status=qc_status, media_rows=rows, missing_media=missing,
+        mapping_warnings=[w.to_dict() for w in prep.mapping.warnings],
+        verification=read_resolve_verification(out / "resolve_verification.json"), stage_notes=notes))
+    atomic_write_text(out / "handoff_report.md", text)
+    atomic_write_json(out / "handoff_summary.json", {**export.to_dict(), "missing_media": missing, "generated_at": utc_now_iso()})
+    ok = export.report is not None and export.report.ok and not missing
+    summary = {"formats": export.exported_files and [Path(f).name for f in export.exported_files], "files": sorted(p.name for p in out.iterdir()),
+               "missing_media": len(missing), "export_error": export.error, "otio_reload": (export.otio_reload or {}).get("status")}
+    return StageResult(Status.SUCCEEDED if ok else Status.PARTIAL, summary)
+
+
+# ---- registration ----------------------------------------------------------------------------------------
+
+def build_draft_runner(ctx: Any) -> StageRunner:
+    from trip_vlog.orchestrator import build_index_runner
+
+    runner = build_index_runner(ctx)
+    plan_path_exists = lambda c: _pp(c).edit_plan.is_file()
+    runner.register("segment", segment_assets, deps=("catalog",), inputs=segment_inputs)
+    runner.register("plan", plan_stage, deps=("segment",), verify=plan_path_exists,
+                    inputs=lambda c: {**plan_inputs(c), "planner": c.config.workflow.planner})
+    runner.register("approval", approval_stage, deps=("plan",), always_run=True)
+    runner.register("assemble", assemble_stage, deps=("approval",), inputs=_assemble_inputs, verify=_assemble_verify)
+    runner.register("preview", preview_stage, deps=("assemble",), inputs=_preview_inputs, verify=lambda c: _preview_path(c).is_file())
+    runner.register("qc", qc_stage, deps=("assemble",), inputs=_qc_inputs, verify=lambda c: _qc_paths(c)[0].is_file())
+    runner.register("handoff", handoff_stage, deps=("assemble",), inputs=_handoff_inputs,
+                    verify=lambda c: (_handoff_dir(c) / "handoff_report.md").is_file())
+    return runner

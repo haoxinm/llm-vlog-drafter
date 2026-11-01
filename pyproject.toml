@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "trip-vlog"
+version = "0.1.0"
+description = "Draft a travel vlog from photos and videos (media inventory, deterministic draft, FilmCraft assembly, QC, Resolve handoff)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+dependencies = [
+    "pydantic>=2.5",
+    "PyYAML>=6.0",
+    "jsonschema>=4.18",
+    "Pillow>=10.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+# optional: lets the handoff step reload timeline.otio with the OpenTimelineIO library as an extra check
+otio = ["opentimelineio>=0.17"]
+
+[project.scripts]
+trip-vlog = "trip_vlog.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/trip_vlog"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "integration: needs ffmpeg/ffprobe on PATH; skipped cleanly when missing",
+]
