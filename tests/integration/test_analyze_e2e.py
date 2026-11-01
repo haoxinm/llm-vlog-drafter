@@ -180,4 +180,5 @@ def test_limit_and_dry_run_are_persisted_for_resume(media_dir, workspace, fake):
     assert man["pipeline"] == "analyze" and man["run_limit"] == 1 and man["run_dry_run"] is False
     analyze(media_dir, workspace, dry_run=True)
     man = rj(workspace / "manifest.json")
-    assert man["run_limit"] is None and man["run_dry_run"] is True
+    # an inspection dry run must not overwrite the persisted values of the real run
+    assert man["run_limit"] == 1 and man["run_dry_run"] is False

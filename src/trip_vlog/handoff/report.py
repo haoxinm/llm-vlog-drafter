@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from trip_vlog.handoff.interchange import DANGEROUS_FORMATS, RESOLVE_OBSERVATIONS, HandoffExport
@@ -33,14 +33,22 @@ def _inputs_match(doc: dict[str, Any], base: Path) -> bool:
     if not isinstance(hashes, dict) or not hashes:
         return False  # report predates input hashing: cannot tie it to the current files
     for raw in inputs:
-        p = Path(str(raw))
-        if not p.is_absolute():
-            p = base / p
         want = hashes.get(str(raw))
-        try:
-            if not want or hashlib.sha256(p.read_bytes()).hexdigest() != want:
-                return False
-        except OSError:
+        if not want:
+            return False
+        p = Path(str(raw))
+        candidates = [p if p.is_absolute() else base / p]
+        # the report may have been written on another machine or from another directory: also try the file name
+        name = PureWindowsPath(str(raw)).name
+        if name:
+            candidates.append(base / name)
+        for cand in candidates:
+            try:
+                if hashlib.sha256(cand.read_bytes()).hexdigest() == want:
+                    break
+            except OSError:
+                continue
+        else:
             return False
     return True
 

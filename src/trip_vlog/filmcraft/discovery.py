@@ -104,7 +104,8 @@ def find_filmcraft_cli(
     raise FilmCraftNotFound(
         f"{exe} was not found. Install FilmCraft (Windows MSI/portable zip, the separate macOS filmcraft-cli zip, or "
         f"a Linux package; or build it with `cargo build --release -p filmcraft-cli`), then either put it on PATH, set "
-        f"${ENV_VAR}, or set filmcraft.executable in project.yaml. Searched PATH and: "
+        f"${ENV_VAR}, or pass --filmcraft PATH (a filmcraft.executable in the workspace project.yaml is ignored "
+        f"unless TRIP_VLOG_TRUST_WORKSPACE_CONFIG=1). Searched PATH and: "
         + ", ".join(str(t) for t in tried))
 
 

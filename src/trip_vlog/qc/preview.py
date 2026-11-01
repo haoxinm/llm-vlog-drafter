@@ -334,8 +334,12 @@ def build_preview_sheets(ffmpeg: Path, preview: Path, first_sheet: Path, plan: T
                 failed.append(f"{t.tile_id} ({t.side} @ {_ts(t.record_seconds)}, {t.clip_instance_id}): {err}")
                 images[t.tile_id] = None  # type: ignore[assignment]
                 continue
-            with Image.open(f) as im:
-                images[t.tile_id] = im.convert("RGB").copy()
+            try:
+                with Image.open(f) as im:
+                    images[t.tile_id] = im.convert("RGB").copy()
+            except Exception as ex:  # truncated/corrupt frame: record it and keep the other tiles
+                failed.append(f"{t.tile_id} ({t.side} @ {_ts(t.record_seconds)}, {t.clip_instance_id}): unreadable frame ({type(ex).__name__})")
+                images[t.tile_id] = None  # type: ignore[assignment]
     if not any(im is not None for im in images.values()):
         idx.error = "no frames could be extracted from the preview"
         remove_stale_sheets(first_sheet, None)      # sheets of an earlier run would describe a different preview
