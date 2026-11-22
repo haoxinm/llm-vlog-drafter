@@ -1,0 +1,165 @@
+{
+  "$id": "https://trip-vlog.local/schemas/segment_labels:1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Vision labels for video segments; best_frames are indices into the frames shown. No timestamps.",
+  "properties": {
+    "segments": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "best_frames": {
+            "additionalProperties": false,
+            "description": "Best consecutive run of the frame indices shown for this segment; null = the whole segment.",
+            "properties": {
+              "first_index": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "last_index": {
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "first_index",
+              "last_index"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "confidence": {
+            "maximum": 1,
+            "minimum": 0,
+            "type": "number"
+          },
+          "description": {
+            "description": "Grounded: only what is visible.",
+            "type": "string"
+          },
+          "editorial_tags": {
+            "items": {
+              "enum": [
+                "establishing",
+                "people",
+                "food",
+                "nature",
+                "city",
+                "transport",
+                "activity",
+                "detail",
+                "reaction",
+                "transition",
+                "scenic",
+                "night",
+                "other"
+              ],
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "event": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "interest": {
+            "maximum": 1,
+            "minimum": 0,
+            "type": "number"
+          },
+          "quality": {
+            "additionalProperties": false,
+            "properties": {
+              "exposure": {
+                "enum": [
+                  "low",
+                  "ok",
+                  "good",
+                  null
+                ],
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sharpness": {
+                "enum": [
+                  "low",
+                  "ok",
+                  "good",
+                  null
+                ],
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "stability": {
+                "enum": [
+                  "low",
+                  "ok",
+                  "good",
+                  null
+                ],
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "sharpness",
+              "stability",
+              "exposure"
+            ],
+            "type": "object"
+          },
+          "segment_id": {
+            "description": "Copied exactly from the segment header.",
+            "type": "string"
+          },
+          "uncertain": {
+            "type": "boolean"
+          },
+          "uncertainty_note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "visible_entities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "segment_id",
+          "description",
+          "visible_entities",
+          "event",
+          "editorial_tags",
+          "quality",
+          "interest",
+          "confidence",
+          "uncertain",
+          "uncertainty_note",
+          "best_frames"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "segments"
+  ],
+  "title": "segment_labels",
+  "type": "object"
+}

@@ -35,12 +35,14 @@ media:
   vision_sampling_fps: 1.0
   fine_sampling_fps: 4.0
   fine_sampling_enabled: false
+  vision_max_frames_per_segment: 8   # frames beyond this are thinned evenly
+  vision_input: frames               # frames | contact_sheet
+  vision_batch_max_images: 16
+  vision_send_filenames: true        # base name only, wrapped as untrusted data
+  photo_duplicate_distance: 6
   segment_window_seconds: 6.0
-  transcribe_speech: true
-  vision_provider: "anthropic"   # anthropic | replay | <other adapter>
-  llm_provider: "anthropic"
-  llm_model: null                # set via config or env; never hard-coded
-  local_only: false
+  local_only: false              # true: every endpoint used by llm.text / llm.vision (and an active speech.endpoint) must be loopback
+  audio_features: true           # loudness, clipped / wind-likely / silent flags per segment (one ffmpeg pass per asset)
   # Phase 1 inventory settings
   ffprobe_path: null             # else $FFPROBE, PATH, standard install dirs
   ffmpeg_path: null              # else $FFMPEG, PATH, standard install dirs
@@ -53,6 +55,17 @@ media:
   scene_threshold: 0.30          # ffmpeg scene-cut score
   silence_threshold_db: -35      # audio below this level counts as silence
   still_duration_seconds: 3.0    # default on-screen time of a photo
+
+speech:                          # optional transcription; backend none = skipped (see README "Speech transcription")
+  enabled: true
+  backend: none                  # none | openai_transcriptions | command
+  language: null
+  min_speech_seconds: 1.0
+  audio_format: wav              # wav | flac
+  keep_audio: false
+  context_max_chars: 1200        # transcript text shown to the vision model per segment (0 = never)
+  # endpoint: {base_url: "http://127.0.0.1:8000", api_key_env: null, model: <model name your server expects>}
+  # command: {executable: /path/to/whisper-cli, args: ["-f", "{input}", "-osrt", "-of", "{output_base}"], output_format: srt}
 
 workflow:
   approval: "stop_after_outline" # stop_after_outline | auto_approve
@@ -86,3 +99,16 @@ outputs:                         # relative to the output workspace
   preview_file: "preview/draft.mp4"
   edit_plan_file: "plans/edit_plan.json"
   interchange_dir: "resolve_handoff"
+
+# LLM gateway (README "LLM provider"). API keys are read from the environment variable NAMED here, never from this file.
+llm:
+  mode: live                     # live | record | replay (env TRIP_VLOG_LLM_MODE overrides)
+  text: main                     # endpoint profile for text/planning calls
+  vision: main                   # endpoint profile for vision calls
+  endpoints:
+    main:
+      api: anthropic_messages    # anthropic_messages | openai_chat | openai_responses
+      base_url: https://api.anthropic.com
+      model: null                # or the env var named by model_env; there is no built-in default
+      model_env: TRIP_VLOG_LLM_MODEL
+      api_key_env: ANTHROPIC_API_KEY

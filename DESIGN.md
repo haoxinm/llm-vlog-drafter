@@ -244,10 +244,22 @@ media:
   fine_sampling_enabled: false
   segment_window_seconds: 6.0    # max length of a deterministic candidate segment
   transcribe_speech: true
-  vision_provider: "anthropic"   # anthropic | replay | <other adapter>
-  llm_provider: "anthropic"      # anthropic | replay | <other adapter>
-  llm_model: null                # set via config or env; never hard-coded
-  local_only: false
+  local_only: false              # every LLM endpoint used must be loopback (§22)
+
+llm:
+  mode: "live"                   # live | record | replay
+  text: "main"                   # endpoint profile for text/planning calls
+  vision: "main"                 # endpoint profile for vision calls
+  endpoints:
+    main:
+      api: "anthropic_messages"  # anthropic_messages | openai_chat | openai_responses
+      base_url: "https://api.anthropic.com"   # http://127.0.0.1:<port> = local LLM
+      path: null                 # null = API default (/v1/messages, /v1/chat/completions, /v1/responses)
+      model: null                # or env named by model_env; never hard-coded
+      api_key_env: "ANTHROPIC_API_KEY"        # env var name; null = no auth
+      timeout_seconds: 120
+      structured_output: "native" # native | json_prompt | none
+      params: {}                 # passed through verbatim (temperature, top_p, seed, ...)
 
 workflow:
   approval: "stop_after_outline" # stop_after_outline | auto_approve
@@ -1306,7 +1318,7 @@ target length), - FilmCraft adapter with capability discovery,
 idempotent project creation and clip placement, checkpoints and command
 logs, basic audio and still-image support, - save/reopen verification
 and preview render, - deterministic QC, media manifest, interchange
-export (native or read-back fallback, §15.3), handoff report, and the
+export (native; the read-back fallback of §15.3 moved to Phase 7), handoff report, and the
 user-run Resolve verification script (§15.4), - `status`/`resume`.
 
 **Exit criterion:** `trip-vlog draft --planner baseline` turns the
@@ -1339,6 +1351,38 @@ fixture round-trip, - explicit compatibility report.
 
 Deliver: - natural-language revision parser, - localized plan diffs, -
 versioned project updates, - rerender and change summary.
+
+### Phase 7 --- Deferred hardening and polish
+
+Items deferred from earlier phases. None blocks a usable draft; each
+ships with tests like any other phase. Deliver:
+
+-   **Read-back interchange fallback (§15.3):** generate OTIO / FCP7 XML
+    from the timeline read back from FilmCraft when its native export
+    is missing or lossy, with the cross-check diff in the handoff
+    report. Not needed so far: FilmCraft 0.13's native FCP7 XML
+    passed every check in Resolve.
+-   **Plan re-seal helper:** a command that re-validates a hand-edited
+    `edit_plan.json` / outline and recomputes its seal (hash), so
+    manual edits are accepted explicitly instead of failing the hash
+    check.
+-   **Failed-assembly cleanup:** when a FilmCraft build fails midway,
+    mark the partial `_vNNN.fcproj` as failed in the journal and keep
+    it out of `resume`/handoff, without deleting user data.
+-   **Portrait and mixed-aspect framing:** scale-to-fit portrait clips
+    and stills in a landscape sequence (and the reverse), if FilmCraft
+    supports it and the result is verified.
+-   **Audio ducking:** lower music under natural sound or speech
+    (§13.3), verified in the read-back and the preview.
+-   **Fine sampling refinement (§7.2 step 5):** when
+    `fine_sampling_enabled`, resample at `fine_sampling_fps` around the
+    best-frame boundaries of high-scoring moments and tighten them with
+    a second, smaller request (own prompt, schema and cache). Phase 3
+    ships without it; enabling it only adds a warning.
+-   **Captions and subtitles from transcripts (§13.4):** captions only
+    from transcript text, never paraphrased, exported in a form the
+    handoff can carry (e.g. an SRT alongside the timeline) and verified
+    in Resolve.
 
 ## 21. Suggested repository structure
 
@@ -1428,16 +1472,27 @@ Prefer boring, replaceable tools:
     extraction, and output diagnostics---not as a second timeline
     renderer.
 -   **SQLite + JSON artifacts** for cache/catalog persistence.
--   **A provider-neutral LLM gateway** supporting schema-constrained
-    output and vision input, shipping with:
-    -   a default concrete provider (Anthropic Claude API via the
-        official SDK; model ID from config/env, never hard-coded), and
+-   **A provider-neutral LLM gateway** over plain HTTP (no vendor
+    SDK), supporting schema-constrained output and vision input. It
+    speaks three API schemas, so it works with Anthropic, OpenAI and
+    any provider or local server compatible with either:
+    `anthropic_messages`, `openai_chat` (Chat Completions) and
+    `openai_responses`. Each named endpoint configures address, path,
+    timeout, retries, auth header from an environment variable, extra
+    headers, the model ID (config or env, never hard-coded), the
+    structured-output mode (native JSON-schema parameter, or the schema
+    in the prompt for servers without one) and pass-through request
+    parameters such as `temperature`. Output is always validated
+    client-side against the schema. A loopback `base_url`
+    (`127.0.0.1`, `localhost`, `::1`) marks a local LLM; `local_only`
+    requires every endpoint in use to be local. Plain `http://` to a
+    remote host is refused unless explicitly allowed. It ships with:
     -   a **record/replay provider**: in `record` mode it stores each
-        request fingerprint (prompt version + schema + inputs hash) and
-        the validated response under `tests/fixtures/llm/`; in `replay`
-        mode it returns stored responses and fails loudly on a cache
-        miss. Tests and CI use replay only, so they are deterministic
-        and need no API key.
+        request fingerprint (prompt version + schema + inputs hash +
+        model) and the validated response under `tests/fixtures/llm/`;
+        in `replay` mode it returns stored responses and fails loudly
+        on a cache miss. Tests and CI use replay only, so they are
+        deterministic and need no API key.
 -   **Speech recognition** as an optional adapter, selected according to
     privacy and quality requirements.
 -   **FilmCraft CLI/MCP** as the primary editing interface.

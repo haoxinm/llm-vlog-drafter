@@ -45,7 +45,7 @@ def test_frame_rate_accepts_numbers_and_rationals():
     {"filmcraft": {"control_port": 70000}},
     {"media": {"unknown_field": 1}},
     {"nonsense": {}},
-    {"media": {"local_only": True}},  # default provider is a cloud provider
+    {"media": {"local_only": True}},  # the default llm endpoint is a remote host
     {"media": {"fine_sampling_enabled": True, "fine_sampling_fps": 0.5}},
 ])
 def test_invalid_values_rejected(raw):
@@ -53,8 +53,9 @@ def test_invalid_values_rejected(raw):
         parse_config(raw)
 
 
-def test_local_only_with_replay_provider_ok():
-    c = parse_config({"media": {"local_only": True, "vision_provider": "replay", "llm_provider": "replay"}})
+def test_local_only_with_loopback_endpoint_ok():
+    ep = {"api": "openai_chat", "base_url": "http://127.0.0.1:8080", "api_key_env": None}
+    c = parse_config({"media": {"local_only": True}, "llm": {"endpoints": {"main": ep}}})
     assert c.media.local_only
 
 
@@ -150,9 +151,12 @@ def test_output_symlink_escape_rejected(tmp_path):
 def test_local_only_is_an_allowlist():
     import pytest as _pt
     from trip_vlog.config import ConfigError, parse_config
-    with _pt.raises(ConfigError, match="known local provider"):
+    # Provider names no longer exist on this branch; local_only is enforced on the endpoint hosts instead (allowlist:
+    # only loopback hosts pass), and the legacy provider keys are rejected outright rather than silently ignored.
+    with _pt.raises(ConfigError, match="no longer exist"):
         parse_config({"media": {"local_only": True, "vision_provider": "openai", "llm_provider": "replay"}})
-    parse_config({"media": {"local_only": True, "vision_provider": "replay", "llm_provider": "ollama"}})
+    with _pt.raises(ConfigError, match="not a loopback address"):
+        parse_config({"media": {"local_only": True}})
 
 
 def test_implicit_workspace_config_ignores_executables(tmp_path, monkeypatch):
