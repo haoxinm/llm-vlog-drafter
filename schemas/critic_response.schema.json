@@ -1,0 +1,238 @@
+{
+  "$id": "https://trip-vlog.local/schemas/critic_response:1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "QC critic reply: findings with severity, category, affected scene and clip ids, evidence that was supplied, and an optional localized change from a closed set of operations. Durations in seconds only; no timestamps.",
+  "properties": {
+    "findings": {
+      "description": "Actionable findings, most important first (at most 8); empty for a good draft.",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "category": {
+            "enum": [
+              "story_clarity",
+              "repetition",
+              "pacing",
+              "cut_point",
+              "orientation",
+              "audio_conflict",
+              "missing_context",
+              "other"
+            ],
+            "type": "string"
+          },
+          "clip_instance_ids": {
+            "description": "Clips the finding is about, copied exactly.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "evidence": {
+            "description": "At least one item, each naming something that was supplied.",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "description": "tile: a tile id whose image was supplied; qc_check: the name of an automatic check; plan: a clip or scene id of the plan; audio: a clip id that has audio measurements.",
+                  "enum": [
+                    "tile",
+                    "qc_check",
+                    "plan",
+                    "audio"
+                  ],
+                  "type": "string"
+                },
+                "note": {
+                  "description": "One sentence: what this evidence shows.",
+                  "type": "string"
+                },
+                "ref": {
+                  "description": "The tile id, check name, clip or scene id, copied exactly from the request.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "ref",
+                "note"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "proposed_change": {
+            "additionalProperties": false,
+            "description": "One small localized change, or null.",
+            "properties": {
+              "anchor": {
+                "description": "trim_clip: where in the moment the clip is taken.",
+                "enum": [
+                  "start",
+                  "center",
+                  "end",
+                  "best",
+                  null
+                ],
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "audio": {
+                "description": "set_clip_audio.",
+                "enum": [
+                  "mute",
+                  "keep",
+                  "lower",
+                  null
+                ],
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "clip_instance_id": {
+                "description": "The clip to change; null for shorten_scene.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "duration_seconds": {
+                "description": "trim_clip: the new length in seconds.",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "moment_id": {
+                "description": "swap_moment: one of the alternatives of the clip's scene.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "operation": {
+                "description": "One operation of the closed set.",
+                "enum": [
+                  "trim_clip",
+                  "swap_moment",
+                  "remove_clip",
+                  "move_clip",
+                  "set_transition",
+                  "set_clip_audio",
+                  "shorten_scene"
+                ],
+                "type": "string"
+              },
+              "reason": {
+                "description": "One short sentence on why the change helps.",
+                "type": "string"
+              },
+              "scene_id": {
+                "description": "Only for shorten_scene.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "shorten_by_seconds": {
+                "description": "shorten_scene: how many seconds to take out of the scene.",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "to_position": {
+                "description": "move_clip: the new place inside the scene, counted from 1.",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "transition_seconds": {
+                "description": "set_transition: 0 for a cut, 0.3 to 1.0 for a dissolve.",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "transition_type": {
+                "description": "set_transition.",
+                "enum": [
+                  "cut",
+                  "dissolve",
+                  null
+                ],
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "operation",
+              "clip_instance_id",
+              "scene_id",
+              "duration_seconds",
+              "anchor",
+              "moment_id",
+              "to_position",
+              "transition_type",
+              "transition_seconds",
+              "audio",
+              "shorten_by_seconds",
+              "reason"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "scene_ids": {
+            "description": "Scenes the finding is about, copied exactly.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "severity": {
+            "enum": [
+              "info",
+              "minor",
+              "major"
+            ],
+            "type": "string"
+          },
+          "summary": {
+            "description": "What is wrong, in one or two sentences.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "severity",
+          "category",
+          "summary",
+          "scene_ids",
+          "clip_instance_ids",
+          "evidence",
+          "proposed_change"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "summary": {
+      "description": "The overall state of the draft in at most two sentences.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "summary",
+    "findings"
+  ],
+  "title": "critic_response",
+  "type": "object"
+}

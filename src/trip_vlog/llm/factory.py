@@ -46,28 +46,30 @@ def _dir(value: str, workspace: Path) -> Path:
 def make_gateway(
     config: Config,
     workspace: Path | str,
-    purpose: Literal["vision", "text"] = "vision",
+    purpose: Literal["vision", "text", "critic"] = "vision",
     *,
+    images: bool = True,
     mode: str | None = None,
     env: Mapping[str, str] | None = None,
     logger: RunLogger | None = None,
     transport: Transport | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> Gateway:
-    """Gateway for `purpose`, using the endpoint profile named by llm.vision / llm.text.
+    """Gateway for `purpose`, using the endpoint profile named by llm.vision / llm.text / llm.critic (`images`: whether the critic
+    sends images, which decides its fallback profile: vision when it does, text when it does not).
 
     live: real calls (+ workspace response cache). record: like live, and every validated response is also saved to the
     fixture dir. replay: stored responses only, no network, no key needed. `transport`/`sleep` are test injection points.
     """
-    if purpose not in ("vision", "text"):
-        raise ValueError("purpose must be 'vision' or 'text'")
+    if purpose not in ("vision", "text", "critic"):
+        raise ValueError("purpose must be 'vision', 'text' or 'critic'")
     env = os.environ if env is None else env
     llm = config.llm
     workspace = Path(workspace)
     resolved = mode or resolve_mode(config, env)
     if resolved not in LLM_MODES:
         raise LLMConfigError(f"mode must be one of {', '.join(LLM_MODES)}, got {resolved!r}")
-    profile, ep = llm.endpoint_for(purpose)
+    profile, ep = llm.endpoint_for(purpose, images=images)
     if config.media.local_only and not ep.is_local:  # defence in depth: Config already validates this at load time
         raise LLMConfigError(f"media.local_only is true but endpoint {profile!r} ({ep.host}) is not local")
 
