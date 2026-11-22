@@ -1,0 +1,11 @@
+{
+  "streams": [
+    {"index": 0, "codec_name": "hevc", "codec_type": "video", "width": 1920, "height": 1080, "pix_fmt": "yuv420p",
+     "r_frame_rate": "30000/1001", "avg_frame_rate": "30000/1001", "duration": "12.512000",
+     "disposition": {"attached_pic": 0},
+     "side_data_list": [{"side_data_type": "Display Matrix", "displaymatrix": "\n00000000:            0       65536           0\n", "rotation": -90}]},
+    {"index": 1, "codec_name": "aac", "codec_type": "audio", "duration": "12.5"}
+  ],
+  "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2", "duration": "12.512000",
+             "tags": {"creation_time": "2026-10-31T16:22:10.000000Z"}}
+}

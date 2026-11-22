@@ -1,0 +1,2517 @@
+{
+  "schema": "phase0.capability_snapshot.v1",
+  "required_checks_failed": [],
+  "filmcraft": {
+    "version_output": "filmcraft-cli 0.13.0",
+    "commit": "693c41be5a93241e7c502e24d09a946c8a06944e",
+    "describe": "v0.13.0-14-g693c41b",
+    "commit_date": "2026-10-25T09:43:00-04:00"
+  },
+  "environment": {
+    "os": "Linux-6.18.44-fc-v153-x86_64-with-glibc2.39",
+    "python": "3.13.17",
+    "ffmpeg": "ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers",
+    "display": false,
+    "headless": true
+  },
+  "cli_subcommands": [
+    "exec",
+    "run",
+    "commands",
+    "describe",
+    "inspect",
+    "import",
+    "export",
+    "render",
+    "probe",
+    "bench-decode",
+    "mcp",
+    "help"
+  ],
+  "command_catalog": {
+    "count": 710,
+    "required": {
+      "create_project": {
+        "file.newProject": "{\"name\":str}"
+      },
+      "open_project_reopen": {
+        "file.open": "{\"path\":str}"
+      },
+      "save_project": {
+        "file.save": "{\"path\":str?}",
+        "file.saveAs": "{\"path\":str}"
+      },
+      "import_media": {
+        "file.import": "{\"paths\":[str],\"bin\":binId?,\"imageSequence\":bool?,\"replace\":bool?}"
+      },
+      "create_sequence": {
+        "file.newSequence": "{\"name\":str,\"width\":u32=1920,\"height\":u32=1080,\"fps\":f64=23.976,\"sampleRate\":u32=48000,\"video\":n=3,\"audio\":n=3,\"mix\":\"Stereo|Mono|5.1|Adaptive\"?,\"trackType\":\"Standard|Mono|5.1|Adaptive\"?,\"fromItem\":itemId?,\"fromItems\":[itemId]?}"
+      },
+      "place_clip": {
+        "timeline.place": "{\"item\":id|\"items\":[id] (back to back, one undo step),\"track\":\"V1\"|id|\"A1\" (sound only)|\"new\" (a video track after the last)?,\"audioTrack\":\"A1\"|id|\"new\"?,\"time\":ticks|\"frame\":i64|\"seconds\":f64,\"insert\":bool,\"sourceIn\":ticks?,\"duration\":ticks?,\"video\":bool=true,\"audio\":bool=true}"
+      },
+      "trim_clip": {
+        "timeline.trim": "{\"clip\":id,\"edge\":\"in|out\",\"mode\":\"regular|ripple\",\"delta\":ticks|\"deltaFrames\":i64}"
+      },
+      "move_clip": {
+        "timeline.move": "{\"moves\":[{\"clip\":id,\"track\":id|\"V2\"|\"new\" (after the last of its kind),\"time\":ticks}],\"insert\":bool,\"linked\":bool?,\"copy\":bool?}"
+      },
+      "add_tracks": {
+        "sequence.addTracks": "{\"video\":n=1,\"audio\":n=0,\"submix\":n=0,\"videoAfter\":\"first\"|\"V2\"|n?,\"audioAfter\":\"first\"|\"A2\"|n?,\"submixAfter\":\"first\"|\"S1\"|n?,\"audioType\":\"standard|5.1|adaptive|mono\"?,\"submixType\":\"stereo|5.1|adaptive|mono\"?}"
+      },
+      "add_marker": {
+        "markers.add": "{\"target\":\"program|source\",\"time\":ticks?,\"name\":str?,\"comment\":str?,\"color\":label?,\"durationFrames\":i64?}"
+      },
+      "add_title": {
+        "graphics.newText": "{\"text\":str=\"New Text\",\"position\":[x,y]? (point text: its alignment point on the first baseline; with `box`: the box's top-left corner),\"box\":[w,h]? (paragraph text wrapped in a box this size),\"clip\":id?,\"newClip\":bool?,\"vertical\":bool=false,\"size\":px=100,\"font\":str?,\"fontStyle\":str?,\"seconds\":f64=5,\"track\":index?,\"time\":ticks?}"
+      },
+      "add_transition": {
+        "sequence.applyVideoTransition": "{\"clip\":id?,\"effect\":\"cross_dissolve|Cross Dissolve|…\"?,\"frames\":i64?,\"edge\":\"in\"|\"out\"?,\"params\":{param:value}?,\"reverse\":bool?}"
+      },
+      "audio_gain": {
+        "clip.audioGain": "{\"clips\":[id]?,\"mode\":\"set|adjust|normalizeMax|normalizeAll\"?,\"db\":f64,\"relative\":bool?}"
+      },
+      "audio_fade": {
+        "sequence.applyAudioTransition": "{\"clip\":id?,\"effect\":\"constant_power|Constant Power|…\"?,\"frames\":i64?,\"edge\":\"in\"|\"out\"?,\"params\":{param:value}?,\"reverse\":bool?}"
+      },
+      "render_preview": {
+        "file.exportMedia": "{\"path\":str,\"preset\":str?,\"settings\":ExportSettings?,\"format\":\"h264|hevc|prores|dnxhr|apv|mjpeg|mxf-op1a|mxf-opatom|png|tiff|bmp|jpg|tga|dpx|exr|gif|wav|aiff|aac|flac\"?,\"audioCodec\":\"auto|aac|pcm|flac\"?,\"flacLevel\":0..8=5,\"width\":u32?,\"height\":u32?,\"fps\":f64?,\"bitrateKbps\":u32?,\"bitrateMode\":\"cbr|vbr1Pass|vbr2Pass|crf\"?,\"crf\":0..51=23,\"hardwareEncoding\":\"off|auto\"?,\"scale\":f32=1,\"audio\":bool=true,\"quality\":0..100,\"burnCaptions\":bool=false,\"alpha\":bool=false,\"exrCompression\":\"none|rle|zips|zip\"?,\"captionSidecar\":\"srt|vtt\"?,\"loudnessLufs\":f64?,\"proresProfile\":\"proxy|lt|standard|hq|4444|4444xq\"?,\"dnxProfile\":\"lb|sq|hq|hqx\"?,\"apvProfile\":\"422-10|422-12|444-10|444-12\"?,\"mxfVideoCodec\":\"dnxhr|proRes|h264\"?,\"sequence\":id?,\"range\":\"entire|inOut|workArea|custom\"?,\"startSeconds\":f64?,\"endSeconds\":f64?,\"wait\":bool=false}"
+      },
+      "export_interchange": {
+        "file.exportInterchange": "{\"format\":\"edl|xml|fcpxml|otio|aaf|omf\"=xml,\"path\":str,\"sequence\":id?}"
+      },
+      "undo": {
+        "edit.undo": "{}"
+      }
+    }
+  },
+  "mcp": {
+    "initialize": {
+      "protocolVersion": "2025-06-18",
+      "capabilities": {
+        "resources": {},
+        "tools": {}
+      },
+      "serverInfo": {
+        "name": "filmcraft",
+        "version": "0.13.0"
+      },
+      "instructions": "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`)."
+    },
+    "tools": [
+      "command_batch",
+      "command_list",
+      "command_run",
+      "doc_inspect",
+      "media_import",
+      "project_inspect",
+      "render_frame",
+      "render_preview",
+      "sequence_inspect",
+      "ui_click",
+      "ui_control",
+      "ui_drag",
+      "ui_elements",
+      "ui_inspect",
+      "ui_key",
+      "ui_screenshot",
+      "ui_type"
+    ]
+  },
+  "imported_items": {
+    "landscape_5s.mp4": {
+      "item": 1,
+      "type": "Movie",
+      "duration_ticks": 1270080000000,
+      "duration_s": 5.0
+    },
+    "still_1080p.png": {
+      "item": 2,
+      "type": "Still Image",
+      "duration_ticks": 1270080000000,
+      "duration_s": 5.0
+    },
+    "portrait_4s.mp4": {
+      "item": 3,
+      "type": "Movie",
+      "duration_ticks": 1016064000000,
+      "duration_s": 4.0
+    },
+    "music_6s.wav": {
+      "item": 4,
+      "type": "Audio",
+      "duration_ticks": 1524096000000,
+      "duration_s": 6.0
+    },
+    "music_6s.m4a": {
+      "item": 5,
+      "type": "Audio",
+      "duration_ticks": 1524096000000,
+      "duration_s": 6.0
+    }
+  },
+  "media_status": [
+    {
+      "identity": {
+        "fingerprint": "515d0f4e2a527a38",
+        "size": 346763
+      },
+      "item": 1,
+      "name": "landscape_5s.mp4",
+      "path": "$FIXTURES/landscape_5s.mp4",
+      "proxy": null,
+      "status": "online"
+    },
+    {
+      "identity": {
+        "fingerprint": "97db84e678877d2f",
+        "size": 30883
+      },
+      "item": 2,
+      "name": "still_1080p.png",
+      "path": "$FIXTURES/still_1080p.png",
+      "proxy": null,
+      "status": "online"
+    },
+    {
+      "identity": {
+        "fingerprint": "6f0ea78dd3b26830",
+        "size": 270271
+      },
+      "item": 3,
+      "name": "portrait_4s.mp4",
+      "path": "$FIXTURES/portrait_4s.mp4",
+      "proxy": null,
+      "status": "online"
+    },
+    {
+      "identity": {
+        "fingerprint": "c2128a3f6ba833bd",
+        "size": 1152078
+      },
+      "item": 4,
+      "name": "music_6s.wav",
+      "path": "$FIXTURES/music_6s.wav",
+      "proxy": null,
+      "status": "online"
+    },
+    {
+      "identity": {
+        "fingerprint": "068231c3bf56e9b3",
+        "size": 50263
+      },
+      "item": 5,
+      "name": "music_6s.m4a",
+      "path": "$FIXTURES/music_6s.m4a",
+      "proxy": null,
+      "status": "online"
+    }
+  ],
+  "timeline_built": {
+    "durationFrames": 195,
+    "fps": {
+      "den": 1,
+      "num": 30
+    },
+    "size": [
+      1920,
+      1080
+    ],
+    "tracks": {
+      "Video 1": {
+        "kind": "video",
+        "clips": [
+          {
+            "name": "landscape_5s.mp4",
+            "start": 0,
+            "end": 105,
+            "src_in": 127008000000,
+            "src_out": 1016064000000,
+            "gain_db": 0.0,
+            "speed": 1.0,
+            "linked": true
+          },
+          {
+            "name": "still_1080p.png",
+            "start": 105,
+            "end": 195,
+            "src_in": 0,
+            "src_out": 762048000000,
+            "gain_db": 0.0,
+            "speed": 1.0,
+            "linked": false
+          }
+        ]
+      },
+      "Video 2": {
+        "kind": "video",
+        "clips": [
+          {
+            "name": "Hello Title",
+            "start": 0,
+            "end": 60,
+            "src_in": 0,
+            "src_out": 508032000000,
+            "gain_db": 0.0,
+            "speed": 1.0,
+            "linked": false
+          },
+          {
+            "name": "portrait_4s.mp4",
+            "start": 60,
+            "end": 120,
+            "src_in": 0,
+            "src_out": 508032000000,
+            "gain_db": 0.0,
+            "speed": 1.0,
+            "linked": false
+          }
+        ]
+      },
+      "Audio 1": {
+        "kind": "audio",
+        "clips": [
+          {
+            "name": "landscape_5s.mp4",
+            "start": 0,
+            "end": 105,
+            "src_in": 127008000000,
+            "src_out": 1016064000000,
+            "gain_db": 0.0,
+            "speed": 1.0,
+            "linked": true
+          }
+        ]
+      },
+      "Audio 2": {
+        "kind": "audio",
+        "clips": [
+          {
+            "name": "music_6s.wav",
+            "start": 0,
+            "end": 180,
+            "src_in": 0,
+            "src_out": 1524096000000,
+            "gain_db": -6.0,
+            "speed": 1.0,
+            "linked": false
+          }
+        ]
+      }
+    },
+    "transitions": [
+      {
+        "track": "Video 1",
+        "effect": "cross_dissolve",
+        "duration": 127008000000,
+        "start": 821318400000,
+        "align": "center"
+      },
+      {
+        "track": "Audio 2",
+        "effect": "constant_power",
+        "duration": 127008000000,
+        "start": 1397088000000,
+        "align": "end"
+      }
+    ],
+    "markers": [
+      {
+        "name": "Scene A",
+        "start": 508032000000,
+        "comment": "phase0",
+        "color": "Green",
+        "duration": 0
+      }
+    ]
+  },
+  "timeline_built_full": {
+    "durationFrames": 195,
+    "fps": {
+      "den": 1,
+      "num": 30
+    },
+    "size": [
+      1920,
+      1080
+    ],
+    "tracks": {
+      "Video 1": {
+        "kind": "video",
+        "id": 6,
+        "clips": [
+          {
+            "name": "landscape_5s.mp4",
+            "start": 0,
+            "end": 105,
+            "src_in": 127008000000,
+            "src_out": 1016064000000,
+            "gain_db": 0.0,
+            "speed": 1.0,
+            "linked": true,
+            "clip": 12,
+            "item": 1
+          },
+          {
+            "name": "still_1080p.png",
+            "start": 105,
+            "end": 195,
+            "src_in": 0,
+            "src_out": 762048000000,
+            "gain_db": 0.0,
+            "speed": 1.0,
+            "linked": false,
+            "clip": 14,
+            "item": 2
+          }
+        ]
+      },
+      "Video 2": {
+        "kind": "video",
+        "id": 9,
+        "clips": [
+          {
+            "name": "Hello Title",
+            "start": 0,
+            "end": 60,
+            "src_in": 0,
+            "src_out": 508032000000,
+            "gain_db": 0.0,
+            "speed": 1.0,
+            "linked": false,
+            "clip": 17,
+            "item": 16
+          },
+          {
+            "name": "portrait_4s.mp4",
+            "start": 60,
+            "end": 120,
+            "src_in": 0,
+            "src_out": 508032000000,
+            "gain_db": 0.0,
+            "speed": 1.0,
+            "linked": false,
+            "clip": 15,
+            "item": 3
+          }
+        ]
+      },
+      "Audio 1": {
+        "kind": "audio",
+        "id": 7,
+        "clips": [
+          {
+            "name": "landscape_5s.mp4",
+            "start": 0,
+            "end": 105,
+            "src_in": 127008000000,
+            "src_out": 1016064000000,
+            "gain_db": 0.0,
+            "speed": 1.0,
+            "linked": true,
+            "clip": 13,
+            "item": 1
+          }
+        ]
+      },
+      "Audio 2": {
+        "kind": "audio",
+        "id": 10,
+        "clips": [
+          {
+            "name": "music_6s.wav",
+            "start": 0,
+            "end": 180,
+            "src_in": 0,
+            "src_out": 1524096000000,
+            "gain_db": -6.0,
+            "speed": 1.0,
+            "linked": false,
+            "clip": 20,
+            "item": 4
+          }
+        ]
+      }
+    },
+    "transitions": [
+      {
+        "track": "Video 1",
+        "effect": "cross_dissolve",
+        "duration": 127008000000,
+        "start": 821318400000,
+        "align": "center",
+        "from": 12,
+        "to": 14
+      },
+      {
+        "track": "Audio 2",
+        "effect": "constant_power",
+        "duration": 127008000000,
+        "start": 1397088000000,
+        "align": "end",
+        "from": 20,
+        "to": null
+      }
+    ],
+    "markers": [
+      {
+        "name": "Scene A",
+        "start": 508032000000,
+        "comment": "phase0",
+        "color": "Green",
+        "duration": 0
+      }
+    ],
+    "raw_ids": {}
+  },
+  "time_representation": {
+    "ticks_per_second_documented": 254016000000,
+    "one_frame_30fps_ticks": 8467200000,
+    "sample_clip_ticks": {
+      "duration_5s": 1270080000000
+    },
+    "inspect_fields": "start/end/duration in ticks plus startFrame/endFrame/durationFrames; sourceIn/sourceOut in ticks (media time)",
+    "frame_rate_representation": {
+      "den": 1,
+      "num": 30
+    },
+    "command_inputs": "ticks, or seconds= / frame= / timecode=; deltaFrames= for trims"
+  },
+  "fcproj": {
+    "format": "filmcraft.project",
+    "schema_version": 15,
+    "generator": "FilmCraft 0.13.0",
+    "top_level_keys": [
+      "format",
+      "schema_version",
+      "generator",
+      "project",
+      "view"
+    ],
+    "project_keys": [
+      "name",
+      "settings",
+      "root",
+      "items",
+      "next_id"
+    ],
+    "bytes": 13745,
+    "media_referenced_by_path": true
+  },
+  "media_status_after_reopen": [
+    {
+      "identity": {
+        "fingerprint": "515d0f4e2a527a38",
+        "size": 346763
+      },
+      "item": 1,
+      "name": "landscape_5s.mp4",
+      "path": "$FIXTURES/landscape_5s.mp4",
+      "proxy": null,
+      "status": "online"
+    },
+    {
+      "identity": {
+        "fingerprint": "97db84e678877d2f",
+        "size": 30883
+      },
+      "item": 2,
+      "name": "still_1080p.png",
+      "path": "$FIXTURES/still_1080p.png",
+      "proxy": null,
+      "status": "online"
+    },
+    {
+      "identity": {
+        "fingerprint": "6f0ea78dd3b26830",
+        "size": 270271
+      },
+      "item": 3,
+      "name": "portrait_4s.mp4",
+      "path": "$FIXTURES/portrait_4s.mp4",
+      "proxy": null,
+      "status": "online"
+    },
+    {
+      "identity": {
+        "fingerprint": "c2128a3f6ba833bd",
+        "size": 1152078
+      },
+      "item": 4,
+      "name": "music_6s.wav",
+      "path": "$FIXTURES/music_6s.wav",
+      "proxy": null,
+      "status": "online"
+    },
+    {
+      "identity": {
+        "fingerprint": "068231c3bf56e9b3",
+        "size": 50263
+      },
+      "item": 5,
+      "name": "music_6s.m4a",
+      "path": "$FIXTURES/music_6s.m4a",
+      "proxy": null,
+      "status": "online"
+    }
+  ],
+  "render": {
+    "seconds_to_render": 14.6,
+    "result": {
+      "cancel": "jobs.cancel",
+      "job": 1,
+      "offlineMedia": [],
+      "path": "$OUT/preview.mp4",
+      "poll": "jobs.list",
+      "result": {
+        "bytes": 4368276,
+        "frames": 195,
+        "path": "$OUT/preview.mp4",
+        "render_fps": 13.370903562823772,
+        "seconds": 14.583905948
+      }
+    },
+    "ffprobe": {
+      "format_duration": 6.506,
+      "video": {
+        "codec_name": "h264",
+        "width": 1920,
+        "height": 1080,
+        "r_frame_rate": "30/1",
+        "nb_frames": "195",
+        "pix_fmt": "yuv420p",
+        "duration": "6.500000"
+      },
+      "audio": [
+        {
+          "codec_name": "aac",
+          "channels": 2,
+          "sample_rate": "48000",
+          "duration": "6.506000"
+        }
+      ]
+    }
+  },
+  "render_frame_tool": {
+    "ok": true,
+    "content_types": [
+      "image",
+      "text"
+    ],
+    "mime": "image/png",
+    "base64_bytes": 68724
+  },
+  "interchange_formats_declared": "{\"format\":\"edl|xml|fcpxml|otio|aaf|omf\"=xml,\"path\":str,\"sequence\":id?}",
+  "interchange": {
+    "edl": {
+      "export_ok": true,
+      "bytes": 1195,
+      "report": [
+        "EDLs hold one video track; other video tracks were not exported (use export_edl_per_track)",
+        "a transition needs more source media than available; its source in was clamped to 0"
+      ],
+      "validation": {
+        "format": "cmx3600_edl",
+        "findings": [
+          "SOURCE FILE comments are RELATIVE to the .edl location",
+          "EDL carries a single video track (V1) + audio; V2 clips/titles are not exported",
+          "dissolve event present: D015, D015"
+        ],
+        "mismatches": [],
+        "events": [
+          {
+            "n": "001",
+            "reel": "LANDSCAP",
+            "track": "V",
+            "kind": "C",
+            "dur": "",
+            "src_in": 15,
+            "src_out": 112,
+            "rec_in": 0,
+            "rec_out": 97
+          },
+          {
+            "n": "002",
+            "reel": "LANDSCAP",
+            "track": "A",
+            "kind": "C",
+            "dur": "",
+            "src_in": 15,
+            "src_out": 120,
+            "rec_in": 0,
+            "rec_out": 105
+          },
+          {
+            "n": "003",
+            "reel": "MUSIC_6S",
+            "track": "A2",
+            "kind": "C",
+            "dur": "",
+            "src_in": 0,
+            "src_out": 165,
+            "rec_in": 0,
+            "rec_out": 165
+          },
+          {
+            "n": "004",
+            "reel": "LANDSCAP",
+            "track": "V",
+            "kind": "C",
+            "dur": "",
+            "src_in": 112,
+            "src_out": 112,
+            "rec_in": 97,
+            "rec_out": 97
+          },
+          {
+            "n": "004",
+            "reel": "STILL_10",
+            "track": "V",
+            "kind": "D",
+            "dur": "015",
+            "src_in": 0,
+            "src_out": 98,
+            "rec_in": 97,
+            "rec_out": 195
+          },
+          {
+            "n": "005",
+            "reel": "MUSIC_6S",
+            "track": "A2",
+            "kind": "C",
+            "dur": "",
+            "src_in": 165,
+            "src_out": 165,
+            "rec_in": 165,
+            "rec_out": 165
+          },
+          {
+            "n": "005",
+            "reel": "BL",
+            "track": "A2",
+            "kind": "D",
+            "dur": "015",
+            "src_in": 0,
+            "src_out": 15,
+            "rec_in": 165,
+            "rec_out": 180
+          }
+        ],
+        "has_title": true,
+        "raw_source_files": [
+          "../../../tests/fixtures/generated/landscape_5s.mp4",
+          "../../../tests/fixtures/generated/music_6s.wav",
+          "../../../tests/fixtures/generated/still_1080p.png"
+        ],
+        "source_files": [
+          "$FIXTURES/landscape_5s.mp4",
+          "$FIXTURES/music_6s.wav",
+          "$FIXTURES/still_1080p.png"
+        ],
+        "media_path_style": "relative to the .edl file",
+        "otio_cmx3600_adapter": {
+          "loaded": true,
+          "duration_frames": 195
+        },
+        "ok": true
+      },
+      "filmcraft_reimport": {
+        "import_ok": true,
+        "result": {
+          "documents": [
+            {
+              "format": "CMX 3600 EDL",
+              "linkedMedia": 3,
+              "offlineMedia": [],
+              "report": [
+                "EDL has no frame rate; assumed 24 fps (set ImportOptions::edl_frame_rate to override)"
+              ],
+              "sequences": [
+                4
+              ]
+            }
+          ],
+          "errors": [],
+          "items": [],
+          "sequences": [
+            4
+          ]
+        },
+        "sequences_in_project": [
+          "Main"
+        ],
+        "reimported_clips": {
+          "Video 1": [
+            [
+              "landscape_5s.mp4",
+              0,
+              79
+            ],
+            [
+              "still_1080p.png",
+              79,
+              159
+            ]
+          ],
+          "Audio 1": [
+            [
+              "landscape_5s.mp4",
+              0,
+              87
+            ]
+          ],
+          "Audio 2": [
+            [
+              "music_6s.wav",
+              0,
+              150
+            ]
+          ]
+        },
+        "reimported_transitions": 2
+      }
+    },
+    "xml": {
+      "export_ok": true,
+      "bytes": 30876,
+      "report": [
+        "graphic clip \"Hello Title\" at frame 0 has no Final Cut Pro 7 XML equivalent: it is written as a clip item without media and is not read back on import",
+        "clip gain was folded into Audio Levels"
+      ],
+      "validation": {
+        "format": "fcp7_xml",
+        "findings": [
+          "transitionitem Cross Dissolve 97-112 center",
+          "Video 2/Hello Title: graphic written as clipitem without media (pathurl=None)",
+          "transitionitem Constant Power 165-180 end-black"
+        ],
+        "mismatches": [],
+        "root": "xmeml version=4",
+        "sequence_duration": 195,
+        "timebase": "30",
+        "markers": [
+          {
+            "name": "Scene A",
+            "in": "60"
+          }
+        ],
+        "otio_fcp_adapter": {
+          "loaded": true,
+          "duration_frames": 195
+        },
+        "ok": true
+      },
+      "xmllint": {
+        "rc": 0,
+        "stderr": ""
+      },
+      "filmcraft_reimport": {
+        "import_ok": true,
+        "result": {
+          "documents": [
+            {
+              "format": "Final Cut Pro XML",
+              "linkedMedia": 4,
+              "offlineMedia": [],
+              "report": [
+                "clip \"Hello Title\" refers to a file the document does not define; skipped"
+              ],
+              "sequences": [
+                1
+              ]
+            }
+          ],
+          "errors": [],
+          "items": [],
+          "sequences": [
+            1
+          ]
+        },
+        "sequences_in_project": [
+          "Main"
+        ],
+        "reimported_clips": {
+          "Video 1": [
+            [
+              "landscape_5s.mp4",
+              0,
+              105
+            ],
+            [
+              "still_1080p.png",
+              105,
+              195
+            ]
+          ],
+          "Video 2": [
+            [
+              "portrait_4s.mp4",
+              60,
+              120
+            ]
+          ],
+          "Audio 1": [
+            [
+              "landscape_5s.mp4",
+              0,
+              105
+            ]
+          ],
+          "Audio 2": [
+            [
+              "music_6s.wav",
+              0,
+              180
+            ]
+          ]
+        },
+        "reimported_transitions": 2
+      }
+    },
+    "fcpxml": {
+      "export_ok": true,
+      "bytes": 4851,
+      "report": [
+        "FCPXML export keeps transitions on V1 only; transitions on other tracks were dropped",
+        "graphic clip \"Hello Title\" at frame 0 is not supported in FCPXML: it is written as a clip without media and is not read back on import",
+        "effect \"Text\" written as an FCPXML filter reference (FilmCraft-specific)"
+      ],
+      "validation": {
+        "format": "fcpxml",
+        "findings": [
+          "asset-clip 'Hello Title' has dangling ref='' (graphic without media) -- importers may reject",
+          "resource <format> frameDurations differ across assets ['1/30s', '1001/30000s'] (a still got a 29.97 format in a 30p sequence)"
+        ],
+        "mismatches": [
+          "transition count mismatch"
+        ],
+        "version": "1.10",
+        "assets": {
+          "r2": "$FIXTURES/landscape_5s.mp4",
+          "r5": "$FIXTURES/still_1080p.png",
+          "r8": "$FIXTURES/portrait_4s.mp4",
+          "r9": "$FIXTURES/music_6s.wav"
+        },
+        "asset_clips": [
+          "landscape_5s.mp4",
+          "Hello Title",
+          "portrait_4s.mp4",
+          "music_6s.wav",
+          "still_1080p.png"
+        ],
+        "transitions": [
+          "Cross Dissolve"
+        ],
+        "format_frameDurations": [
+          "1/30s",
+          "1001/30000s",
+          "1/30s"
+        ],
+        "ok": false
+      },
+      "xmllint": {
+        "rc": 0,
+        "stderr": ""
+      },
+      "filmcraft_reimport": {
+        "import_ok": true,
+        "result": {
+          "documents": [
+            {
+              "format": "FCPXML",
+              "linkedMedia": 4,
+              "offlineMedia": [],
+              "report": [],
+              "sequences": [
+                1
+              ]
+            }
+          ],
+          "errors": [],
+          "items": [],
+          "sequences": [
+            1
+          ]
+        },
+        "sequences_in_project": [],
+        "reimported_clips": {
+          "Video 1": [
+            [
+              "landscape_5s.mp4",
+              0,
+              105
+            ],
+            [
+              "still_1080p.png",
+              105,
+              195
+            ]
+          ],
+          "Video 2": [
+            [
+              "portrait_4s.mp4",
+              60,
+              120
+            ]
+          ],
+          "Audio 1": [
+            [
+              "landscape_5s.mp4",
+              0,
+              105
+            ]
+          ],
+          "Audio 2": [
+            [
+              "music_6s.wav",
+              0,
+              180
+            ]
+          ]
+        },
+        "reimported_transitions": 1
+      }
+    },
+    "otio": {
+      "export_ok": true,
+      "bytes": 45266,
+      "report": [
+        "graphic clip \"Hello Title\" at frame 0 has no OTIO equivalent: it is written as a clip with a missing media reference and is read back as offline media"
+      ],
+      "validation": {
+        "format": "otio",
+        "findings": [
+          "Video 2/Hello Title: graphic written as MissingReference (media-less)",
+          "transition SMPTE_Dissolve in_offset=8.0 out_offset=7.0 frames",
+          "transition SMPTE_Dissolve in_offset=15.0 out_offset=0.0 frames",
+          "target_url is RELATIVE to the .otio location (resolved here against the file's directory)"
+        ],
+        "mismatches": [],
+        "schema": "Timeline.1",
+        "otio_tracks": [
+          "Video 1",
+          "Video 2",
+          "Audio 1",
+          "Audio 2"
+        ],
+        "raw_target_urls": [
+          "../../../tests/fixtures/generated/landscape_5s.mp4",
+          "../../../tests/fixtures/generated/music_6s.wav",
+          "../../../tests/fixtures/generated/portrait_4s.mp4",
+          "../../../tests/fixtures/generated/still_1080p.png"
+        ],
+        "transitions": [
+          {
+            "track": "Video 1",
+            "type": "SMPTE_Dissolve",
+            "in": 8.0,
+            "out": 7.0
+          },
+          {
+            "track": "Audio 2",
+            "type": "SMPTE_Dissolve",
+            "in": 15.0,
+            "out": 0.0
+          }
+        ],
+        "markers": [
+          {
+            "name": "Scene A",
+            "start": 60.0,
+            "color": "GREEN"
+          }
+        ],
+        "otio_library": {
+          "version": "0.18.1",
+          "loaded": true,
+          "duration_frames": 195,
+          "rate": 30.0
+        },
+        "media_path_style": "relative to the .otio file",
+        "ok": true
+      },
+      "filmcraft_reimport": {
+        "import_ok": true,
+        "result": {
+          "documents": [
+            {
+              "format": "OpenTimelineIO",
+              "linkedMedia": 4,
+              "offlineMedia": [
+                "$OUT/interchange/Graphic"
+              ],
+              "report": [],
+              "sequences": [
+                1
+              ]
+            }
+          ],
+          "errors": [],
+          "items": [],
+          "sequences": [
+            1
+          ]
+        },
+        "sequences_in_project": [
+          "Main"
+        ],
+        "reimported_clips": {
+          "Video 1": [
+            [
+              "landscape_5s.mp4",
+              0,
+              105
+            ],
+            [
+              "still_1080p.png",
+              105,
+              195
+            ]
+          ],
+          "Video 2": [
+            [
+              "Hello Title",
+              0,
+              60
+            ],
+            [
+              "portrait_4s.mp4",
+              60,
+              120
+            ]
+          ],
+          "Audio 1": [
+            [
+              "landscape_5s.mp4",
+              0,
+              105
+            ]
+          ],
+          "Audio 2": [
+            [
+              "music_6s.wav",
+              0,
+              180
+            ]
+          ]
+        },
+        "reimported_transitions": 2
+      }
+    },
+    "aaf": {
+      "export_ok": true,
+      "bytes": 61440,
+      "report": [
+        "a clip uses media before the start of its (trimmed) essence",
+        "graphic clip \"Hello Title\" at frame 0 is not exported (left as a gap)"
+      ],
+      "validation": {
+        "format": "aaf",
+        "ok": true,
+        "findings": [
+          "only container magic checked (no AAF library installed); FilmCraft's own AAF re-import is exercised separately"
+        ],
+        "mismatches": []
+      },
+      "filmcraft_reimport": {
+        "import_ok": true,
+        "result": {
+          "documents": [
+            {
+              "format": "AAF",
+              "linkedMedia": 4,
+              "offlineMedia": [],
+              "report": [],
+              "sequences": [
+                5
+              ]
+            }
+          ],
+          "errors": [],
+          "items": [],
+          "sequences": [
+            5
+          ]
+        },
+        "sequences_in_project": [
+          "Main"
+        ],
+        "reimported_clips": {
+          "Video 1": [
+            [
+              "landscape_5s.mp4",
+              0,
+              105
+            ],
+            [
+              "still_1080p.png",
+              105,
+              195
+            ]
+          ],
+          "Video 2": [
+            [
+              "portrait_4s.mp4",
+              60,
+              120
+            ]
+          ],
+          "Audio 1": [
+            [
+              "landscape_5s.mp4",
+              0,
+              105
+            ]
+          ],
+          "Audio 2": [
+            [
+              "music_6s.wav",
+              0,
+              180
+            ]
+          ]
+        },
+        "reimported_transitions": 2
+      }
+    },
+    "omf": {
+      "export_ok": true,
+      "bytes": 9231,
+      "report": [
+        "sequence markers are not written to OMF"
+      ],
+      "validation": {
+        "format": "omf",
+        "ok": true,
+        "findings": [
+          "OMF 2.0 carries audio only (no video); structural check = non-empty file"
+        ],
+        "mismatches": []
+      }
+    }
+  },
+  "resolve": {
+    "status": "pending -- requires user's DaVinci Resolve installation",
+    "note": "Resolve is proprietary GUI software needing a GPU; it was NOT run. No Resolve compatibility is claimed."
+  },
+  "frame_rate_probe": {
+    "23.976": {
+      "requested": 23.976023976023978,
+      "stored": {
+        "den": 1001,
+        "num": 24000
+      },
+      "drop_frame": false
+    },
+    "29.97": {
+      "requested": 29.97002997002997,
+      "stored": {
+        "den": 1001,
+        "num": 30000
+      },
+      "drop_frame": false
+    },
+    "59.94": {
+      "requested": 59.94005994005994,
+      "stored": {
+        "den": 1001,
+        "num": 60000
+      },
+      "drop_frame": false
+    },
+    "25": {
+      "requested": 25,
+      "stored": {
+        "den": 1,
+        "num": 25
+      },
+      "drop_frame": false
+    },
+    "30": {
+      "requested": 30,
+      "stored": {
+        "den": 1,
+        "num": 30
+      },
+      "drop_frame": false
+    }
+  },
+  "capabilities": {
+    "create_project": {
+      "status": "verified working",
+      "tool": "command_run file.newProject",
+      "evidence": null,
+      "commands_in_catalog": {
+        "file.newProject": true
+      }
+    },
+    "import_media": {
+      "status": "verified working",
+      "tool": "media_import {paths}",
+      "evidence": {
+        "errors": [],
+        "items": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "commands_in_catalog": {
+        "file.import": true
+      }
+    },
+    "verify_media_online": {
+      "status": "verified working",
+      "tool": "command_run media.status",
+      "evidence": [
+        {
+          "identity": {
+            "fingerprint": "515d0f4e2a527a38",
+            "size": 346763
+          },
+          "item": 1,
+          "name": "landscape_5s.mp4",
+          "path": "$FIXTURES/landscape_5s.mp4",
+          "proxy": null,
+          "status": "online"
+        },
+        {
+          "identity": {
+            "fingerprint": "97db84e678877d2f",
+            "size": 30883
+          },
+          "item": 2,
+          "name": "still_1080p.png",
+          "path": "$FIXTURES/still_1080p.png",
+          "proxy": null,
+          "status": "online"
+        },
+        {
+          "identity": {
+            "fingerprint": "6f0ea78dd3b26830",
+            "size": 270271
+          },
+          "item": 3,
+          "name": "portrait_4s.mp4",
+          "path": "$FIXTURES/portrait_4s.mp4",
+          "proxy": null,
+          "status": "online"
+        },
+        {
+          "identity": {
+            "fingerprint": "c2128a3f6ba833bd",
+            "size": 1152078
+          },
+          "item": 4,
+          "name": "music_6s.wav",
+          "path": "$FIXTURES/music_6s.wav",
+          "proxy": null,
+          "status": "online"
+        },
+        {
+          "identity": {
+            "fingerprint": "068231c3bf56e9b3",
+            "size": 50263
+          },
+          "item": 5,
+          "name": "music_6s.m4a",
+          "path": "$FIXTURES/music_6s.m4a",
+          "proxy": null,
+          "status": "online"
+        }
+      ]
+    },
+    "create_sequence": {
+      "status": "verified working",
+      "tool": "command_run file.newSequence",
+      "evidence": {
+        "sequence": 8
+      },
+      "commands_in_catalog": {
+        "file.newSequence": true
+      }
+    },
+    "add_tracks": {
+      "status": "verified working",
+      "tool": "command_run sequence.addTracks",
+      "evidence": {
+        "audio": [
+          10
+        ],
+        "submix": [],
+        "video": [
+          9
+        ]
+      },
+      "commands_in_catalog": {
+        "sequence.addTracks": true
+      }
+    },
+    "place_clip": {
+      "status": "verified working",
+      "tool": "command_run timeline.place",
+      "evidence": "video+linked audio clip ids returned; still placed with duration",
+      "commands_in_catalog": {
+        "timeline.place": true
+      }
+    },
+    "trim_clip": {
+      "status": "verified working",
+      "tool": "command_run timeline.trim {clip, edge, mode:ripple|regular, deltaFrames|delta}",
+      "evidence": [
+        [
+          "landscape_5s.mp4",
+          0,
+          105,
+          0.5,
+          4.0
+        ],
+        [
+          "still_1080p.png",
+          105,
+          195,
+          0.0,
+          3.0
+        ]
+      ],
+      "commands_in_catalog": {
+        "timeline.trim": true
+      }
+    },
+    "move_clip": {
+      "status": "verified working",
+      "tool": "command_run timeline.move {moves:[{clip,track,time}]}",
+      "evidence": {
+        "name": "portrait_4s.mp4",
+        "start": 60,
+        "end": 120,
+        "src_in": 0,
+        "src_out": 508032000000,
+        "gain_db": 0.0,
+        "speed": 1.0,
+        "linked": false,
+        "clip": 15,
+        "item": 3
+      },
+      "commands_in_catalog": {
+        "timeline.move": true
+      }
+    },
+    "add_title": {
+      "status": "verified working",
+      "tool": "command_run graphics.newText",
+      "evidence": {
+        "clip": 17,
+        "layer": 0
+      },
+      "commands_in_catalog": {
+        "graphics.newText": true
+      }
+    },
+    "add_transition": {
+      "status": "verified working",
+      "tool": "command_run sequence.applyVideoTransition",
+      "evidence": [
+        {
+          "track": "Video 1",
+          "effect": "cross_dissolve",
+          "duration": 127008000000,
+          "start": 821318400000,
+          "align": "center",
+          "from": 12,
+          "to": 14
+        }
+      ],
+      "commands_in_catalog": {
+        "sequence.applyVideoTransition": true
+      }
+    },
+    "place_audio_only": {
+      "status": "verified working",
+      "tool": "command_run timeline.place track=A2",
+      "evidence": {
+        "clips": [
+          20
+        ]
+      }
+    },
+    "audio_gain": {
+      "status": "verified working",
+      "tool": "command_run clip.audioGain + sequence_inspect gainDb",
+      "evidence": -6.0,
+      "commands_in_catalog": {
+        "clip.audioGain": true
+      }
+    },
+    "audio_fade": {
+      "status": "verified working",
+      "tool": "command_run sequence.applyAudioTransition",
+      "evidence": {
+        "result": {
+          "transition": 21
+        },
+        "audio_transitions_in_inspect": 1
+      },
+      "commands_in_catalog": {
+        "sequence.applyAudioTransition": true
+      }
+    },
+    "audio_ducking": {
+      "status": "not tested",
+      "tool": "effects.setParam (keyframes) exists in catalog",
+      "evidence": "docs show effects.setParam with keyframed params; no ducking command exercised"
+    },
+    "add_marker": {
+      "status": "verified working",
+      "tool": "command_run markers.add",
+      "evidence": [
+        {
+          "name": "Scene A",
+          "start": 508032000000,
+          "comment": "phase0",
+          "color": "Green",
+          "duration": 0
+        }
+      ],
+      "commands_in_catalog": {
+        "markers.add": true
+      }
+    },
+    "undo": {
+      "status": "verified working",
+      "tool": "command_run edit.undo",
+      "evidence": null,
+      "commands_in_catalog": {
+        "edit.undo": true
+      }
+    },
+    "save_project": {
+      "status": "verified working",
+      "tool": "command_run file.saveAs",
+      "evidence": {
+        "backup": null,
+        "bytes": 13745,
+        "ms": 2.4817419999999997,
+        "path": "$OUT/phase0.fcproj"
+      },
+      "commands_in_catalog": {
+        "file.save": true,
+        "file.saveAs": true
+      }
+    },
+    "open_project_reopen": {
+      "status": "verified working",
+      "tool": "mcp --project <file.fcproj> (new process) + sequence_inspect",
+      "evidence": null,
+      "commands_in_catalog": {
+        "file.open": true
+      }
+    },
+    "render_preview": {
+      "status": "verified working",
+      "tool": "command_run file.exportMedia {path, format, wait:true}",
+      "evidence": {
+        "format_duration": 6.506,
+        "video": {
+          "codec_name": "h264",
+          "width": 1920,
+          "height": 1080,
+          "r_frame_rate": "30/1",
+          "nb_frames": "195",
+          "pix_fmt": "yuv420p",
+          "duration": "6.500000"
+        },
+        "audio": [
+          {
+            "codec_name": "aac",
+            "channels": 2,
+            "sample_rate": "48000",
+            "duration": "6.506000"
+          }
+        ]
+      },
+      "commands_in_catalog": {
+        "file.exportMedia": true
+      }
+    },
+    "export_interchange": {
+      "status": "verified working",
+      "tool": "command_run file.exportInterchange {format, path}",
+      "evidence": {
+        "edl": {
+          "export_ok": true,
+          "structurally_valid": true
+        },
+        "xml": {
+          "export_ok": true,
+          "structurally_valid": true
+        },
+        "fcpxml": {
+          "export_ok": true,
+          "structurally_valid": false
+        },
+        "otio": {
+          "export_ok": true,
+          "structurally_valid": true
+        },
+        "aaf": {
+          "export_ok": true,
+          "structurally_valid": true
+        },
+        "omf": {
+          "export_ok": true,
+          "structurally_valid": true
+        }
+      },
+      "commands_in_catalog": {
+        "file.exportInterchange": true
+      }
+    },
+    "cli_inspect": {
+      "status": "verified working",
+      "tool": "filmcraft-cli --project p inspect sequence",
+      "evidence": null
+    }
+  },
+  "gaps": [
+    "Titles/graphics are NOT carried by any interchange format: OTIO/FCP7 XML/FCPXML write a media-less clip, AAF/EDL drop it (export report).",
+    "EDL holds one video track only; V2 content is lost.",
+    "FilmCraft interchange of the transition is center-aligned; handle media before/after the cut is required or source-in is clamped (see report).",
+    "OMF carries audio only.",
+    "DaVinci Resolve import is untested (pending user's installation)."
+  ],
+  "checks": [
+    {
+      "name": "cli --version runs",
+      "ok": true,
+      "required": true,
+      "detail": "filmcraft-cli 0.13.0"
+    },
+    {
+      "name": "CLI `commands --json` lists engine commands",
+      "ok": true,
+      "required": true,
+      "detail": 710
+    },
+    {
+      "name": "MCP initialize + tools/list handshake",
+      "ok": true,
+      "required": true,
+      "detail": [
+        "command_batch",
+        "command_list",
+        "command_run",
+        "doc_inspect",
+        "media_import",
+        "project_inspect",
+        "render_frame",
+        "render_preview",
+        "sequence_inspect",
+        "ui_click",
+        "ui_control",
+        "ui_drag",
+        "ui_elements",
+        "ui_inspect",
+        "ui_key",
+        "ui_screenshot",
+        "ui_type"
+      ]
+    },
+    {
+      "name": "MCP command_list matches CLI catalog",
+      "ok": true,
+      "required": true,
+      "detail": 710
+    },
+    {
+      "name": "all commands the adapter needs exist in the catalog",
+      "ok": true,
+      "required": true,
+      "detail": {}
+    },
+    {
+      "name": "create project (file.newProject)",
+      "ok": true,
+      "required": true,
+      "detail": null
+    },
+    {
+      "name": "import 5 media files (media_import)",
+      "ok": true,
+      "required": true,
+      "detail": {
+        "errors": [],
+        "items": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      }
+    },
+    {
+      "name": "imported durations match ffprobe (video 5s, still 5s default, wav 6s)",
+      "ok": true,
+      "required": true,
+      "detail": {
+        "landscape_5s.mp4": {
+          "item": 1,
+          "type": "Movie",
+          "duration_ticks": 1270080000000,
+          "duration_s": 5.0
+        },
+        "still_1080p.png": {
+          "item": 2,
+          "type": "Still Image",
+          "duration_ticks": 1270080000000,
+          "duration_s": 5.0
+        },
+        "portrait_4s.mp4": {
+          "item": 3,
+          "type": "Movie",
+          "duration_ticks": 1016064000000,
+          "duration_s": 4.0
+        },
+        "music_6s.wav": {
+          "item": 4,
+          "type": "Audio",
+          "duration_ticks": 1524096000000,
+          "duration_s": 6.0
+        },
+        "music_6s.m4a": {
+          "item": 5,
+          "type": "Audio",
+          "duration_ticks": 1524096000000,
+          "duration_s": 6.0
+        }
+      }
+    },
+    {
+      "name": "media.status reports imported media online",
+      "ok": true,
+      "required": false,
+      "detail": [
+        {
+          "identity": {
+            "fingerprint": "515d0f4e2a527a38",
+            "size": 346763
+          },
+          "item": 1,
+          "name": "landscape_5s.mp4",
+          "path": "$FIXTURES/landscape_5s.mp4",
+          "proxy": null,
+          "status": "online"
+        },
+        {
+          "identity": {
+            "fingerprint": "97db84e678877d2f",
+            "size": 30883
+          },
+          "item": 2,
+          "name": "still_1080p.png",
+          "path": "$FIXTURES/still_1080p.png",
+          "proxy": null,
+          "status": "online"
+        },
+        {
+          "identity": {
+            "fingerprint": "6f0ea78dd3b26830",
+            "size": 270271
+          },
+          "item": 3,
+          "name": "portrait_4s.mp4",
+          "path": "$FIXTURES/portrait_4s.mp4",
+          "proxy": null,
+          "status": "online"
+        },
+        {
+          "identity": {
+            "fingerprint": "c2128a3f6ba833bd",
+            "size": 1152078
+          },
+          "item": 4,
+          "name": "music_6s.wav",
+          "path": "$FIXTURES/music_6s.wav",
+          "proxy": null,
+          "status": "online"
+        },
+        {
+          "identity": {
+            "fingerprint": "068231c3bf56e9b3",
+            "size": 50263
+          },
+          "item": 5,
+          "name": "music_6s.m4a",
+          "path": "$FIXTURES/music_6s.m4a",
+          "proxy": null,
+          "status": "online"
+        }
+      ]
+    },
+    {
+      "name": "create sequence 1920x1080 30fps (file.newSequence)",
+      "ok": true,
+      "required": true,
+      "detail": {
+        "sequence": 8
+      }
+    },
+    {
+      "name": "add second video track + second audio track (sequence.addTracks)",
+      "ok": true,
+      "required": true,
+      "detail": {
+        "audio": [
+          10
+        ],
+        "submix": [],
+        "video": [
+          9
+        ]
+      }
+    },
+    {
+      "name": "sequence has V1,V2,A1,A2",
+      "ok": true,
+      "required": true,
+      "detail": [
+        "Video 1",
+        "Video 2",
+        "Audio 1",
+        "Audio 2"
+      ]
+    },
+    {
+      "name": "sequence settings read back 1920x1080 @ 30/1",
+      "ok": true,
+      "required": true,
+      "detail": {
+        "den": 1,
+        "num": 30
+      }
+    },
+    {
+      "name": "place video on V1 (timeline.place)",
+      "ok": true,
+      "required": true,
+      "detail": {
+        "clips": [
+          12,
+          13
+        ]
+      }
+    },
+    {
+      "name": "place still on V1 after the video, 3 s (timeline.place)",
+      "ok": true,
+      "required": true,
+      "detail": {
+        "clips": [
+          14
+        ]
+      }
+    },
+    {
+      "name": "placement read back: V1 = [landscape 0-150, still 150-240]",
+      "ok": true,
+      "required": true,
+      "detail": [
+        {
+          "name": "landscape_5s.mp4",
+          "start": 0,
+          "end": 150,
+          "src_in": 0,
+          "src_out": 1270080000000,
+          "gain_db": 0.0,
+          "speed": 1.0,
+          "linked": true,
+          "clip": 12,
+          "item": 1
+        },
+        {
+          "name": "still_1080p.png",
+          "start": 150,
+          "end": 240,
+          "src_in": 0,
+          "src_out": 762048000000,
+          "gain_db": 0.0,
+          "speed": 1.0,
+          "linked": false,
+          "clip": 14,
+          "item": 2
+        }
+      ]
+    },
+    {
+      "name": "placing a movie links its audio onto A1",
+      "ok": true,
+      "required": true,
+      "detail": null
+    },
+    {
+      "name": "trim (ripple): landscape source 0.5-4.0s on timeline 0-105, still rippled to 105-195",
+      "ok": true,
+      "required": true,
+      "detail": [
+        [
+          "landscape_5s.mp4",
+          0,
+          105,
+          0.5,
+          4.0
+        ],
+        [
+          "still_1080p.png",
+          105,
+          195,
+          0.0,
+          3.0
+        ]
+      ]
+    },
+    {
+      "name": "trim keeps linked audio in sync (A1 0-105, src 0.5-4.0)",
+      "ok": true,
+      "required": true,
+      "detail": [
+        {
+          "name": "landscape_5s.mp4",
+          "start": 0,
+          "end": 105,
+          "src_in": 127008000000,
+          "src_out": 1016064000000,
+          "gain_db": 0.0,
+          "speed": 1.0,
+          "linked": true,
+          "clip": 13,
+          "item": 1
+        }
+      ]
+    },
+    {
+      "name": "place portrait video on V2 (video only, 2 s)",
+      "ok": true,
+      "required": true,
+      "detail": {
+        "clips": [
+          15
+        ]
+      }
+    },
+    {
+      "name": "move clip later (1s -> 2s) read back",
+      "ok": true,
+      "required": true,
+      "detail": {
+        "name": "portrait_4s.mp4",
+        "start": 60,
+        "end": 120,
+        "src_in": 0,
+        "src_out": 508032000000,
+        "gain_db": 0.0,
+        "speed": 1.0,
+        "linked": false,
+        "clip": 15,
+        "item": 3
+      }
+    },
+    {
+      "name": "add title text on V2 0-60 (graphics.newText)",
+      "ok": true,
+      "required": true,
+      "detail": [
+        {
+          "name": "Hello Title",
+          "start": 0,
+          "end": 60,
+          "src_in": 0,
+          "src_out": 508032000000,
+          "gain_db": 0.0,
+          "speed": 1.0,
+          "linked": false,
+          "clip": 17,
+          "item": 16
+        },
+        {
+          "name": "portrait_4s.mp4",
+          "start": 60,
+          "end": 120,
+          "src_in": 0,
+          "src_out": 508032000000,
+          "gain_db": 0.0,
+          "speed": 1.0,
+          "linked": false,
+          "clip": 15,
+          "item": 3
+        }
+      ]
+    },
+    {
+      "name": "add cross dissolve at the cut (sequence.applyVideoTransition)",
+      "ok": true,
+      "required": true,
+      "detail": [
+        {
+          "track": "Video 1",
+          "effect": "cross_dissolve",
+          "duration": 127008000000,
+          "start": 821318400000,
+          "align": "center",
+          "from": 12,
+          "to": 14
+        }
+      ]
+    },
+    {
+      "name": "transition is 15 frames, centered on the cut",
+      "ok": true,
+      "required": true,
+      "detail": [
+        {
+          "track": "Video 1",
+          "effect": "cross_dissolve",
+          "duration": 127008000000,
+          "start": 821318400000,
+          "align": "center",
+          "from": 12,
+          "to": 14
+        }
+      ]
+    },
+    {
+      "name": "place audio-only file on A2 (timeline.place track=A2)",
+      "ok": true,
+      "required": true,
+      "detail": {
+        "clips": [
+          20
+        ]
+      }
+    },
+    {
+      "name": "set clip audio gain -6 dB (clip.audioGain) and read gainDb",
+      "ok": true,
+      "required": false,
+      "detail": -6.0
+    },
+    {
+      "name": "audio fade-out on music (sequence.applyAudioTransition)",
+      "ok": true,
+      "required": false,
+      "detail": {
+        "transition": 21
+      }
+    },
+    {
+      "name": "add sequence marker at 2.0 s (markers.add)",
+      "ok": true,
+      "required": true,
+      "detail": [
+        {
+          "name": "Scene A",
+          "start": 508032000000,
+          "comment": "phase0",
+          "color": "Green",
+          "duration": 0
+        }
+      ]
+    },
+    {
+      "name": "edit.undo removes the last edit (marker)",
+      "ok": true,
+      "required": false,
+      "detail": []
+    },
+    {
+      "name": "marker re-added after undo",
+      "ok": true,
+      "required": true,
+      "detail": null
+    },
+    {
+      "name": "ticks/second 254016000000 divides a 30 fps frame exactly",
+      "ok": true,
+      "required": true,
+      "detail": null
+    },
+    {
+      "name": "save project (.fcproj) (file.saveAs)",
+      "ok": true,
+      "required": true,
+      "detail": {
+        "backup": null,
+        "bytes": 13745,
+        "ms": 2.4817419999999997,
+        "path": "$OUT/phase0.fcproj"
+      }
+    },
+    {
+      "name": ".fcproj is JSON with format=filmcraft.project and a schema_version",
+      "ok": true,
+      "required": true,
+      "detail": {
+        "format": "filmcraft.project",
+        "schema_version": 15,
+        "generator": "FilmCraft 0.13.0",
+        "top_level_keys": [
+          "format",
+          "schema_version",
+          "generator",
+          "project",
+          "view"
+        ],
+        "project_keys": [
+          "name",
+          "settings",
+          "root",
+          "items",
+          "next_id"
+        ],
+        "bytes": 13745,
+        "media_referenced_by_path": true
+      }
+    },
+    {
+      "name": "reopen in a NEW server process: timeline identical (clip order/in/out/duration/transition/marker)",
+      "ok": true,
+      "required": true,
+      "detail": null
+    },
+    {
+      "name": "media still online/linked to original paths after reopen",
+      "ok": true,
+      "required": false,
+      "detail": [
+        {
+          "identity": {
+            "fingerprint": "515d0f4e2a527a38",
+            "size": 346763
+          },
+          "item": 1,
+          "name": "landscape_5s.mp4",
+          "path": "$FIXTURES/landscape_5s.mp4",
+          "proxy": null,
+          "status": "online"
+        },
+        {
+          "identity": {
+            "fingerprint": "97db84e678877d2f",
+            "size": 30883
+          },
+          "item": 2,
+          "name": "still_1080p.png",
+          "path": "$FIXTURES/still_1080p.png",
+          "proxy": null,
+          "status": "online"
+        },
+        {
+          "identity": {
+            "fingerprint": "6f0ea78dd3b26830",
+            "size": 270271
+          },
+          "item": 3,
+          "name": "portrait_4s.mp4",
+          "path": "$FIXTURES/portrait_4s.mp4",
+          "proxy": null,
+          "status": "online"
+        },
+        {
+          "identity": {
+            "fingerprint": "c2128a3f6ba833bd",
+            "size": 1152078
+          },
+          "item": 4,
+          "name": "music_6s.wav",
+          "path": "$FIXTURES/music_6s.wav",
+          "proxy": null,
+          "status": "online"
+        },
+        {
+          "identity": {
+            "fingerprint": "068231c3bf56e9b3",
+            "size": 50263
+          },
+          "item": 5,
+          "name": "music_6s.m4a",
+          "path": "$FIXTURES/music_6s.m4a",
+          "proxy": null,
+          "status": "online"
+        }
+      ]
+    },
+    {
+      "name": "doc_inspect works on reopened project",
+      "ok": true,
+      "required": false,
+      "detail": null
+    },
+    {
+      "name": "render preview MP4 (file.exportMedia wait=true)",
+      "ok": true,
+      "required": true,
+      "detail": {
+        "cancel": "jobs.cancel",
+        "job": 1,
+        "offlineMedia": [],
+        "path": "$OUT/preview.mp4",
+        "poll": "jobs.list",
+        "result": {
+          "bytes": 4368276,
+          "frames": 195,
+          "path": "$OUT/preview.mp4",
+          "render_fps": 13.370903562823772,
+          "seconds": 14.583905948
+        }
+      }
+    },
+    {
+      "name": "preview is 1920x1080 @ 30 fps h264",
+      "ok": true,
+      "required": true,
+      "detail": {
+        "index": 0,
+        "codec_name": "h264",
+        "codec_long_name": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+        "profile": "High",
+        "codec_type": "video",
+        "codec_tag_string": "avc1",
+        "codec_tag": "0x31637661",
+        "width": 1920,
+        "height": 1080,
+        "coded_width": 1920,
+        "coded_height": 1080,
+        "closed_captions": 0,
+        "film_grain": 0,
+        "has_b_frames": 1,
+        "sample_aspect_ratio": "1:1",
+        "display_aspect_ratio": "16:9",
+        "pix_fmt": "yuv420p",
+        "level": 41,
+        "color_range": "tv",
+        "color_space": "bt709",
+        "color_transfer": "bt709",
+        "color_primaries": "bt709",
+        "chroma_location": "left",
+        "field_order": "progressive",
+        "refs": 1,
+        "is_avc": "true",
+        "nal_length_size": "4",
+        "id": "0x1",
+        "r_frame_rate": "30/1",
+        "avg_frame_rate": "30/1",
+        "time_base": "1/30",
+        "start_pts": 0,
+        "start_time": "0.000000",
+        "duration_ts": 195,
+        "duration": "6.500000",
+        "bit_rate": "5049388",
+        "bits_per_raw_sample": "8",
+        "nb_frames": "195",
+        "extradata_size": 50,
+        "disposition": {
+          "default": 1,
+          "dub": 0,
+          "original": 0,
+          "comment": 0,
+          "lyrics": 0,
+          "karaoke": 0,
+          "forced": 0,
+          "hearing_impaired": 0,
+          "visual_impaired": 0,
+          "clean_effects": 0,
+          "attached_pic": 0,
+          "timed_thumbnails": 0,
+          "non_diegetic": 0,
+          "captions": 0,
+          "descriptions": 0,
+          "metadata": 0,
+          "dependent": 0,
+          "still_image": 0
+        },
+        "tags": {
+          "language": "und",
+          "handler_name": "VideoHandler",
+          "vendor_id": "[0][0][0][0]"
+        }
+      }
+    },
+    {
+      "name": "preview duration within 1 frame of sequence (6.500s)",
+      "ok": true,
+      "required": true,
+      "detail": 6.506
+    },
+    {
+      "name": "preview frame count equals sequence frames",
+      "ok": true,
+      "required": true,
+      "detail": "195"
+    },
+    {
+      "name": "preview has an audio stream",
+      "ok": true,
+      "required": true,
+      "detail": [
+        {
+          "index": 1,
+          "codec_name": "aac",
+          "codec_long_name": "AAC (Advanced Audio Coding)",
+          "profile": "LC",
+          "codec_type": "audio",
+          "codec_tag_string": "mp4a",
+          "codec_tag": "0x6134706d",
+          "sample_fmt": "fltp",
+          "sample_rate": "48000",
+          "channels": 2,
+          "channel_layout": "stereo",
+          "bits_per_sample": 0,
+          "initial_padding": 0,
+          "id": "0x2",
+          "r_frame_rate": "0/0",
+          "avg_frame_rate": "0/0",
+          "time_base": "1/48000",
+          "start_pts": 0,
+          "start_time": "0.000000",
+          "duration_ts": 312288,
+          "duration": "6.506000",
+          "bit_rate": "319921",
+          "nb_frames": "306",
+          "extradata_size": 2,
+          "disposition": {
+            "default": 1,
+            "dub": 0,
+            "original": 0,
+            "comment": 0,
+            "lyrics": 0,
+            "karaoke": 0,
+            "forced": 0,
+            "hearing_impaired": 0,
+            "visual_impaired": 0,
+            "clean_effects": 0,
+            "attached_pic": 0,
+            "timed_thumbnails": 0,
+            "non_diegetic": 0,
+            "captions": 0,
+            "descriptions": 0,
+            "metadata": 0,
+            "dependent": 0,
+            "still_image": 0
+          },
+          "tags": {
+            "language": "und",
+            "handler_name": "SoundHandler",
+            "vendor_id": "[0][0][0][0]"
+          }
+        }
+      ]
+    },
+    {
+      "name": "render_frame tool returns an image of the program frame",
+      "ok": true,
+      "required": false,
+      "detail": [
+        "image",
+        "text"
+      ]
+    },
+    {
+      "name": "unknown interchange format is rejected with an error (no silent fallback)",
+      "ok": true,
+      "required": false,
+      "detail": "invalid parameters for `file.exportInterchange`: unknown format \"bogus\": use one of edl, xml, fcpxml, otio, aaf, omf"
+    },
+    {
+      "name": "export interchange edl (file.exportInterchange)",
+      "ok": true,
+      "required": true,
+      "detail": {
+        "bytes": 1195,
+        "path": "$OUT/interchange/phase0.edl",
+        "report": [
+          "EDLs hold one video track; other video tracks were not exported (use export_edl_per_track)",
+          "a transition needs more source media than available; its source in was clamped to 0"
+        ]
+      }
+    },
+    {
+      "name": "edl: structure parses and matches built timeline",
+      "ok": true,
+      "required": true,
+      "detail": []
+    },
+    {
+      "name": "export interchange xml (file.exportInterchange)",
+      "ok": true,
+      "required": true,
+      "detail": {
+        "bytes": 30876,
+        "path": "$OUT/interchange/phase0.xml",
+        "report": [
+          "graphic clip \"Hello Title\" at frame 0 has no Final Cut Pro 7 XML equivalent: it is written as a clip item without media and is not read back on import",
+          "clip gain was folded into Audio Levels"
+        ]
+      }
+    },
+    {
+      "name": "xml: structure parses and matches built timeline",
+      "ok": true,
+      "required": true,
+      "detail": []
+    },
+    {
+      "name": "export interchange fcpxml (file.exportInterchange)",
+      "ok": true,
+      "required": true,
+      "detail": {
+        "bytes": 4851,
+        "path": "$OUT/interchange/phase0.fcpxml",
+        "report": [
+          "FCPXML export keeps transitions on V1 only; transitions on other tracks were dropped",
+          "graphic clip \"Hello Title\" at frame 0 is not supported in FCPXML: it is written as a clip without media and is not read back on import",
+          "effect \"Text\" written as an FCPXML filter reference (FilmCraft-specific)"
+        ]
+      }
+    },
+    {
+      "name": "fcpxml: structure parses and matches built timeline",
+      "ok": false,
+      "required": false,
+      "detail": [
+        "transition count mismatch"
+      ]
+    },
+    {
+      "name": "export interchange otio (file.exportInterchange)",
+      "ok": true,
+      "required": true,
+      "detail": {
+        "bytes": 45266,
+        "path": "$OUT/interchange/phase0.otio",
+        "report": [
+          "graphic clip \"Hello Title\" at frame 0 has no OTIO equivalent: it is written as a clip with a missing media reference and is read back as offline media"
+        ]
+      }
+    },
+    {
+      "name": "otio: structure parses and matches built timeline",
+      "ok": true,
+      "required": true,
+      "detail": []
+    },
+    {
+      "name": "export interchange aaf (file.exportInterchange)",
+      "ok": true,
+      "required": true,
+      "detail": {
+        "bytes": 61440,
+        "path": "$OUT/interchange/phase0.aaf",
+        "report": [
+          "a clip uses media before the start of its (trimmed) essence",
+          "graphic clip \"Hello Title\" at frame 0 is not exported (left as a gap)"
+        ]
+      }
+    },
+    {
+      "name": "aaf: structure parses and matches built timeline",
+      "ok": true,
+      "required": false,
+      "detail": []
+    },
+    {
+      "name": "export interchange omf (file.exportInterchange)",
+      "ok": true,
+      "required": true,
+      "detail": {
+        "bytes": 9231,
+        "path": "$OUT/interchange/phase0.omf",
+        "report": [
+          "sequence markers are not written to OMF"
+        ]
+      }
+    },
+    {
+      "name": "omf: structure parses and matches built timeline",
+      "ok": true,
+      "required": false,
+      "detail": []
+    },
+    {
+      "name": "xmllint well-formed: xml",
+      "ok": true,
+      "required": true,
+      "detail": ""
+    },
+    {
+      "name": "xmllint well-formed: fcpxml",
+      "ok": true,
+      "required": true,
+      "detail": ""
+    },
+    {
+      "name": "fractional frame rates are stored as exact rationals (24000/1001, 30000/1001, 60000/1001)",
+      "ok": true,
+      "required": false,
+      "detail": {
+        "23.976": {
+          "requested": 23.976023976023978,
+          "stored": {
+            "den": 1001,
+            "num": 24000
+          },
+          "drop_frame": false
+        },
+        "29.97": {
+          "requested": 29.97002997002997,
+          "stored": {
+            "den": 1001,
+            "num": 30000
+          },
+          "drop_frame": false
+        },
+        "59.94": {
+          "requested": 59.94005994005994,
+          "stored": {
+            "den": 1001,
+            "num": 60000
+          },
+          "drop_frame": false
+        },
+        "25": {
+          "requested": 25,
+          "stored": {
+            "den": 1,
+            "num": 25
+          },
+          "drop_frame": false
+        },
+        "30": {
+          "requested": 30,
+          "stored": {
+            "den": 1,
+            "num": 30
+          },
+          "drop_frame": false
+        }
+      }
+    },
+    {
+      "name": "CLI `--project p.fcproj inspect sequence` agrees with MCP",
+      "ok": true,
+      "required": false,
+      "detail": ""
+    }
+  ],
+  "warnings": [
+    "fcpxml: structure parses and matches built timeline"
+  ],
+  "summary": {
+    "checks": 59,
+    "passed": 58,
+    "required_failed": 0,
+    "warnings": 1,
+    "wall_seconds": 15.7
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "streams": [
+    {"index": 0, "codec_name": "hevc", "codec_type": "video", "width": 3840, "height": 2160, "pix_fmt": "yuv420p10le",
+     "r_frame_rate": "60000/1001", "avg_frame_rate": "60000/1001", "duration": "8.0",
+     "color_space": "bt2020nc", "color_transfer": "arib-std-b67", "color_primaries": "bt2020"},
+    {"index": 1, "codec_name": "aac", "codec_type": "audio", "duration": "8.0"}
+  ],
+  "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2", "duration": "8.0"}
+}

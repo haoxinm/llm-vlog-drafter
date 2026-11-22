@@ -1,0 +1,11 @@
+{
+  "streams": [
+    {"index": 0, "codec_name": "h264", "codec_type": "video", "width": 1920, "height": 1080, "pix_fmt": "yuv420p",
+     "r_frame_rate": "30/1", "avg_frame_rate": "30/1", "duration": "5.000000", "color_transfer": "bt709",
+     "disposition": {"attached_pic": 0}, "tags": {"creation_time": "2026-10-31T16:22:10.000000Z"}},
+    {"index": 1, "codec_name": "aac", "codec_type": "audio", "sample_rate": "48000", "channels": 2, "duration": "5.000000"}
+  ],
+  "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2", "duration": "5.000000", "size": "345391",
+             "tags": {"creation_time": "2026-10-31T16:22:10.000000Z", "com.apple.quicktime.creationdate": "2026-10-31T06:22:10-1000",
+                      "com.apple.quicktime.location.ISO6709": "+21.3069-157.8583+012.300/"}}
+}

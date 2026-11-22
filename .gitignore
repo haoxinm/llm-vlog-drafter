@@ -218,3 +218,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Phase 0 spike: generated fixtures and spike outputs
+tests/fixtures/generated/
+spike/out/
+spike/__pycache__/
+__pycache__/

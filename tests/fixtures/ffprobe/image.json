@@ -1,0 +1,7 @@
+{
+  "streams": [
+    {"index": 0, "codec_name": "mjpeg", "codec_type": "video", "width": 4032, "height": 3024, "pix_fmt": "yuvj420p",
+     "r_frame_rate": "25/1", "avg_frame_rate": "0/0"}
+  ],
+  "format": {"format_name": "image2", "size": "2500000"}
+}
