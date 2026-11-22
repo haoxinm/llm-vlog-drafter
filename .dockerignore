@@ -1,0 +1,24 @@
+.git
+.github
+.venv
+venv
+**/__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+*.egg-info
+build
+dist
+# local workspaces and secrets never belong in the build context
+.env
+.env.*
+*.env
+out
+spike/out
+tests
+docs
+examples
+Dockerfile
+docker-compose*.yml
+.dockerignore
