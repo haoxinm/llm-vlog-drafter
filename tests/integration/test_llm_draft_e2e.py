@@ -72,7 +72,8 @@ def test_llm_draft_stops_at_the_outline_then_resumes(media_dir, workspace, fakes
     assert code == 0 and all(n in out for n in ("audio", "analyze", "outline_approval", "plan", "approval", "assemble", "handoff"))
     code, out, _ = run(capsys, "approve", "--output", workspace)
     assert code == 0 and "approved story outline" in out
-    code, out, _ = run(capsys, "resume", "--output", workspace)               # FilmCraft is not installed: the plan is made, assemble fails
+    # --filmcraft is one-shot (not kept in project.yaml), so pass it again or resume would fall back to $FILMCRAFT_CLI
+    code, out, _ = run(capsys, "resume", "--output", workspace, "--filmcraft", "definitely-not-installed")  # the plan is made, assemble fails
     man = rj(workspace / "manifest.json")
     assert man["stages"]["plan"]["status"] == "succeeded" and len(text.plan_calls) == 1 and len(text.outline_calls) == 1
     assert man["approval"]["mode"] == "derived_from_outline" and man["stages"]["assemble"]["status"] == "failed" and code == 1
