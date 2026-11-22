@@ -13,7 +13,6 @@ from trip_vlog.handoff.media_manifest import COLUMNS, manifest_rows, missing_use
 from trip_vlog.handoff.report import HandoffReportInputs, read_resolve_verification, render_handoff_report
 from trip_vlog.planning.resolve_plan import PlanSettings, resolve_selection_plan
 from trip_vlog.qc import checks as C
-from trip_vlog.qc.preview import sample_times
 
 CAT = make_catalog()
 
@@ -64,12 +63,6 @@ def test_project_reopens_and_overall():
     assert C.check_project_reopens(False, [], "boom").status == C.FAIL
     assert C.overall_status([C.CheckResult("a", C.PASS), C.CheckResult("b", C.WARN)]) == C.WARN
     assert C.overall_status([C.CheckResult("a", C.FAIL), C.CheckResult("b", C.WARN)]) == C.FAIL
-
-
-def test_sample_times_around_cuts_and_capped():
-    pts = sample_times([5.0, 9.0], 12.0, 48)
-    assert [round(t, 2) for t, _ in pts] == [0.0, 4.85, 5.15, 8.85, 9.15, 11.95]
-    assert len(sample_times([float(i) for i in range(1, 100)], 100.0, 20)) == 20
 
 
 def test_media_manifest_csv(tmp_path):
@@ -135,19 +128,58 @@ def test_report_claims_verification_only_when_passing(tmp_path):
     assert "UNVERIFIED" in render_handoff_report(_inputs(tmp_path, ex, ("not_passing", "status 'fail'")))
 
 
-def test_timeline_sheet_survives_corrupt_frame(tmp_path, monkeypatch):
+def test_compatibility_failure_removes_stale_files_and_reports_none(tmp_path):
+    from trip_vlog import draft_stages as D
+
+    (tmp_path / D.COMPAT_JSON).write_text("{}", encoding="utf-8")
+    (tmp_path / D.COMPAT_MD).write_text("old", encoding="utf-8")
+
+    def boom():
+        raise AttributeError("'str' object has no attribute 'get'")
+
+    summary, note = D._publish_compatibility(tmp_path, boom)
+    assert summary is None and "AttributeError" in note
+    assert not (tmp_path / D.COMPAT_JSON).exists() and not (tmp_path / D.COMPAT_MD).exists()
+
+
+def test_compatibility_render_failure_does_not_leave_a_fresh_json(tmp_path, monkeypatch):
+    from trip_vlog import draft_stages as D
+
+    monkeypatch.setattr(D, "render_compatibility_markdown", lambda c: (_ for _ in ()).throw(KeyError("x")))
+    summary, note = D._publish_compatibility(tmp_path, lambda: {"a": 1})
+    assert summary is None and "KeyError" in note and not list(tmp_path.iterdir())
+
+
+def test_compatibility_success_writes_both(tmp_path, monkeypatch):
+    from trip_vlog import draft_stages as D
+
+    monkeypatch.setattr(D, "render_compatibility_markdown", lambda c: "md")
+    monkeypatch.setattr(D, "summary_of", lambda c: {"ok": True})
+    summary, note = D._publish_compatibility(tmp_path, lambda: {"a": 1})
+    assert summary == {"ok": True} and note is None
+    assert (tmp_path / D.COMPAT_JSON).is_file() and (tmp_path / D.COMPAT_MD).read_text(encoding="utf-8") == "md"
+
+
+def test_preview_sheets_survive_corrupt_frame(tmp_path, monkeypatch):
+    from fractions import Fraction
+
     from PIL import Image
 
     from trip_vlog.qc import preview as P
 
+    calls = []
+
     def fake_grab(ffmpeg, video, t, out, width, timeout=60.0):
-        if t < 1:
+        calls.append(t)
+        if len(calls) == 1:
             out.write_bytes(b"not a jpeg")
         else:
             Image.new("RGB", (width, 90), (10, 20, 30)).save(out, "JPEG")
         return None
 
     monkeypatch.setattr(P, "grab_frame", fake_grab)
-    res = P.make_timeline_sheet(Path("ffmpeg"), tmp_path / "p.mp4", tmp_path / "sheet.jpg", [5.0], 12.0)
-    assert res.path is not None and res.path.is_file() and res.frames > 0
+    fps = Fraction(30)
+    plan = P.plan_tiles([P.CutClip("clip_001", "scene_01", 0, 150), P.CutClip("clip_002", "scene_01", 150, 300)], fps, 300)
+    res = P.build_preview_sheets(Path("ffmpeg"), tmp_path / "p.mp4", tmp_path / "sheet.jpg", plan, fps, duration_frames=300)
+    assert res.written and res.written[0].is_file() and res.frames > 0
     assert any("unreadable frame" in f for f in res.failed)
