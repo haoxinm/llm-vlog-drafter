@@ -44,6 +44,11 @@ class QcInputs:
     outline_scene_ids: list[str] | None = None   # the approved outline's scenes in order, when this plan was made from one
     index_path: Path | None = None               # qc/preview_sheet.json
     workspace_root: Path | None = None           # index paths are stored relative to this
+    spec: Any = None                             # the effective TimelineSpec (framing check)
+    duck: Any = None                             # qc.ducking.DuckPlan, when ducking is on
+    music_bed: Path | None = None                # WAV of the music tracks alone, rendered by FilmCraft (ducking check)
+    music_bed_error: str | None = None
+    music_sources: Mapping[str, str] = field(default_factory=dict)   # music clip_instance_id -> source file
     extra_results: list[C.CheckResult] = field(default_factory=list)   # advisory findings added by another reviewer (the LLM critic keeps its own report instead)
 
 
@@ -103,7 +108,19 @@ def run_qc(i: QcInputs) -> dict[str, Any]:
     results.append(C.check_speech_truncation(plan, i.transcripts, q.speech_cut_tolerance_seconds))
     results.append(C.check_audio_discontinuity(plan, clip_audio, q.audio_jump_db, q.audio_active_ratio_min, cfg.filmcraft.ambient_low_gain_db))
     results.append(C.check_music_vs_speech(plan, clip_audio, i.transcripts, ambient_gain_db=cfg.filmcraft.ambient_low_gain_db,
-                                           active_ratio_min=q.audio_active_ratio_min, max_gain_db=q.music_max_gain_db))
+                                           active_ratio_min=q.audio_active_ratio_min, max_gain_db=q.music_max_gain_db,
+                                           duck_windows=[(w.start_frame, w.end_frame) for w in (i.duck.windows if i.duck and i.duck.keys else [])],
+                                           duck_db=cfg.filmcraft.duck_db if (i.duck and i.duck.keys) else 0.0))
+    if cfg.filmcraft.fit_mixed_aspect and i.spec is not None:
+        from trip_vlog.qc.framing import check_framing
+
+        results.append(check_framing(i.spec, i.sequence, i.preview, i.ffmpeg, preview_scale=cfg.filmcraft.preview_scale))
+    if cfg.filmcraft.duck_music and i.duck is not None:
+        from trip_vlog.qc.ducking import check_music_ducking
+
+        gains = {c.clip_instance_id: (cfg.filmcraft.ambient_low_gain_db if c.audio_policy == "ambient_low" else 0.0)
+                 for s_ in plan.scenes for c in s_.clips if c.track_role == "music"}
+        results.append(check_music_ducking(plan, i.duck, i.music_bed, i.music_sources, i.ffmpeg, music_gain_db=gains, bed_error=i.music_bed_error))
     results.append(C.check_scene_order(plan, i.outline_scene_ids))
     results.extend(i.extra_results)
 

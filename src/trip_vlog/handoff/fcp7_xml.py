@@ -41,6 +41,8 @@ class XmlClip:
     gain_db: float | None = None
     has_speed: bool = False
     enabled: bool = True
+    scale: float | None = None    # Basic Motion scale (percent) of a video item; None when the item has no such filter
+    gain_keys: tuple[tuple[int, float], ...] = ()   # Audio Levels keyframes: (frame in the item's SOURCE time, dB)
     start_derived: bool = False   # the file says -1 and ``start`` is the cut of the transition in front of the item
     end_derived: bool = False     # likewise for ``end`` and the transition behind it
 
@@ -166,6 +168,37 @@ def _effect_params(filter_elem: ET.Element) -> dict[str, str]:
     return out
 
 
+def _level_keys(filter_elem: ET.Element) -> tuple[tuple[int, float], ...]:
+    out: list[tuple[int, float]] = []
+    for p in filter_elem.findall("effect/parameter"):
+        if (p.findtext("parameterid") or "").strip() != "level":
+            continue
+        for k in p.findall("keyframe"):
+            try:
+                lin = float((k.findtext("value") or "").strip())
+                out.append((int(float((k.findtext("when") or "").strip())), 20 * math.log10(lin) if lin > 0 else float("-inf")))
+            except ValueError:
+                continue
+    return tuple(out)
+
+
+def _extras(item: ET.Element) -> tuple[float | None, tuple[tuple[int, float], ...]]:
+    """(Basic Motion scale, Audio Levels keyframes) of an item."""
+    scale: float | None = None
+    keys: tuple[tuple[int, float], ...] = ()
+    for f in item.findall("filter"):
+        name = (f.findtext("effect/name") or "").strip()
+        eid = (f.findtext("effect/effectid") or "").strip().lower()
+        if name == "Basic Motion" or eid == "basic":
+            try:
+                scale = float(_effect_params(f).get("scale", ""))
+            except ValueError:
+                pass
+        elif name == "Audio Levels" or eid == "audiolevels":
+            keys = _level_keys(f)
+    return scale, keys
+
+
 def _filters(item: ET.Element) -> tuple[str | None, float | None, bool]:
     """(title text, constant gain in dB, has speed/time-remap) from the item's <filter> elements."""
     text: str | None = None
@@ -258,12 +291,13 @@ def parse_fcp7_xml(source: Path | str) -> Fcp7Timeline:
                     if path is None and fe is not None and fe.get("id"):
                         path = paths.get(fe.get("id", ""))
                     text, gain, speed = _filters(item)
+                    scale, gkeys = _extras(item)
                     generator = item.tag == "generatoritem" or (kind == "video" and path is None)
                     order.append(("clip", len(tl.clips)))
                     tl.clips.append(XmlClip(
                         kind=kind, track=ti, index=n, item_id=item.get("id"), name=(item.findtext("name") or "").strip(),
                         start=_frame(item, "start"), end=_frame(item, "end"), source_in=_int(item, "in"), source_out=_int(item, "out"),
-                        rate=frate, path=path, is_generator=generator, text=text, gain_db=gain, has_speed=speed,
+                        rate=frate, path=path, is_generator=generator, text=text, gain_db=gain, has_speed=speed, scale=scale, gain_keys=gkeys,
                         enabled=(item.findtext("enabled") or "TRUE").strip().upper() != "FALSE"))
                 elif item.tag == "transitionitem":
                     order.append(("transition", len(tl.transitions)))

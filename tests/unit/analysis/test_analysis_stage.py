@@ -274,12 +274,6 @@ def test_local_endpoint_reported_and_images_required(tmp_path):
         st.analyze_stage(ctx)
 
 
-def test_fine_sampling_is_reported_as_unsupported(tmp_path):
-    ctx, tr, _ = setup(tmp_path, fine_sampling_enabled=True, fine_sampling_fps=4.0)
-    res = st.analyze_stage(ctx)
-    assert res.status == Status.PARTIAL and "fine_sampling" in res.summary["warnings"][0]
-
-
 def test_stale_llm_moments_are_dropped_when_segments_change(tmp_path):
     ctx, tr, segs = setup(tmp_path, photos=0)
     st.analyze_stage(ctx)

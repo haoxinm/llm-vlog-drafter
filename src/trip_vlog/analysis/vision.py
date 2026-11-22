@@ -147,6 +147,8 @@ class Item:
     sheet_mode: bool = False        # send the contact sheet instead of the individual frames
     transcript: str = ""            # verbatim speech overlapping this segment (video), "" if none
     tx_rows: list[dict[str, Any]] = field(default_factory=list)   # transcript records of the asset (for transcript_refs)
+    refinement: dict[str, Any] | None = None   # fine sampling record (analysis/refine.py) applied to this segment's moment
+    refine_key: str | None = None              # cache key of that record for the moment's current labeled range
 
     @property
     def sid(self) -> str:

@@ -204,6 +204,29 @@ class Engine:
             c["gainDb"] = p["db"]
         return {"clips": len(p["clips"]), "gainDb": [{"clip": c, "gainDb": p["db"]} for c in p["clips"]], "mode": "set"}
 
+    def c_clip_fitToFrame(self, p):
+        s = self.seq
+        out_ = []
+        for cid in p["clips"]:
+            t, c = self.find_clip(cid)
+            it = self.items[c["item"]]
+            w, h = it.get("size", [s["width"], s["height"]])
+            c["scale"] = min(s["width"] / w, s["height"] / h) * 100.0
+            out_.append({"clip": cid, "scale": c["scale"]})
+        return {"clips": out_}
+
+    def c_effects_setParam(self, p):
+        t, c = self.find_clip(p["clip"])
+        if p["effect"] != "volume" or p["param"] != "level":
+            raise Fail("fake supports only volume.level keyframes")
+        if p.get("keyframe"):
+            c.setdefault("vkeys", {})[str(p["time"])] = p["value"]
+        return {"keyframes": len(c.get("vkeys", {})), "param": "level", "value": p["value"]}
+
+    def c_mixer_setStrip(self, p):
+        self.track(p["strip"])["muted"] = bool(p["muted"])
+        return {"muted": bool(p["muted"])}
+
     def c_sequence_applyVideoTransition(self, p):
         t, c = self.find_clip(p["clip"])
         prev = [x for x in t["clips"] if x["endFrame"] == c["startFrame"]]
@@ -296,7 +319,16 @@ class Engine:
                 "settings": {"width": s["width"], "height": s["height"], "frame_rate": {"num": s["fps"][0], "den": s["fps"][1]}}}
         end = 0
         for t in s["tracks"]:
-            items = [{k: v for k, v in c.items() if k != "kind"} for c in t["clips"]]
+            items = []
+            for c in t["clips"]:
+                it_ = {k: v for k, v in c.items() if k not in ("kind", "scale", "vkeys")}
+                if c["kind"] == "video":
+                    it_["effects"] = [{"effect": "motion", "enabled": True, "masks": 0,
+                                       "params": {"scale": {"keyframes": 0, "value": "Float(%r)" % c.get("scale", 100.0)}}}]
+                else:
+                    it_["effects"] = [{"effect": "volume", "enabled": True, "masks": 0,
+                                       "params": {"level": {"keyframes": len(c.get("vkeys", {})), "value": "Float(0.0)"}}}]
+                items.append(it_)
             end = max([end] + [c["endFrame"] for c in t["clips"]])
             out_[t["kind"]].append({"id": t["id"], "name": t["name"], "items": items, "transitions": t["transitions"]})
         out_["durationFrames"] = end
@@ -323,6 +355,10 @@ class Engine:
             i = self.nid()
             self.items[i] = {"item": i, "name": name, "type": typ, "duration": int(Fraction(str(secs)) * TPS), "path": pth,
                              "silent": name in silent}
+            sizes = json.loads(os.environ.get("FAKE_FC_SIZES", "{}"))
+            size = sizes.get(name) or ([1080, 1920] if name.startswith("portrait") else None)
+            if size:
+                self.items[i]["size"] = size
             ids.append(i)
         return {"errors": errors, "items": ids}
 

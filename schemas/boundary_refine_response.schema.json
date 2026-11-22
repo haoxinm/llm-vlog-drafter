@@ -1,0 +1,47 @@
+{
+  "$id": "https://trip-vlog.local/schemas/boundary_refine_response:1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Refined cut points of video moments as frame indices into the windows shown. No timestamps.",
+  "properties": {
+    "moments": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "end_frame_index": {
+            "description": "Index within the END window of the last frame to keep; null = keep the current end.",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "moment_id": {
+            "description": "Copied exactly from the moment header.",
+            "type": "string"
+          },
+          "start_frame_index": {
+            "description": "Index within the START window of the first frame to keep; null = keep the current start.",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "moment_id",
+          "start_frame_index",
+          "end_frame_index"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "moments"
+  ],
+  "title": "boundary_refine_response",
+  "type": "object"
+}

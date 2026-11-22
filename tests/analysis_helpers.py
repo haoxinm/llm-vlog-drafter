@@ -59,6 +59,26 @@ class Call:
     retry: bool
 
 
+MID_RE = re.compile(r"=== Moment (moment_[0-9a-f]{16}) ===")
+FINE_RE = re.compile(r"Moment (moment_[0-9a-f]{16}) \| (start|end) frame (\d+) \| t=([0-9.]+)s")
+
+
+def refine_reply(entries: list[dict[str, Any]], *, stop="end_turn") -> HttpResponse:
+    body = {"id": "msg_2", "type": "message", "model": "test-model-resolved", "stop_reason": stop,
+            "content": [{"type": "text", "text": json.dumps({"moments": entries})}],
+            "usage": {"input_tokens": 60, "output_tokens": 20}}
+    return HttpResponse(200, {"request-id": "req_r"}, json.dumps(body).encode("utf-8"))
+
+
+@dataclass
+class RefineCall:
+    mids: list[str]
+    frames: dict[str, dict[str, list[tuple[int, float]]]]    # moment -> side -> [(index, t)]
+    images: int
+    texts: list[str]
+    body: dict[str, Any]
+
+
 @dataclass
 class LabelingTransport:
     """Answers every labeling request. `respond(call, default_entries)` may return entries (list) or an HttpResponse."""
@@ -66,11 +86,27 @@ class LabelingTransport:
     respond: Callable[[Call, list[dict[str, Any]]], Any] | None = None
     best: Callable[[str, int], dict | None] | None = None
     calls: list[Call] = field(default_factory=list)
+    refine: Callable[[RefineCall, list[dict[str, Any]]], Any] | None = None     # fine sampling requests (boundary refinement)
+    refine_calls: list[RefineCall] = field(default_factory=list)
+
+    def _send_refine(self, body, blocks, texts) -> HttpResponse:
+        mids = [m for t in texts for m in MID_RE.findall(t)]
+        frames: dict[str, dict[str, list[tuple[int, float]]]] = {}
+        for t in texts:
+            for mid, side, idx, ts in FINE_RE.findall(t):
+                frames.setdefault(mid, {}).setdefault(side, []).append((int(idx), float(ts)))
+        call = RefineCall(mids, frames, sum(1 for b in blocks if b["type"] == "image"), texts, body)
+        self.refine_calls.append(call)
+        default = [{"moment_id": m, "start_frame_index": None, "end_frame_index": None} for m in mids]
+        out = self.refine(call, default) if self.refine else default
+        return out if isinstance(out, HttpResponse) else refine_reply(out)
 
     def send(self, request) -> HttpResponse:
         body = json.loads(request.body.decode("utf-8"))
         blocks = body["messages"][0]["content"]
         texts = [b["text"] for b in blocks if b["type"] == "text"]
+        if "Refine the cut points" in texts[0]:
+            return self._send_refine(body, blocks, texts)
         sids = [m for t in texts for m in SID_RE.findall(t)]
         frames: dict[str, list[int]] = {}
         for t in texts:

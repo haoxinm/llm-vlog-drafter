@@ -29,6 +29,7 @@ class AssetInfo:
     present: bool = True
     probe_ok: bool = True
     analysis_status: str = "complete"
+    rotation_degrees: int = 0          # clockwise; for stills FilmCraft ignores it (it shows the stored pixels)
 
     @property
     def has_audio(self) -> bool:
@@ -83,6 +84,7 @@ class PlanningCatalog:
                 asset_id=r["asset_id"], relative_path=r["relative_path"], media_type=r["media_type"] or "unknown",
                 duration_seconds=r["duration_seconds"], fps=Fraction(num, den) if num and den else None,
                 width=r["width"], height=r["height"], display_width=r["display_width"], display_height=r["display_height"],
+                rotation_degrees=int(r["rotation_degrees"] or 0),
                 audio_streams=int(r["audio_streams"] or 0), content_version=r["content_version"],
                 capture_time=r["capture_time"], present=bool(r["present"]), probe_ok=r["probe_status"] == "ok",
                 analysis_status=r["analysis_status"]))
