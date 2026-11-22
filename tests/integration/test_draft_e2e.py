@@ -24,6 +24,7 @@ from trip_vlog.planning.models import json_schema
 CLI = os.environ.get("FILMCRAFT_CLI")
 needs_fc = pytest.mark.skipif(not CLI or not Path(CLI).is_file(), reason="$FILMCRAFT_CLI not set or not a file")
 pytestmark = pytest.mark.integration
+ONE_SHOT = {"workflow.approval": "auto_approve", "filmcraft.executable": CLI}  # CLI flags that project.yaml does not keep
 DURATION = 12  # fixture media: 5 s landscape + 4 s portrait + one still (3 s) = exactly 12 s
 
 
@@ -59,7 +60,7 @@ def drafted(tmp_path_factory, media):
         pytest.skip("$FILMCRAFT_CLI not set or not a file")
     before = hash_tree(media)
     ws = tmp_path_factory.mktemp("e2e_ws") / "ws"
-    res = draft(media, ws, **{"workflow.approval": "auto_approve", "filmcraft.executable": CLI})
+    res = draft(media, ws, **ONE_SHOT)
     return {"ws": ws, "res": res, "before": before}
 
 
@@ -126,7 +127,9 @@ def test_approval_is_bound_to_plan_hash(tmp_path, media, ffmpeg_tools):
 def test_full_draft_outputs(drafted, media):
     ws, res = drafted["ws"], drafted["res"]
     assert res.exit_code == 0, res.stage_status
-    assert res.stage_status == {s: "succeeded" for s in ("scan", "probe", "catalog", "thumbnails", "segment", "plan", "approval", "assemble", "preview", "qc", "handoff")}
+    expected = {s: "succeeded" for s in ("scan", "probe", "catalog", "thumbnails", "segment", "plan", "approval", "assemble", "preview", "qc", "handoff")}
+    expected["probe"] = "partial"  # corrupt.mp4 cannot be probed
+    assert res.stage_status == expected
     m = rj(ws / "manifest.json")
     assert m["approval"]["mode"] == "automatic" and m["planner"] == "baseline"
     assert m["filmcraft"]["version"] and (ws / m["filmcraft"]["capability_snapshot"]).is_file()
@@ -166,7 +169,7 @@ def test_rerun_on_unchanged_inputs_is_a_noop_for_assemble(drafted, media):
     ws = drafted["ws"]
     jbefore = (ws / "filmcraft" / "execution_journal.json").read_bytes()
     projects = sorted(p.name for p in (ws / "filmcraft").glob("*.fcproj"))
-    res = draft(media, ws)
+    res = draft(media, ws, **ONE_SHOT)  # one-shot flags are not persisted, so a rerun passes them again
     assert res.exit_code == 0
     m = rj(ws / "manifest.json")["stages"]
     assert all(m[s]["decision"] == "cache_hit" for s in ("segment", "plan", "assemble", "preview", "qc", "handoff"))
@@ -179,7 +182,7 @@ def test_rerun_on_unchanged_inputs_is_a_noop_for_assemble(drafted, media):
 def test_changed_duration_replans_and_versions_without_reprobing(drafted, media, tmp_path):
     ws = tmp_path / "ws"
     shutil.copytree(drafted["ws"], ws)
-    res = draft(media, ws, **{"project.target_duration_seconds": 8})
+    res = draft(media, ws, **ONE_SHOT, **{"project.target_duration_seconds": 8})
     assert res.exit_code == 0, res.stage_status
     m = rj(ws / "manifest.json")["stages"]
     assert m["probe"]["summary"]["probed"] == 1 and m["segment"]["decision"] == "cache_hit"  # probe retries only the corrupt file
