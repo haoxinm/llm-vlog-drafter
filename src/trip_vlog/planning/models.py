@@ -10,11 +10,13 @@ from __future__ import annotations
 import json
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from trip_vlog.state import stable_hash
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"           # 1.1 adds `titles`; 1.0 plans still load (they have none) and keep their hashes
+SUPPORTED_SCHEMA_VERSIONS = ("1.0", "1.1")
+SchemaVersion = Literal["1.0", "1.1"]
 SCHEMA_ID_PREFIX = "urn:trip-vlog:schema:"
 
 ID_PATTERN = r"^[A-Za-z0-9_.-]{1,80}$"
@@ -30,6 +32,13 @@ TransitionType = Literal["cut", "dissolve"]
 TransitionAlignment = Literal["center", "start_at_cut", "end_at_cut"]
 MediaKind = Literal["video", "image", "audio"]
 MusicPolicy = Literal["none", "user_supplied_only"]
+TitleRole = Literal["opening_title", "scene_title", "closing"]
+TitleTextSource = Literal["project_title", "outline_scene_title", "user_config", "folder_name", "user"]
+TitleRelativeTo = Literal["scene_start", "clip_start", "sequence_end"]
+TITLE_MAX_CHARS = 60
+TITLE_MAX_LINES = 1   # FilmCraft names a text clip after its first line only, so a two-line title fails the read-back check
+TITLE_MIN_SECONDS = 1.0
+TITLE_MAX_SECONDS = 10.0
 
 
 
@@ -56,6 +65,27 @@ class SelectionClip(_Model):
     intentional_repeat_reason: str | None = Field(None, max_length=2000)
 
 
+class TitleStart(_Model):
+    """Where a title starts, relative to the plan (code turns it into a frame): `scene_start` / `clip_start` + offset, or
+    `sequence_end` (the title ends `offset` seconds before the end of the sequence)."""
+    relative_to: TitleRelativeTo
+    clip_instance_id: str | None = Field(None, pattern=ID_PATTERN)   # required for clip_start, must be null for scene_start
+    offset_seconds: float = Field(0.0, ge=0, le=3600)
+
+
+class SelectionTitle(_Model):
+    title_id: str = Field(pattern=ID_PATTERN)
+    text: str = Field(min_length=1, max_length=TITLE_MAX_CHARS)
+    role: TitleRole
+    scene_id: str = Field(pattern=ID_PATTERN)
+    text_source: TitleTextSource
+    start: TitleStart
+    duration_seconds: float = Field(gt=0, le=60)
+    track: Literal["V2"] = "V2"
+    style: Literal["simple"] = "simple"
+    rationale: str = Field("", max_length=500)
+
+
 class SelectionScene(_Model):
     scene_id: str = Field(pattern=ID_PATTERN)
     title: str = Field(max_length=200)
@@ -65,10 +95,17 @@ class SelectionScene(_Model):
 
 
 class SelectionPlan(_Model):
-    schema_version: Literal["1.0"]
+    schema_version: SchemaVersion
     planner: str = Field(pattern=r"^[A-Za-z0-9_.-]{1,40}$")
     scenes: list[SelectionScene] = Field(min_length=1, max_length=200)
+    titles: list[SelectionTitle] = Field(default_factory=list, max_length=50)
     uncertainties: list[str] = Field(max_length=100)
+
+    @model_validator(mode="after")
+    def _titles_need_1_1(self) -> "SelectionPlan":
+        if self.titles and self.schema_version == "1.0":
+            raise ValueError("titles need schema_version 1.1")
+        return self
 
 
 # ---- edit plan (resolver output) --------------------------------------------------------------
@@ -134,6 +171,23 @@ class EditScene(_Model):
     clips: list[EditClip] = Field(min_length=1, max_length=500)
 
 
+class EditTitle(_Model):
+    """A resolved title: simple, editable text on V2. `start` keeps the intent; the frames are what gets placed."""
+    title_id: str = Field(pattern=ID_PATTERN)
+    text: str = Field(min_length=1, max_length=TITLE_MAX_CHARS)
+    role: TitleRole
+    scene_id: str = Field(pattern=ID_PATTERN)
+    text_source: TitleTextSource
+    start: TitleStart
+    start_frame: int = Field(ge=0)
+    duration_frames: int = Field(ge=1)
+    duration_seconds: float = Field(gt=0, le=60)
+    track: Literal["V2"] = "V2"
+    style: Literal["simple"] = "simple"
+    resolver_notes: list[str] = Field(default_factory=list, max_length=20)
+    rationale: str = Field("", max_length=500)
+
+
 class AudioSettings(_Model):
     music_policy: MusicPolicy
     preserve_natural_audio: bool
@@ -141,17 +195,24 @@ class AudioSettings(_Model):
 
 
 class EditPlan(_Model):
-    schema_version: Literal["1.0"]
+    schema_version: SchemaVersion
     plan_hash: str = Field(pattern=HASH_PATTERN)             # sha256 of the canonical plan without this field
     selection_plan_hash: str = Field(pattern=HASH_PATTERN)   # the selection plan this was resolved from
     project: ProjectSettings
     sequence: SequenceSettings
     scenes: list[EditScene] = Field(min_length=1, max_length=200)
     markers: list[SceneMarker]
+    titles: list[EditTitle] = Field(default_factory=list, max_length=50)
     audio: AudioSettings
     total_duration_frames: int = Field(ge=1)
     total_duration_seconds: float = Field(gt=0)
     uncertainties: list[str] = Field(max_length=200)
+
+    @model_validator(mode="after")
+    def _titles_need_1_1(self) -> "EditPlan":
+        if self.titles and self.schema_version == "1.0":
+            raise ValueError("titles need schema_version 1.1")
+        return self
 
 
 # ---- helpers ----------------------------------------------------------------------------------
@@ -160,13 +221,21 @@ def to_json_dict(plan: BaseModel) -> dict[str, Any]:
     return plan.model_dump(mode="json")
 
 
+def _hash_dict(plan: BaseModel) -> dict[str, Any]:
+    """Canonical content for hashing. A 1.0 plan has no `titles` field, so it is left out and its hash is what it always was."""
+    d = to_json_dict(plan)
+    if d.get("schema_version") == "1.0":
+        d.pop("titles", None)
+    return d
+
+
 def selection_plan_hash(plan: SelectionPlan) -> str:
-    return stable_hash(to_json_dict(plan))
+    return stable_hash(_hash_dict(plan))
 
 
 def edit_plan_hash(plan: EditPlan) -> str:
     """sha256 over the canonical JSON of the plan with `plan_hash` excluded."""
-    d = to_json_dict(plan)
+    d = _hash_dict(plan)
     d.pop("plan_hash", None)
     return stable_hash(d)
 

@@ -170,6 +170,25 @@ def check_black_frames(intervals: list[dict[str, float]] | None, error: str | No
     return CheckResult("black_frames", PASS, "no black intervals detected")
 
 
+def check_titles(plan: EditPlan, seq: SequenceSnapshot | None) -> CheckResult | None:
+    """Titles of the plan against the V2 clips read back from the reopened project (None when the plan has no titles)."""
+    if not plan.titles:
+        return None
+    if seq is None:
+        return CheckResult("titles", WARN, f"{len(plan.titles)} title(s) in the plan could not be read back (project did not reopen)")
+    v2 = seq.track("V2")
+    clips = list(v2.clips) if v2 else []
+    missing = []
+    for t in plan.titles:
+        hit = next((c for c in clips if c.name == t.text and abs(c.start_frame - t.start_frame) <= 1), None)
+        if hit is None:
+            missing.append(t.title_id)
+    if missing:
+        return CheckResult("titles", FAIL, f"{len(missing)} of {len(plan.titles)} title(s) not found on V2 at the planned frame", {"titles": missing})
+    return CheckResult("titles", PASS, f"{len(plan.titles)} title(s) on V2 read back at the planned frames; interchange files do not carry them "
+                       "(recreate with `trip-vlog resolve-finish` or from the handoff report)")
+
+
 def check_orientation(plan: EditPlan, catalog: PlanningCatalog) -> CheckResult:
     seq_o = "portrait" if plan.sequence.height > plan.sequence.width else "landscape" if plan.sequence.width > plan.sequence.height else "square"
     off = []

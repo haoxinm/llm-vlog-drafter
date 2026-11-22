@@ -127,7 +127,7 @@ class Manifest:
         path = Path(path)
         if path.exists():
             try:
-                text = path.read_text(encoding="utf-8")
+                text = path.read_text(encoding="utf-8-sig")
             except UnicodeDecodeError:
                 text = None  # undecodable content is corruption
             # a transient OSError (e.g. sharing violation) propagates: never quarantine a possibly healthy manifest
@@ -207,6 +207,10 @@ class StageRunner:
 
     def run(self, only: list[str] | None = None, force: bool = False) -> dict[str, Status]:
         results: dict[str, Status] = {}
+        data = getattr(self.ctx, "data", None)
+        if isinstance(data, dict):   # per-run caches of derived catalogs (see selection_stages.build_context): never carried into a new run
+            for k in ("selection_context", "outline_catalog"):
+                data.pop(k, None)
         for stage in self._stages.values():
             if only is not None and stage.name not in only:
                 continue
@@ -233,7 +237,7 @@ class StageRunner:
             if waiting:
                 self._waiting.add(name)
                 self._record(name, status=str(Status.SKIPPED), decision="awaiting_approval", error=None)
-                self.logger.event(name, Status.SKIPPED, message="waiting for plan approval")
+                self.logger.event(name, Status.SKIPPED, message="waiting for approval")
                 return Status.SKIPPED
             self._record(name, status=str(Status.SKIPPED), decision="dependency_failed",
                          error=f"dependency failed: {', '.join(blocked)}")

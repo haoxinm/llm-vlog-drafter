@@ -111,7 +111,7 @@ class FinishInputs:
 
 def _read_json(path: Path, what: str) -> Any:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError) as e:
         raise FinishError(f"cannot read {what} ({path}): {e}") from None
 

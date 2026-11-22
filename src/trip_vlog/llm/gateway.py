@@ -149,6 +149,13 @@ class Gateway:
             self._emit_error(req, fp, e, _ms(t0))
             raise
 
+    def discard(self, fingerprints: Any) -> None:
+        """Drop cached replies (ones that parsed against the schema but proved unusable to the caller)."""
+        if self.cache is not None:
+            for fp in fingerprints:
+                if fp:
+                    self.cache.discard(fp)
+
     # -- internals ------------------------------------------------------
     def _prepare(self, req: LLMRequest) -> tuple[list[TextPart | PreparedImage], str, dict[str, Any]]:
         prepared: list[TextPart | PreparedImage] = []

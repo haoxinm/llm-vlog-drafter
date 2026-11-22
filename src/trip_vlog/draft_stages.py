@@ -11,6 +11,7 @@ Rules this module enforces
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -72,7 +73,8 @@ def _pp(ctx: Any) -> PlanPaths:
 
 
 def load_plan_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+    """Parse a JSON file the user may have edited by hand. ``utf-8-sig``: Notepad and some editors on Windows add a byte order mark."""
+    return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
 def plan_file_hash(path: Path) -> str:
@@ -106,11 +108,28 @@ def approval_record(manifest: Any) -> dict[str, Any] | None:
     return ap if isinstance(ap, dict) else None
 
 
-def approve_current_plan(manifest: Any, plan_hash: str, mode: str) -> dict[str, Any]:
-    ap = {"status": "approved", "mode": mode, "plan_hash": plan_hash, "approved_at": utc_now_iso()}
+def approve_current_plan(manifest: Any, plan_hash: str, mode: str, **extra: Any) -> dict[str, Any]:
+    ap = {"status": "approved", "mode": mode, "plan_hash": plan_hash, "approved_at": utc_now_iso(), **extra}
     manifest.set(approval=ap)
     manifest.save()
     return ap
+
+
+def _derived_approval(ctx: Any, plan_hash: str) -> dict[str, Any] | None:
+    """llm planner: the human checkpoint is the outline (DESIGN §9.5), so a plan the planner made from the approved outline and
+    that nobody has touched since is approved automatically, and recorded as such. Not when `workflow.plan_review` asks for a
+    stop, and never for a plan whose content differs from what the plan stage wrote (a hand edit needs its own approval)."""
+    from trip_vlog.outline_stages import outline_approval_record
+
+    m, cfg = ctx.manifest, ctx.config
+    if cfg.workflow.planner != "llm" or cfg.workflow.plan_review:
+        return None
+    oap, rec = outline_approval_record(m), m.get("plan") or {}
+    if not oap or oap.get("status") != "approved" or rec.get("planner") != "llm":
+        return None
+    if rec.get("outline_hash") != oap.get("outline_hash") or rec.get("plan_hash") != plan_hash:
+        return None
+    return {"outline_hash": oap["outline_hash"], "outline_approval_mode": oap.get("mode")}
 
 
 def approval_stage(ctx: Any) -> StageResult:
@@ -120,6 +139,10 @@ def approval_stage(ctx: Any) -> StageResult:
     if ctx.config.workflow.approval == "auto_approve":
         approve_current_plan(m, cur, "automatic")
         return StageResult(Status.SUCCEEDED, {"mode": "automatic", "plan_hash": cur})
+    derived = _derived_approval(ctx, cur)
+    if derived is not None:
+        approve_current_plan(m, cur, "derived_from_outline", **derived)
+        return StageResult(Status.SUCCEEDED, {"mode": "derived_from_outline", "plan_hash": cur, **derived})
     ap = approval_record(m)
     if ap and ap.get("status") == "approved" and ap.get("plan_hash") == cur:
         return StageResult(Status.SUCCEEDED, {"mode": ap.get("mode"), "plan_hash": cur})
@@ -195,12 +218,72 @@ def _project_sha(ctx: Any) -> str | None:
 
 # ---- stages ----------------------------------------------------------------------------------------------
 
+PLAN_FILES = ("edit_plan", "selection_plan", "summary")     # PlanPaths attributes of what a plan stage writes next to each other
+
+
+def _backup_edited_plan(ctx: Any, path: Path) -> str | None:
+    """The stage is about to replace `plans/edit_plan.json`: keep a copy of one the user edited by hand
+    (`edit_plan.<hash>.bak.json`), the way the outline stage does for the outline. 'Edited' = it differs from the plan the last
+    plan stage recorded."""
+    if not path.is_file():
+        return None
+    prev = (ctx.manifest.stage("plan").get("summary") or {}).get("plan_hash") or (ctx.manifest.get("plan") or {}).get("plan_hash")
+    try:
+        cur = plan_file_hash(path)
+    except (OSError, ValueError):
+        cur = "invalid-" + sha256_file(path)[:48]
+    if cur == prev:
+        return None
+    bak = path.with_name(f"{path.stem}.{cur[:12].replace('-', '')}.bak.json")
+    shutil.copyfile(path, bak)
+    return _rel(ctx, bak)
+
+
+def _set_stale(ctx: Any) -> tuple[list[str], list[str]]:
+    """The plan stage failed: the files of an earlier plan must not look current next to the failure report. Each is renamed
+    `<name>.stale<ext>` (`edit_plan.stale.json`, `plan_summary.stale.md`, `selection_plan.stale.json`), replacing an older stale copy;
+    the next successful plan stage writes the normal names again. The approval record is untouched: it is bound to a hash that no
+    file carries any more, so nothing can be assembled from a stale plan."""
+    pp = _pp(ctx)
+    moved: list[str] = []
+    failed: list[str] = []
+    for attr in PLAN_FILES:
+        f: Path = getattr(pp, attr)
+        if f.is_file():
+            try:
+                f.replace(f.with_name(f"{f.stem}.stale{f.suffix}"))
+                moved.append(_rel(ctx, f))
+            except OSError:      # e.g. a file locked by another program on Windows
+                failed.append(_rel(ctx, f))
+    return moved, failed
+
+
 def plan_stage(ctx: Any) -> StageResult:
-    res = plan_baseline_stage(ctx)
+    planner = ctx.config.workflow.planner
+    backup = _backup_edited_plan(ctx, _pp(ctx).edit_plan)
+    if planner == "llm":
+        from trip_vlog.selection_stages import plan_llm_stage
+
+        res = plan_llm_stage(ctx)
+    else:
+        res = plan_baseline_stage(ctx)
     ctx.data.pop("prepared", None)
-    if res.status != Status.FAILED:
-        ctx.manifest.set(planner=ctx.config.workflow.planner, plan={
-            "path": _rel(ctx, _pp(ctx).edit_plan), "summary": _rel(ctx, _pp(ctx).summary), "plan_hash": res.summary.get("plan_hash")})
+    if backup:
+        res.summary["edited_plan_backup"] = backup
+    if res.status == Status.FAILED and (res.summary.pop("planning_failure", False) or planner != "llm"):
+        # only when the plan itself was refused (validation / selection failure): an endpoint timeout, a 401/429/5xx or a missing
+        # prerequisite says nothing about the earlier plan, which stays where it is
+        stale, failed = _set_stale(ctx)
+        if stale:
+            res.summary["stale_files"] = stale
+        if failed:
+            res.summary["stale_rename_failed"] = failed
+    elif res.status == Status.FAILED:
+        res.summary.pop("planning_failure", None)
+    else:
+        ctx.manifest.set(planner=planner, plan={
+            "path": _rel(ctx, _pp(ctx).edit_plan), "summary": _rel(ctx, _pp(ctx).summary), "plan_hash": res.summary.get("plan_hash"),
+            "planner": planner, "outline_hash": res.summary.get("outline_hash")})
         ctx.manifest.save()
     return res
 
@@ -383,18 +466,21 @@ def handoff_stage(ctx: Any) -> StageResult:
 
 def build_draft_runner(ctx: Any) -> StageRunner:
     from trip_vlog.orchestrator import build_index_runner
+    from trip_vlog.orchestrator import build_outline_runner as _build_outline_runner
 
-    runner = build_index_runner(ctx)
     plan_path_exists = lambda c: _pp(c).edit_plan.is_file()
-    runner.register("segment", segment_assets, deps=("catalog",), inputs=segment_inputs)
-    plan_dep = "segment"
-    if ctx.config.workflow.planner == "llm":  # Phase 4 consumes the labeled moments; the baseline planner never needs an LLM
-        from trip_vlog.analysis.stage import analyze_inputs, analyze_stage
+    if ctx.config.workflow.planner == "llm":
+        # index, segment, audio, transcribe, analyze, outline, outline_approval (the human checkpoint), then the LLM selection.
+        # The baseline planner never needs an LLM and skips all of that.
+        from trip_vlog.selection_stages import selection_inputs
 
-        runner.register("analyze", analyze_stage, deps=("segment",), inputs=analyze_inputs)
-        plan_dep = "analyze"
-    runner.register("plan", plan_stage, deps=(plan_dep,), verify=plan_path_exists,
-                    inputs=lambda c: {**plan_inputs(c), "planner": c.config.workflow.planner})
+        runner = _build_outline_runner(ctx)
+        runner.register("plan", plan_stage, deps=("outline_approval",), verify=plan_path_exists, inputs=selection_inputs)
+    else:
+        runner = build_index_runner(ctx)
+        runner.register("segment", segment_assets, deps=("catalog",), inputs=segment_inputs)
+        runner.register("plan", plan_stage, deps=("segment",), verify=plan_path_exists,
+                        inputs=lambda c: {**plan_inputs(c), "planner": c.config.workflow.planner})
     runner.register("approval", approval_stage, deps=("plan",), always_run=True)
     runner.register("assemble", assemble_stage, deps=("approval",), inputs=_assemble_inputs, verify=_assemble_verify)
     runner.register("preview", preview_stage, deps=("assemble",), inputs=_preview_inputs, verify=lambda c: _preview_path(c).is_file())
