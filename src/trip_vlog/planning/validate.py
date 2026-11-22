@@ -67,6 +67,13 @@ class ValidationSettings:
         base.update(overrides)
         return cls(**base)
 
+    @classmethod
+    def effective(cls, config: Any) -> "ValidationSettings":
+        """The rules the CURRENT plan is checked against: `from_config`, plus what accepted revisions changed about them (the target duration, the
+        must_include references a confirmed revision waived; see `Config.set_revision_overrides`). Planning itself always uses `from_config`."""
+        return cls.from_config(config, target_duration_seconds=float(getattr(config, "effective_target_seconds", config.project.target_duration_seconds)),
+                               must_include=tuple(getattr(config, "effective_must_include", config.editorial.must_include)))
+
     def total_tolerance_seconds(self) -> float:
         return max(self.target_duration_seconds * self.duration_tolerance_pct / 100.0, self.duration_tolerance_seconds)
 

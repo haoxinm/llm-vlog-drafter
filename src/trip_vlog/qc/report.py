@@ -50,6 +50,7 @@ class QcInputs:
 def run_qc(i: QcInputs) -> dict[str, Any]:
     cfg, plan = i.config, i.plan
     q, p = cfg.qc, cfg.project
+    target = float(getattr(cfg, "effective_target_seconds", p.target_duration_seconds))     # a revision may have moved it on purpose
     results: list[C.CheckResult] = []
     results.append(C.check_media_online(i.project, i.source_paths))
     results.append(C.check_project_reopens(i.sequence is not None, i.mismatches, i.reopen_error))
@@ -62,12 +63,12 @@ def run_qc(i: QcInputs) -> dict[str, Any]:
     results.append(C.check_stills(plan, q.min_still_seconds))
     seq = i.sequence
     if seq is not None:
-        results.append(C.check_total_duration(seq, float(p.target_duration_seconds), p.duration_tolerance_pct, p.duration_tolerance_seconds))
+        results.append(C.check_total_duration(seq, target, p.duration_tolerance_pct, p.duration_tolerance_seconds))
     else:  # fall back to the plan's own frame count
         fps = Fraction(plan.sequence.fps)
         actual = float(Fraction(plan.total_duration_frames) / fps)
-        tol = max(float(p.target_duration_seconds) * p.duration_tolerance_pct / 100, p.duration_tolerance_seconds)
-        ok = abs(actual - float(p.target_duration_seconds)) <= tol
+        tol = max(target * p.duration_tolerance_pct / 100, p.duration_tolerance_seconds)
+        ok = abs(actual - target) <= tol
         results.append(C.CheckResult("total_duration", C.PASS if ok else C.FAIL, f"plan duration {actual:.2f}s (read-back unavailable)"))
 
     probe = None

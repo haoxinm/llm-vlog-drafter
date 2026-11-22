@@ -64,6 +64,14 @@ class PlanSettings:
                                                 or DEFAULT_STILL_SECONDS))
 
 
+def effective_plan_settings(config: Any) -> PlanSettings:
+    """`PlanSettings.from_config` with the target duration accepted revisions moved (see `Config.set_revision_overrides`): the plan a revision
+    makes records the target it was made for. Planning itself always uses `from_config`."""
+    from dataclasses import replace
+
+    return replace(PlanSettings.from_config(config), target_duration_seconds=float(getattr(config, "effective_target_seconds", config.project.target_duration_seconds)))
+
+
 @dataclass
 class _Resolved:
     clip: SelectionClip
