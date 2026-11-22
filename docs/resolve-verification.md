@@ -184,3 +184,68 @@ V2 title 0-60 then portrait 60-120; A1 landscape audio; A2 music at -6 dB with f
    title (expect offline or empty); portrait clip size/scale; marker position and name; audio sync of the first 4 s against `preview.mp4`.
 4. Screenshot the Edit page and the import log per format.
 5. Pass: one format has correct order, in/out, duration, fps and online media. Transitions and markers are bonus; titles are expected to fail.
+
+## resolve-finish
+
+`trip-vlog resolve-finish` (DESIGN 15.6) goes one step further than the verifier: it finishes the handoff inside Resolve Studio and verifies the
+result. The verifier (`tools/resolve_verify.py`) uses a throw-away scratch project and deletes it; `resolve-finish` creates a **real new project that
+stays**, so you can continue editing there. Both share the code in `src/trip_vlog/resolve/`; `tools/resolve_verify.py` still runs from a repo checkout
+with plain `python` (no install needed, it uses the checkout's `src/`).
+
+### Prerequisites
+
+* DaVinci Resolve **Studio** 21.x running, *External scripting using = Local* (Preferences > System > General), Resolve restarted afterwards.
+* `trip-vlog` installed (`pipx install .` or `pip install -e .`) with a finished draft: `trip-vlog draft ...` (or `resume`) completed the handoff stage,
+  so `<workspace>/resolve_handoff/` has `timeline.xml`, `media_manifest.csv`, `edit_plan.json` and the media sits at the same absolute paths.
+* A Python that can load Resolve's `fusionscript` library: 64-bit CPython. Proven with Python 3.14 on Windows 11 and Resolve Studio 21.1.1.10;
+  3.10-3.12 is the documented lowest-risk range. If the connection fails the command prints the Python version it runs on and this advice.
+* Save your open Resolve work first: creating the new project closes the current one.
+
+### Run it
+
+```powershell
+# Windows (PowerShell)
+trip-vlog resolve-finish --output "D:\Trips\Iceland" --dry-run      # prints the plan, changes nothing
+trip-vlog resolve-finish --output "D:\Trips\Iceland"
+```
+
+```bash
+# macOS (Terminal)
+trip-vlog resolve-finish --output ~/Trips/Iceland --dry-run
+trip-vlog resolve-finish --output ~/Trips/Iceland
+```
+
+Options: `--project-name NAME` (the new project; an existing name is refused), `--keep-on-failure` (leave a title that could not be verified in the
+timeline instead of rolling it back). Non-default install locations: set `RESOLVE_SCRIPT_API` / `RESOLVE_SCRIPT_LIB` as for the verifier.
+Exit codes: `0` finished, `1` required checks failed, `2` preconditions/arguments, `3` scripting unavailable (nothing changed).
+
+### What it changes
+
+* Creates one project `<title> (trip-vlog vNNN)` (NNN counts up over Resolve's project list and earlier runs recorded in `manifest.json`), one imported
+  timeline `<sequence> (trip-vlog <timestamp>)`, media pool entries for the media, and for each title a helper timeline `trip-vlog title N [...]`.
+* Never deletes or modifies an existing project, never touches media files, never calls `DeleteProject`, `LoadProject` or `CloseProject`. The only
+  deletions are of items this run created, during rollback of a title that could not be verified.
+* `MediaPoolItem.ReplaceClip` is called only with paths listed in `media_manifest.csv`, and only for media that arrived offline or as an image sequence.
+* Observed on Resolve Studio 21.1.1.10: `ReplaceClip` returns False for a still that has numbered siblings in its folder (e.g. `261010_stars_-318.jpg` ..
+  `-377.jpg`), but works for a still without (`still_1080p.png`, `261010_stars_final.jpg`). For stills only, `resolve-finish` then copies that single file to
+  `resolve_handoff/stills/<key>/<original name>` (`<key>` = 12 hex of a hash of the source path; reused on re-runs; the original is only read) and
+  calls `ReplaceClip` with the copy, which is allowed by the guard only for a manifest still and only for that exact location. The report lists the
+  copies (`staged_copies`, "Media repairs"), and the final media-path check accepts them. The Resolve project then references these copies, so keep
+  `resolve_handoff/stills/` with the project. Video and audio never get this fallback.
+* Writes `resolve_handoff/resolve_finish_report.json` / `.md` and records the run in `manifest.json` (stage `resolve_finish`, shown by `trip-vlog status`).
+
+### Titles are experimental
+
+Titles are not carried by FCP7 XML. The command tries (per title): a helper timeline with `InsertFusionTitleIntoTimeline("Text+")`, text set through the
+Fusion comp (`StyledText`), then `MediaPool.AppendToTimeline` of the helper timeline on the intended track and frame (`trackIndex`, `recordFrame`, trimmed
+with `startFrame`/`endFrame`). These calls are not yet proven on real Resolve. Each step is read back; any failure rolls the title back and the report
+lists it under "titles need manual recreation" (text, track, frame range). Size and position from the spec are not applied. The baseline planner does
+not generate titles, so a plain `draft` has none to create.
+
+### What to send back
+
+`resolve_handoff/resolve_finish_report.json` and `.md` (they contain every API call with its result, the repairs and the final read-back table), the
+console output, your Resolve version (Help > About) and Python version. If a title step failed, the report's `titles[].steps` shows how far it got and
+what the timeline contained; if anything else looks wrong in Resolve, a screenshot of the Edit page and Workspace > Console output help. The created
+project is left in your Project Manager for inspection; delete it by hand if you do not want it.
+
